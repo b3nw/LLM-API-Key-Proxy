@@ -110,8 +110,9 @@ BASE_URLS = [
 # Required headers for Antigravity API calls
 # These headers are CRITICAL for gemini-3-pro-high/low to work
 # Without X-Goog-Api-Client and Client-Metadata, only gemini-3-pro-preview works
+# User-Agent matches official Antigravity Electron client
 ANTIGRAVITY_HEADERS = {
-    "User-Agent": "antigravity/1.12.4 windows/amd64",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Antigravity/1.104.0 Chrome/138.0.7204.235 Electron/37.3.1 Safari/537.36",
     "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
     "Client-Metadata": '{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}',
 }
@@ -722,13 +723,14 @@ def _clean_claude_schema(schema: Any, for_gemini: bool = False) -> Any:
     - Removes unsupported validation keywords at schema-definition level
     - Preserves property NAMES even if they match validation keyword names
       (e.g., a tool parameter named "pattern" is preserved)
-    - For Gemini: passes through most keywords including $schema, anyOf, oneOf, const
+    - Always strips: $schema, $id, $ref, $defs, definitions, default, examples, title
+    - Always converts: const → enum (API doesn't support const)
+    - For Gemini: passes through anyOf, oneOf, allOf (API converts internally)
     - For Claude:
       - Merges allOf schemas into a single schema
       - Flattens anyOf/oneOf using scoring (object > array > primitive > null)
       - Detects enum patterns in unions and merges them
-      - Converts const to enum
-      - Strips unsupported validation keywords
+      - Strips additional validation keywords (minItems, pattern, format, etc.)
     - For Gemini: passes through additionalProperties as-is
     - For Claude: normalizes permissive additionalProperties to true
     """
@@ -737,11 +739,16 @@ def _clean_claude_schema(schema: Any, for_gemini: bool = False) -> Any:
 
     # Meta/structural keywords - always remove regardless of context
     # These are JSON Schema infrastructure, never valid property names
+    # Note: 'parameters' key rejects these (unlike 'parametersJsonSchema')
     meta_keywords = {
         "$id",
         "$ref",
         "$defs",
+        "$schema",  # Rejected by 'parameters' key
         "definitions",
+        "default",  # Rejected by 'parameters' key
+        "examples",  # Rejected by 'parameters' key
+        "title",  # May cause issues in nested objects
     }
 
     # Validation keywords - only remove at schema-definition level,
@@ -749,14 +756,12 @@ def _clean_claude_schema(schema: Any, for_gemini: bool = False) -> Any:
     # Note: These are common property names that could be used by tools:
     # - "pattern" (glob, grep, regex tools)
     # - "format" (export, date/time tools)
-    # - "default" (config tools)
-    # - "title" (document tools)
     # - "minimum"/"maximum" (range tools)
     #
-    # Keywords to strip for Claude only (Gemini accepts these):
-    # Claude rejects most JSON Schema validation keywords
+    # Keywords to strip for Claude only (Gemini with 'parametersJsonSchema' accepts these,
+    # but we now use 'parameters' key which may silently ignore some):
+    # Note: $schema, default, examples, title moved to meta_keywords (always stripped)
     validation_keywords_claude_only = {
-        "$schema",
         "minItems",
         "maxItems",
         "uniqueItems",
@@ -778,9 +783,6 @@ def _clean_claude_schema(schema: Any, for_gemini: bool = False) -> Any:
         "deprecated",
         "readOnly",
         "writeOnly",
-        "examples",
-        "title",
-        "default",
     }
 
     # Handle 'anyOf', 'oneOf', and 'allOf' for Claude
@@ -852,19 +854,30 @@ def _clean_claude_schema(schema: Any, for_gemini: bool = False) -> Any:
                 return selected
 
     cleaned = {}
-    # Handle 'const' by converting to 'enum' with single value (Claude only)
-    # Gemini supports const, so pass through for Gemini
-    if "const" in schema and not for_gemini:
+    # Handle 'const' by converting to 'enum' with single value
+    # The 'parameters' key doesn't support 'const', so always convert
+    # Also add 'type' if not present, since enum requires type: "string"
+    if "const" in schema:
         const_value = schema["const"]
         cleaned["enum"] = [const_value]
+        # Gemini requires type when using enum - infer from const value or default to string
+        if "type" not in schema:
+            if isinstance(const_value, bool):
+                cleaned["type"] = "boolean"
+            elif isinstance(const_value, int):
+                cleaned["type"] = "integer"
+            elif isinstance(const_value, float):
+                cleaned["type"] = "number"
+            else:
+                cleaned["type"] = "string"
 
     for key, value in schema.items():
         # Always skip meta keywords
         if key in meta_keywords:
             continue
 
-        # Skip "const" for Claude (already converted to enum above)
-        if key == "const" and not for_gemini:
+        # Skip "const" (already converted to enum above)
+        if key == "const":
             continue
 
         # Strip Claude-only keywords when not targeting Gemini
@@ -2741,7 +2754,8 @@ class AntigravityProvider(
         Apply strict schema enforcement to all tools in a list.
 
         Wraps the mixin's _enforce_strict_schema() method to operate on a list of tools,
-        applying 'additionalProperties: false' to each tool's parametersJsonSchema.
+        applying 'additionalProperties: false' to each tool's schema.
+        Supports both 'parametersJsonSchema' and 'parameters' keys.
         """
         if not tools:
             return tools
@@ -2749,11 +2763,14 @@ class AntigravityProvider(
         modified = copy.deepcopy(tools)
         for tool in modified:
             for func_decl in tool.get("functionDeclarations", []):
-                if "parametersJsonSchema" in func_decl:
-                    # Delegate to mixin's singular _enforce_strict_schema method
-                    func_decl["parametersJsonSchema"] = self._enforce_strict_schema(
-                        func_decl["parametersJsonSchema"]
-                    )
+                # Support both parametersJsonSchema and parameters keys
+                for schema_key in ("parametersJsonSchema", "parameters"):
+                    if schema_key in func_decl:
+                        # Delegate to mixin's singular _enforce_strict_schema method
+                        func_decl[schema_key] = self._enforce_strict_schema(
+                            func_decl[schema_key]
+                        )
+                        break  # Only process one schema key per function
 
         return modified
 
@@ -3240,11 +3257,19 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
 
         For Gemini models, all tools are placed in a SINGLE functionDeclarations array.
         This matches the format expected by Gemini CLI and prevents MALFORMED_FUNCTION_CALL errors.
+
+        Uses 'parameters' key for all models. The Antigravity API backend expects this format.
+        Schema cleaning is applied based on target model (Claude vs Gemini).
         """
         if not tools:
             return None
 
         function_declarations = []
+
+        # Always use 'parameters' key - Antigravity API expects this for all models
+        # Previously used 'parametersJsonSchema' but this caused MALFORMED_FUNCTION_CALL
+        # errors with Gemini 3 Pro models. Using 'parameters' works for all backends.
+        schema_key = "parameters"
 
         for tool in tools:
             if tool.get("type") != "function":
@@ -3285,11 +3310,11 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                     }
                     schema["required"] = ["_confirm"]
 
-                func_decl["parametersJsonSchema"] = schema
+                func_decl[schema_key] = schema
             else:
                 # No parameters provided - use default with required confirm param
                 # to ensure the tool call is emitted properly
-                func_decl["parametersJsonSchema"] = {
+                func_decl[schema_key] = {
                     "type": "object",
                     "properties": {
                         "_confirm": {
@@ -3531,30 +3556,7 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
                                 first_func_seen = True
                             # Subsequent parallel calls: leave as-is (no signature)
 
-        # Claude-specific tool schema transformation
-        if internal_model.startswith("claude-sonnet-") or internal_model.startswith(
-            "claude-opus-"
-        ):
-            self._apply_claude_tool_transform(antigravity_payload)
-
         return antigravity_payload
-
-    def _apply_claude_tool_transform(self, payload: Dict[str, Any]) -> None:
-        """Apply Claude-specific tool schema transformations.
-
-        Converts parametersJsonSchema to parameters and applies Claude-specific
-        schema sanitization (inlines $ref, removes unsupported JSON Schema fields).
-        """
-        tools = payload["request"].get("tools", [])
-        for tool in tools:
-            for func_decl in tool.get("functionDeclarations", []):
-                if "parametersJsonSchema" in func_decl:
-                    params = func_decl["parametersJsonSchema"]
-                    if isinstance(params, dict):
-                        params = inline_schema_refs(params)
-                        params = _clean_claude_schema(params)
-                    func_decl["parameters"] = params
-                    del func_decl["parametersJsonSchema"]
 
     # =========================================================================
     # RESPONSE TRANSFORMATION

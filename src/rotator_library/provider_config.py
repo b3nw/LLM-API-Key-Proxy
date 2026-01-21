@@ -498,6 +498,24 @@ PROVIDER_CATEGORIES = [
 ]
 
 # =============================================================================
+# First-Party Provider Defaults
+# =============================================================================
+# Providers with custom implementations in providers/ that aren't in LiteLLM.
+# These need default api_base values since they're not in SCRAPED_PROVIDERS.
+# Used by ProviderConfig._load_api_bases() to provide defaults.
+# =============================================================================
+
+FIRST_PARTY_PROVIDER_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    "firmware": {
+        "api_base_url": "https://app.firmware.ai/api/v1",
+    },
+    "nanogpt": {
+        # Alias for nano-gpt - NanoGptProvider uses nanogpt/ prefix but LiteLLM uses nano-gpt/
+        "api_base_url": "https://nano-gpt.com/api/v1",
+    },
+}
+
+# =============================================================================
 # Provider Blacklist
 # =============================================================================
 # Providers that are in LiteLLM but should be excluded from:
@@ -655,11 +673,24 @@ class ProviderConfig:
 
     def _load_api_bases(self) -> None:
         """
-        Load all <PROVIDER>_API_BASE environment variables.
-
-        Detects whether each is an override for a known provider
-        or defines a new custom provider.
+        Load API base URLs from multiple sources (in order of precedence):
+        1. SCRAPED_PROVIDERS defaults (lowest priority)
+        2. FIRST_PARTY_PROVIDER_DEFAULTS (for custom providers with implementations)
+        3. Environment variables (highest priority - user overrides)
         """
+        # Load defaults from SCRAPED_PROVIDERS
+        for provider_key, info in SCRAPED_PROVIDERS.items():
+            default_base = info.get("api_base_url")
+            if default_base and provider_key not in PROVIDER_BLACKLIST:
+                self._api_bases[provider_key] = default_base.rstrip("/")
+
+        # Load defaults from first-party providers (custom implementations)
+        for provider_key, info in FIRST_PARTY_PROVIDER_DEFAULTS.items():
+            default_base = info.get("api_base_url")
+            if default_base:
+                self._api_bases[provider_key] = default_base.rstrip("/")
+
+        # Load overrides from environment (highest priority)
         for key, value in os.environ.items():
             if key.endswith("_API_BASE") and value:
                 provider = key[:-9].lower()  # Remove _API_BASE

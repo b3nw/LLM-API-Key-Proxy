@@ -106,16 +106,6 @@ def _register_providers():
                     f"Registered provider: {provider_name}"
                 )
 
-    # Set default API bases for known providers that need them
-    # This ensures ProviderConfig sees these values when it initializes
-    _provider_default_api_bases = {
-        "firmware": "https://app.firmware.ai/api/v1",
-    }
-    for provider, default_base in _provider_default_api_bases.items():
-        env_key = f"{provider.upper()}_API_BASE"
-        if not os.environ.get(env_key):
-            os.environ[env_key] = default_base
-
     # Then, create dynamic plugins for custom OpenAI-compatible providers
     # These use the pattern: <NAME>_API_BASE where NAME is not a known LiteLLM provider
     # Known providers just get their api_base overridden via ProviderConfig

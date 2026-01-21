@@ -347,16 +347,6 @@ SCRAPED_PROVIDERS: dict[str, dict] = {
         "features": ['streaming', 'vision', 'document_inlining', 'reasoning_effort', 'function_calling', 'audio_transcription', 'rerank'],
         "model_count": 18,
     },
-    "firmware": {
-        "display_name": 'Firmware.ai',
-        "route": 'firmware/',
-        "api_key_env_vars": ['FIRMWARE_API_KEY'],
-        "api_base_env_vars": ['FIRMWARE_API_BASE'],
-        "api_base_url": 'https://app.firmware.ai/api/v1',
-        "endpoints": ['/chat/completions', '/models'],
-        "features": ['streaming'],
-        "model_count": 0,
-    },
     "friendliai": {
         "display_name": 'FriendliAI',
         "route": 'friendliai/',

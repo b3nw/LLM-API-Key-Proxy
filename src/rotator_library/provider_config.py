@@ -115,6 +115,9 @@ LITELLM_PROVIDERS: Dict[str, Dict[str, Any]] = {
             ("FIREWORKS_AI_API_BASE", "API Base URL (optional)", None),
         ],
     },
+    "firmware": {
+        "category": "cloud",
+    },
     "replicate": {
         "category": "cloud",
     },

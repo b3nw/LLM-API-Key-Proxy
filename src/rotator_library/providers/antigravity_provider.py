@@ -176,6 +176,19 @@ INJECT_IDENTITY_OVERRIDE = env_bool("ANTIGRAVITY_INJECT_IDENTITY_OVERRIDE", True
 # This significantly reduces token usage while maintaining compatibility with Antigravity API
 USE_SHORT_ANTIGRAVITY_PROMPTS = env_bool("ANTIGRAVITY_USE_SHORT_PROMPTS", True)
 
+# Google Search Grounding configuration
+# Injects Gemini's native google_search tool for real-time web search grounding
+# "off" = disabled (default)
+# "on" = inject google_search when client provides tools
+# "always" = inject google_search even for pure chat (no client tools)
+_google_search_raw = os.getenv("ANTIGRAVITY_GOOGLE_SEARCH", "off").lower().strip()
+if _google_search_raw not in ("off", "on", "always"):
+    lib_logger.warning(
+        f"Invalid ANTIGRAVITY_GOOGLE_SEARCH value '{_google_search_raw}', defaulting to 'off'"
+    )
+    _google_search_raw = "off"
+ANTIGRAVITY_GOOGLE_SEARCH = _google_search_raw
+
 # Identity override instruction - injected after Antigravity prompt to neutralize it
 # This tells the model to disregard the preceding identity and follow actual user instructions
 ANTIGRAVITY_IDENTITY_OVERRIDE_INSTRUCTION = """<system_override priority="highest">
@@ -3234,27 +3247,51 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
     # =========================================================================
 
     def _build_tools_payload(
-        self, tools: Optional[List[Dict[str, Any]]], model: str
+        self,
+        tools: Optional[List[Dict[str, Any]]],
+        model: str,
     ) -> Optional[List[Dict[str, Any]]]:
         """Build Gemini-format tools from OpenAI tools.
 
         For Gemini models, all tools are placed in a SINGLE functionDeclarations array.
         This matches the format expected by Gemini CLI and prevents MALFORMED_FUNCTION_CALL errors.
+
+        When ANTIGRAVITY_GOOGLE_SEARCH is enabled, injects native google_search grounding.
+        Any client tool named 'google_search' is removed to avoid conflicts with native grounding.
+
+        Args:
+            tools: List of OpenAI-format tools
+            model: Model name
+
+        Returns:
+            Gemini-format tools list including functionDeclarations and optionally google_search
         """
-        if not tools:
-            return None
-
+        # Build function declarations from tools
         function_declarations = []
+        has_google_search_conflict = False
 
-        for tool in tools:
+        for tool in tools or []:
             if tool.get("type") != "function":
                 continue
 
             func = tool.get("function", {})
+            tool_name = func.get("name", "")
+
+            # Check for conflict with native google_search grounding
+            if (
+                tool_name.lower() == "google_search"
+                and ANTIGRAVITY_GOOGLE_SEARCH != "off"
+            ):
+                has_google_search_conflict = True
+                lib_logger.debug(
+                    "[Search] Removing client 'google_search' tool - using native grounding instead"
+                )
+                continue  # Skip this tool, will use native grounding
+
             params = func.get("parameters")
 
             func_decl = {
-                "name": self._sanitize_tool_name(func.get("name", "")),
+                "name": self._sanitize_tool_name(tool_name),
                 "description": func.get("description", ""),
             }
 
@@ -3302,12 +3339,36 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
 
             function_declarations.append(func_decl)
 
-        if not function_declarations:
+        # Build the final tools list
+        result_tools: List[Dict[str, Any]] = []
+
+        if function_declarations:
+            result_tools.append({"functionDeclarations": function_declarations})
+
+        # Inject googleSearch grounding based on configuration
+        # Note: Uses camelCase "googleSearch" to match Antigravity API format
+        if ANTIGRAVITY_GOOGLE_SEARCH == "always":
+            # Always inject, even with no client tools
+            result_tools.append({"googleSearch": {}})
+            lib_logger.debug(
+                f"[Search] Injecting googleSearch grounding (mode=always, tools={len(function_declarations)})"
+            )
+        elif ANTIGRAVITY_GOOGLE_SEARCH == "on" and function_declarations:
+            # Inject only when client provides tools
+            result_tools.append({"googleSearch": {}})
+            lib_logger.debug(
+                f"[Search] Injecting googleSearch grounding alongside {len(function_declarations)} function tools"
+            )
+
+        if has_google_search_conflict:
+            lib_logger.info(
+                "[Search] Client 'google_search' tool replaced with native Gemini grounding"
+            )
+
+        if not result_tools:
             return None
 
-        # Return all tools in a SINGLE functionDeclarations array
-        # This is the format Gemini CLI uses and prevents MALFORMED_FUNCTION_CALL errors
-        return [{"functionDeclarations": function_declarations}]
+        return result_tools
 
     def _transform_to_antigravity_format(
         self,
@@ -3564,6 +3625,30 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         """Extract Gemini response from Antigravity envelope."""
         return response.get("response", response)
 
+    def _extract_grounding_metadata(
+        self,
+        candidate: Dict[str, Any],
+        response: Dict[str, Any],
+        accumulator: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Extract and include grounding metadata from Google Search.
+
+        Args:
+            candidate: The Gemini candidate containing groundingMetadata
+            response: The response dict to add metadata to
+            accumulator: Optional accumulator for streaming responses
+        """
+        grounding_metadata = candidate.get("groundingMetadata")
+        if grounding_metadata:
+            response["grounding_metadata"] = grounding_metadata
+            # Also extract search entry point if present
+            search_entry_point = grounding_metadata.get("searchEntryPoint")
+            if search_entry_point:
+                response["search_entry_point"] = search_entry_point
+            # Accumulate for final response (streaming only)
+            if accumulator is not None:
+                accumulator["grounding_metadata"] = grounding_metadata
+
     def _gemini_to_openai_chunk(
         self,
         chunk: Dict[str, Any],
@@ -3673,6 +3758,9 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
 
         if usage:
             response["usage"] = usage
+
+        # Extract and include grounding metadata from Google Search
+        self._extract_grounding_metadata(candidate, response, accumulator)
 
         return response
 
@@ -4052,7 +4140,7 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         if gen_config:
             gemini_payload["generationConfig"] = gen_config
 
-        # Add tools
+        # Add tools (with optional google_search grounding injection)
         gemini_tools = self._build_tools_payload(tools, model)
 
         if gemini_tools:

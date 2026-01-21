@@ -39,6 +39,40 @@ def env_int(key: str, default: int) -> int:
 # Google Code Assist API endpoint (used by Gemini CLI and Antigravity providers)
 CODE_ASSIST_ENDPOINT = "https://cloudcode-pa.googleapis.com/v1internal"
 
+# Gemini CLI endpoint fallback chain
+# Sandbox endpoints may have separate/higher rate limits than production
+# Order: sandbox daily -> production (fallback)
+GEMINI_CLI_ENDPOINT_FALLBACKS = [
+    "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal",  # Sandbox daily
+    "https://cloudcode-pa.googleapis.com/v1internal",  # Production fallback
+]
+
+# =============================================================================
+# ANTIGRAVITY ENDPOINTS
+# =============================================================================
+
+# Antigravity API endpoint constants
+# Sandbox endpoints often have different rate limits or newer features
+ANTIGRAVITY_ENDPOINT_DAILY = (
+    "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal"
+)
+ANTIGRAVITY_ENDPOINT_PROD = "https://cloudcode-pa.googleapis.com/v1internal"
+# ANTIGRAVITY_ENDPOINT_AUTOPUSH = "https://autopush-cloudcode-pa.sandbox.googleapis.com/v1internal"  # Reserved for future use
+
+# Antigravity endpoint fallback chain for API requests
+# Order: sandbox daily -> production (matches CLIProxy/Vibeproxy behavior)
+ANTIGRAVITY_ENDPOINT_FALLBACKS = [
+    ANTIGRAVITY_ENDPOINT_DAILY,  # Daily sandbox first
+    ANTIGRAVITY_ENDPOINT_PROD,  # Production fallback
+]
+
+# Endpoint order for loadCodeAssist (project discovery)
+# Production first for better project resolution, then fallback to sandbox
+ANTIGRAVITY_LOAD_ENDPOINT_ORDER = [
+    ANTIGRAVITY_ENDPOINT_PROD,  # Prod first for discovery
+    ANTIGRAVITY_ENDPOINT_DAILY,  # Daily fallback
+]
+
 
 # =============================================================================
 # GEMINI 3 TOOL RENAMING CONSTANTS

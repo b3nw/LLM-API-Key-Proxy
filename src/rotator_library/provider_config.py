@@ -510,7 +510,8 @@ FIRST_PARTY_PROVIDER_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "api_base_url": "https://app.firmware.ai/api/v1",
     },
     "nanogpt": {
-        # Alias for nano-gpt - NanoGptProvider uses nanogpt/ prefix but LiteLLM uses nano-gpt/
+        # NanoGptProvider uses 'nanogpt/' prefix but LiteLLM docs use 'nano-gpt/'
+        # SCRAPED_PROVIDERS handles 'nano-gpt', this handles our 'nanogpt' variant
         "api_base_url": "https://nano-gpt.com/api/v1",
     },
 }
@@ -696,8 +697,8 @@ class ProviderConfig:
                 provider = key[:-9].lower()  # Remove _API_BASE
                 self._api_bases[provider] = value.rstrip("/")
 
-                # Track if this is a custom provider (not known to LiteLLM)
-                if provider not in KNOWN_PROVIDERS:
+                # Track if this is a custom provider (not known to LiteLLM or first-party)
+                if provider not in KNOWN_PROVIDERS and provider not in FIRST_PARTY_PROVIDER_DEFAULTS:
                     self._custom_providers.add(provider)
                     lib_logger.info(
                         f"Detected custom OpenAI-compatible provider: {provider} "

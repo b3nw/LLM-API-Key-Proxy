@@ -503,8 +503,9 @@ PROVIDER_CATEGORIES = [
 # =============================================================================
 # First-Party Provider Defaults
 # =============================================================================
-# Providers with custom implementations in providers/ that aren't in LiteLLM.
-# These need default api_base values since they're not in SCRAPED_PROVIDERS.
+# Providers with custom implementations in providers/ that aren't scraped from
+# LiteLLM docs (not in SCRAPED_PROVIDERS). These need default api_base values.
+# Note: These should also be added to LITELLM_PROVIDERS for UI category display.
 # Used by ProviderConfig._load_api_bases() to provide defaults.
 # =============================================================================
 
@@ -723,7 +724,7 @@ class ProviderConfig:
                     lib_logger.debug(f"API base override for {provider}: {value}")
 
     def is_known_provider(self, provider: str) -> bool:
-        """Check if provider is known to LiteLLM."""
+        """Check if provider is known (LiteLLM or first-party)."""
         return provider.lower() in KNOWN_PROVIDERS
 
     def is_custom_provider(self, provider: str) -> bool:

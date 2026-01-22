@@ -118,6 +118,9 @@ LITELLM_PROVIDERS: Dict[str, Dict[str, Any]] = {
     "firmware": {
         "category": "cloud",
     },
+    "nanogpt": {
+        "category": "cloud",
+    },
     "replicate": {
         "category": "cloud",
     },
@@ -564,15 +567,17 @@ PROVIDER_BLACKLIST: Set[str] = {
 
 def _build_known_providers_set() -> Set[str]:
     """
-    Build set of known provider routes from scraped LiteLLM data.
+    Build set of known provider routes from scraped LiteLLM data and first-party providers.
 
     Uses routes as the primary identifier (authoritative from LiteLLM docs).
     Only uses API key prefix as fallback when provider has no route.
 
+    Also includes first-party providers (custom implementations with default api_base).
+
     Excludes providers in PROVIDER_BLACKLIST.
 
     Returns:
-        Set of lowercase provider route identifiers known to LiteLLM.
+        Set of lowercase provider route identifiers known to the system.
     """
     known = set()
 
@@ -593,6 +598,12 @@ def _build_known_providers_set() -> Set[str]:
                 if prefix:
                     known.add(prefix)
                     break  # Only need one fallback
+
+    # Add first-party providers (custom implementations with default api_base)
+    # Also filter through PROVIDER_BLACKLIST for consistency
+    for provider_key in FIRST_PARTY_PROVIDER_DEFAULTS:
+        if provider_key not in PROVIDER_BLACKLIST:
+            known.add(provider_key)
 
     return known
 
@@ -687,6 +698,9 @@ class ProviderConfig:
 
         # Load defaults from first-party providers (custom implementations)
         for provider_key, info in FIRST_PARTY_PROVIDER_DEFAULTS.items():
+            # Skip blacklisted providers (defensive - shouldn't normally happen)
+            if provider_key in PROVIDER_BLACKLIST:
+                continue
             default_base = info.get("api_base_url")
             if default_base:
                 self._api_bases[provider_key] = default_base.rstrip("/")
@@ -697,17 +711,16 @@ class ProviderConfig:
                 provider = key[:-9].lower()  # Remove _API_BASE
                 self._api_bases[provider] = value.rstrip("/")
 
-                # Track if this is a custom provider (not known to LiteLLM or first-party)
-                if provider not in KNOWN_PROVIDERS and provider not in FIRST_PARTY_PROVIDER_DEFAULTS:
+                # Track if this is a custom provider (not in KNOWN_PROVIDERS)
+                # Note: KNOWN_PROVIDERS includes both LiteLLM and first-party providers
+                if provider not in KNOWN_PROVIDERS:
                     self._custom_providers.add(provider)
                     lib_logger.info(
                         f"Detected custom OpenAI-compatible provider: {provider} "
                         f"(api_base: {value})"
                     )
                 else:
-                    lib_logger.info(
-                        f"Detected API base override for {provider}: {value}"
-                    )
+                    lib_logger.debug(f"API base override for {provider}: {value}")
 
     def is_known_provider(self, provider: str) -> bool:
         """Check if provider is known to LiteLLM."""

@@ -90,7 +90,7 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
         """
         Get all models in a quota group.
 
-        For Firmware.ai, we use a virtual model "_quota" to track the
+        For Firmware.ai, we use a virtual model "firmware/_quota" to track the
         credential-level 5-hour rolling window quota.
 
         Args:

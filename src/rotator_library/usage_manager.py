@@ -1263,6 +1263,27 @@ class UsageManager:
         except (OSError, ValueError, OverflowError):
             return None
 
+    def _format_timestamp_iso(self, ts: Optional[float]) -> Optional[str]:
+        """
+        Format Unix timestamp as ISO 8601 UTC string for API responses.
+
+        Args:
+            ts: Unix timestamp or None
+
+        Returns:
+            Formatted string like "2025-12-07T14:30:17Z" or None
+        """
+        if ts is None:
+            return None
+        try:
+            return (
+                datetime.fromtimestamp(ts, tz=timezone.utc)
+                .isoformat(timespec="seconds")
+                .replace("+00:00", "Z")
+            )
+        except (OSError, ValueError, OverflowError):
+            return None
+
     def _add_readable_timestamps(self, data: Dict) -> Dict:
         """
         Add human-readable timestamp fields to usage data before saving.
@@ -3820,7 +3841,13 @@ class UsageManager:
                             ),
                             "approx_cost": model_stats.get("approx_cost", 0.0),
                             "window_start_ts": model_stats.get("window_start_ts"),
+                            "window_start_iso": self._format_timestamp_iso(
+                                model_stats.get("window_start_ts")
+                            ),
                             "quota_reset_ts": model_stats.get("quota_reset_ts"),
+                            "reset_time_iso": self._format_timestamp_iso(
+                                model_stats.get("quota_reset_ts")
+                            ),
                             # Quota baseline fields (Antigravity-specific)
                             "baseline_remaining_fraction": model_stats.get(
                                 "baseline_remaining_fraction"

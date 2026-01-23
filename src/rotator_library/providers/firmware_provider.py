@@ -13,7 +13,11 @@ Environment variables:
 import asyncio
 import httpx
 import os
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, AsyncGenerator, Dict, List, Optional, Union, TYPE_CHECKING
+
+import litellm
+
+from ..error_handler import EmptyResponseError
 
 from .provider_interface import ProviderInterface
 from .utilities.firmware_quota_tracker import FirmwareQuotaTracker
@@ -27,6 +31,21 @@ lib_logger = logging.getLogger("rotator_library")
 
 # Concurrency limit for parallel quota fetches
 QUOTA_FETCH_CONCURRENCY = 5
+
+
+def _env_int(name: str, default: int) -> int:
+    """Parse an integer from environment variable with fallback to default."""
+    try:
+        return int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+
+
+# Empty response retry configuration
+# When Firmware.ai returns an empty response (no content, no tool calls),
+# automatically retry up to this many attempts before giving up
+FIRMWARE_EMPTY_RESPONSE_ATTEMPTS = max(1, _env_int("FIRMWARE_EMPTY_RESPONSE_ATTEMPTS", 3))
+FIRMWARE_EMPTY_RESPONSE_DELAY = max(0, _env_int("FIRMWARE_EMPTY_RESPONSE_DELAY", 2))
 
 
 class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
@@ -60,6 +79,10 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
         self.api_base = os.environ.get(
             "FIRMWARE_API_BASE", "https://app.firmware.ai/api/v1"
         )
+
+    def has_custom_logic(self) -> bool:
+        """FirmwareProvider uses custom acompletion for empty response retry logic."""
+        return True
 
     def get_model_quota_group(self, model: str) -> Optional[str]:
         """
@@ -220,3 +243,81 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
                 refresh_single_credential(api_key, client) for api_key in credentials
             ]
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    # =========================================================================
+    # CUSTOM ACOMPLETION WITH EMPTY RESPONSE RETRY
+    # =========================================================================
+
+    async def acompletion(
+        self, client: httpx.AsyncClient, **kwargs  # client unused - LiteLLM manages its own
+    ) -> Union[litellm.ModelResponse, AsyncGenerator[litellm.ModelResponse, None]]:
+        """
+        Handle completion calls with empty response retry logic.
+
+        For streaming requests, wraps the LiteLLM stream and retries if
+        zero chunks are received (empty response from Firmware.ai).
+
+        Note: client parameter is for ProviderInterface compliance; LiteLLM
+        manages its own HTTP client internally.
+        """
+        is_streaming = kwargs.get("stream", False)
+        model = kwargs.get("model", "unknown")
+
+        # Set Firmware.ai as the api_base for LiteLLM (allow per-request override)
+        kwargs.setdefault("api_base", self.api_base)
+
+        # For non-streaming, just pass through to LiteLLM
+        if not is_streaming:
+            return await litellm.acompletion(**kwargs)
+
+        # For streaming, wrap with retry logic
+        return self._streaming_with_retry(model, **kwargs)
+
+    async def _streaming_with_retry(
+        self, model: str, **kwargs
+    ) -> AsyncGenerator[litellm.ModelResponse, None]:
+        """
+        Streaming wrapper that retries on empty responses.
+
+        Mirrors AntigravityProvider's empty response handling pattern.
+        """
+        empty_error_msg = (
+            "Firmware.ai returned an empty response after multiple attempts. "
+            "This may indicate a temporary service issue. Please try again."
+        )
+
+        for attempt in range(FIRMWARE_EMPTY_RESPONSE_ATTEMPTS):
+            chunk_count = 0
+
+            try:
+                response = await litellm.acompletion(**kwargs)
+
+                async for chunk in response:
+                    chunk_count += 1
+                    yield chunk
+
+                if chunk_count > 0:
+                    return  # Success - we got data
+
+                # Zero chunks - empty response
+                if attempt < FIRMWARE_EMPTY_RESPONSE_ATTEMPTS - 1:
+                    lib_logger.warning(
+                        f"[Firmware] Empty stream from {model}, "
+                        f"attempt {attempt + 1}/{FIRMWARE_EMPTY_RESPONSE_ATTEMPTS}. Retrying..."
+                    )
+                    await asyncio.sleep(FIRMWARE_EMPTY_RESPONSE_DELAY)
+                    continue
+                else:
+                    # Last attempt failed
+                    raise EmptyResponseError(
+                        provider="firmware",
+                        model=model,
+                        message=empty_error_msg,
+                    )
+
+            except EmptyResponseError:
+                raise  # Don't catch our own error
+            except Exception as e:
+                # Log but don't retry on other errors - let them propagate
+                lib_logger.error(f"[Firmware] Error during streaming from {model}: {e}")
+                raise

@@ -1116,7 +1116,7 @@ class QuotaViewer:
                 credentials = sorted(credentials, key=natural_sort_key)
                 for idx, cred in enumerate(credentials, 1):
                     identifier = cred.get("identifier", f"credential {idx}")
-                    email = cred.get("email", identifier)
+                    email = cred.get("email") or identifier
                     self.console.print(
                         f"   F{idx}. Force refresh [{idx}] only ({email})"
                     )

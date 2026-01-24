@@ -197,10 +197,50 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
                                     model_or_group="firmware/_quota",
                                     source="api_quota",
                                 )
+
+                        # Calculate quota values from ratio for display
+                        # Firmware.ai API returns used as a ratio (0-1), not absolute counts
+                        # We estimate max_requests from local count and API ratio
+                        used_ratio = usage_data.get("used", 0.0)
+                        quota_max = None
+                        quota_used = None
+
+                        if used_ratio > 0:
+                            # Get current local request count for this group
+                            stable_id = usage_manager.registry.get_stable_id(
+                                api_key, usage_manager.provider
+                            )
+                            state = usage_manager.states.get(stable_id)
+                            if state:
+                                group_stats = state.get_group_stats(
+                                    "firmware_global", create=False
+                                )
+                                if group_stats:
+                                    # Find the primary window to get request count
+                                    primary_def = (
+                                        usage_manager._window_manager.get_primary_definition()
+                                    )
+                                    if primary_def:
+                                        window = group_stats.windows.get(primary_def.name)
+                                        if window and window.request_count > 0:
+                                            # Estimate: if used_ratio = 0.5 and we have 100 req
+                                            # then max ≈ 100 / 0.5 = 200
+                                            estimated_max = int(
+                                                window.request_count / used_ratio
+                                            )
+                                            # Round to nearest 10 for cleaner display
+                                            quota_max = max(
+                                                window.request_count,
+                                                ((estimated_max + 5) // 10) * 10,
+                                            )
+                                            quota_used = window.request_count
+
                         await usage_manager.update_quota_baseline(
                             api_key,
                             "firmware/_quota",  # Virtual model for credential-level tracking
+                            quota_max_requests=quota_max,
                             quota_reset_ts=reset_ts,
+                            quota_used=quota_used,
                         )
 
                         lib_logger.debug(

@@ -1281,6 +1281,30 @@ class UsageManager:
 
         return []
 
+    def _get_group_models_from_data(
+        self, state: "CredentialState", group: str
+    ) -> List[str]:
+        """
+        Get models from actual usage data that belong to a quota group.
+
+        Unlike _get_grouped_models which returns a static list from the provider,
+        this method finds models dynamically from actual usage data. This is
+        necessary for providers like Firmware where all models share a quota pool
+        but the provider can't enumerate all possible models upfront.
+
+        Args:
+            state: Credential state containing model usage data
+            group: Group name (e.g., "firmware_global")
+
+        Returns:
+            List of model names from model_usage that belong to the group
+        """
+        return [
+            model
+            for model in state.model_usage
+            if self._get_model_quota_group(model) == group
+        ]
+
     async def save(self, force: bool = False) -> bool:
         """
         Save usage data to file.
@@ -1552,13 +1576,19 @@ class UsageManager:
         consistent started_at, reset_at, and limit values. All models
         in a quota group share the same timing since they share API quota.
 
+        Uses dynamic model discovery from actual usage data, which is necessary
+        for providers like Firmware where all models share a quota pool but
+        the provider can't enumerate all possible models upfront.
+
         Args:
             state: Credential state containing model stats
             group_key: Quota group name
             group_window: The authoritative group window
             window_name: Name of the window to sync (e.g., "5h")
         """
-        models_in_group = self._get_grouped_models(group_key)
+        # Use dynamic model discovery from actual usage data
+        # This handles providers like Firmware where models can't be enumerated upfront
+        models_in_group = self._get_group_models_from_data(state, group_key)
         for model_name in models_in_group:
             model_stats = state.get_model_stats(model_name, create=False)
             if model_stats:

@@ -1598,7 +1598,7 @@ class GoogleOAuthBase:
             "",
             f"{prefix}_ACCESS_TOKEN={creds.get('access_token', '')}",
             f"{prefix}_REFRESH_TOKEN={creds.get('refresh_token', '')}",
-            f"{prefix}_SCOPE={creds.get('scope', '')}",
+            f'{prefix}_SCOPE="{creds.get("scope", "")}"',
             f"{prefix}_TOKEN_TYPE={creds.get('token_type', 'Bearer')}",
             f"{prefix}_ID_TOKEN={creds.get('id_token', '')}",
             f"{prefix}_EXPIRY_DATE={creds.get('expiry_date', 0)}",

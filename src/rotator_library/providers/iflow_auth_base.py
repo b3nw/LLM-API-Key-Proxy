@@ -1641,7 +1641,7 @@ class IFlowAuthBase:
             f"{prefix}_EXPIRY_DATE={creds.get('expiry_date', '')}",
             f"{prefix}_EMAIL={email}",
             f"{prefix}_TOKEN_TYPE={creds.get('token_type', 'Bearer')}",
-            f"{prefix}_SCOPE={creds.get('scope', 'read write')}",
+            f'{prefix}_SCOPE="{creds.get("scope", "read write")}"',
         ]
 
         return lines

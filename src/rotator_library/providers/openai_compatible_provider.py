@@ -5,7 +5,6 @@ import os
 import httpx
 import logging
 from typing import List, Dict, Any, Optional
-from .provider_interface import ProviderInterface
 from ..model_definitions import ModelDefinitions
 
 lib_logger = logging.getLogger("rotator_library")
@@ -14,12 +13,17 @@ if not lib_logger.handlers:
     lib_logger.addHandler(logging.NullHandler())
 
 
-class OpenAICompatibleProvider(ProviderInterface):
+class OpenAICompatibleProvider:
     """
     Generic provider implementation for any OpenAI-compatible API.
     This provider can be configured via environment variables to support
     custom OpenAI-compatible endpoints without requiring code changes.
     Supports both dynamic model discovery and static model definitions.
+
+    NOTE: This class intentionally does NOT inherit from ProviderInterface
+    to avoid the SingletonABCMeta metaclass, which would cause all instances
+    to share state. Each DynamicPlugin needs its own OpenAICompatibleProvider
+    instance with its own provider_name and api_base.
 
     Environment variable pattern:
         <NAME>_API_BASE - The API base URL (required)
@@ -84,12 +88,10 @@ class OpenAICompatibleProvider(ProviderInterface):
                     f"Discovered {len(dynamic_models)} additional models for {self.provider_name}"
                 )
 
-        except httpx.RequestError:
-            # Silently ignore dynamic discovery errors
-            pass
-        except Exception:
-            # Silently ignore dynamic discovery errors
-            pass
+        except httpx.RequestError as e:
+            lib_logger.debug(f"Dynamic discovery failed for {self.provider_name}: {e}")
+        except Exception as e:
+            lib_logger.debug(f"Dynamic discovery failed for {self.provider_name}: {e}")
 
         return models
 

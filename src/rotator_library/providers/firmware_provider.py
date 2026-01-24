@@ -245,17 +245,19 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
                             )
                             state = usage_manager.states.get(stable_id)
                             if state:
-                                group_stats = state.get_group_stats(
-                                    "firmware_global", create=False
-                                )
+                                # Get group stats - create=True ensures it exists
+                                group_stats = state.get_group_stats("firmware_global")
                                 if group_stats:
-                                    # Find the primary window to get request count
+                                    # Get the primary window name
                                     primary_def = (
                                         usage_manager._window_manager.get_primary_definition()
                                     )
                                     if primary_def:
-                                        window = group_stats.windows.get(primary_def.name)
-                                        if window and window.request_count > 0:
+                                        # Get or create window to ensure it exists
+                                        window = usage_manager._window_manager.get_or_create_window(
+                                            group_stats.windows, primary_def.name
+                                        )
+                                        if window.request_count > 0:
                                             # Estimate: if used_ratio = 0.5 and we have 100 req
                                             # then max ≈ 100 / 0.5 = 200
                                             estimated_max = int(

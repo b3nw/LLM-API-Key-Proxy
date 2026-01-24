@@ -271,26 +271,42 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
         manages its own HTTP client internally.
         """
         is_streaming = kwargs.get("stream", False)
-        model = kwargs.get("model", "unknown")
 
         # Set Firmware.ai as the api_base for LiteLLM (allow per-request override)
         kwargs.setdefault("api_base", self.api_base)
+
+        # For custom providers, the client passes credential_identifier instead of api_key
+        # Extract it and pass to LiteLLM as api_key
+        credential = kwargs.pop("credential_identifier", None)
+        if credential:
+            kwargs.setdefault("api_key", credential)
+
+        # Remove transaction_context - not needed by LiteLLM
+        kwargs.pop("transaction_context", None)
+
+        # Transform model name for LiteLLM's OpenAI provider
+        # "firmware/anthropic/claude-opus-4-5" -> "openai/anthropic/claude-opus-4-5"
+        # This tells LiteLLM to use the OpenAI provider with custom api_base
+        model = kwargs.get("model", "")
+        if model.startswith("firmware/"):
+            kwargs["model"] = "openai/" + model[len("firmware/"):]
 
         # For non-streaming, just pass through to LiteLLM
         if not is_streaming:
             return await litellm.acompletion(**kwargs)
 
         # For streaming, wrap with retry logic
-        return self._streaming_with_retry(model, **kwargs)
+        return self._streaming_with_retry(**kwargs)
 
     async def _streaming_with_retry(
-        self, model: str, **kwargs
+        self, **kwargs
     ) -> AsyncGenerator[litellm.ModelResponse, None]:
         """
         Streaming wrapper that retries on empty responses.
 
         Mirrors AntigravityProvider's empty response handling pattern.
         """
+        model = kwargs.get("model", "unknown")
         empty_error_msg = (
             "Firmware.ai returned an empty response after multiple attempts. "
             "This may indicate a temporary service issue. Please try again."

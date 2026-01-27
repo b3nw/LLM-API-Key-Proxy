@@ -189,8 +189,7 @@ class CursorProvider(CursorQuotaTracker, OpenAICompatibleProvider):
                         model_data = usage_data.get("models", {}).get(model_name, {})
                         primary_used = model_data.get("numRequests", 0)
 
-                # Calculate reset timestamp from start_of_month + ~30 days
-                # Note: Cursor billing resets monthly; using 30 days as approximation
+                # Calculate reset timestamp from start_of_month + 1 month
                 start_of_month = usage_data.get("start_of_month")
                 reset_ts = None
                 if start_of_month:
@@ -200,11 +199,19 @@ class CursorProvider(CursorQuotaTracker, OpenAICompatibleProvider):
                         if start_str.endswith("Z"):
                             start_str = start_str.replace("Z", "+00:00")
                         dt = datetime.fromisoformat(start_str)
-                        # Add ~30 days for next reset (Cursor billing cycle)
-                        reset_dt = dt + timedelta(days=30)
+                        # Add 1 month for next reset (Cursor billing cycle)
+                        # Use relativedelta if available for accurate monthly calculation
+                        try:
+                            from dateutil.relativedelta import relativedelta
+                            reset_dt = dt + relativedelta(months=1)
+                        except ImportError:
+                            # Fallback to 30 days if dateutil not installed
+                            reset_dt = dt + timedelta(days=30)
                         reset_ts = reset_dt.timestamp()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        lib_logger.warning(
+                            f"Failed to calculate quota reset timestamp from '{start_of_month}': {e}"
+                        )
 
                 # Apply to all credentials using virtual model
                 for api_key in credentials:

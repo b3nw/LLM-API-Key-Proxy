@@ -90,12 +90,14 @@ def _register_providers():
         module = importlib.import_module(full_module_path)
 
         # Look for a class that inherits from ProviderInterface
+        # and is defined in this module (not just imported)
         for attribute_name in dir(module):
             attribute = getattr(module, attribute_name)
             if (
                 isinstance(attribute, type)
                 and issubclass(attribute, ProviderInterface)
                 and attribute is not ProviderInterface
+                and getattr(attribute, "__module__", None) == full_module_path
             ):
                 # Derives 'gemini_cli' from 'gemini_cli_provider.py'
                 # Remap 'nvidia' to 'nvidia_nim' to align with litellm's provider name

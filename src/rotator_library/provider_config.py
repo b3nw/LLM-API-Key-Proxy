@@ -741,15 +741,12 @@ class ProviderConfig:
             )
         else:
             # Custom provider - route through OpenAI-compatible endpoint
-            # Use openai_like/ prefix to avoid litellm's model-specific behaviors
-            # (e.g., forcing /v1/responses API for gpt-5.x models)
-            # See: https://github.com/BerriAI/litellm/issues/16847
             model_name = model.split("/", 1)[1] if "/" in model else model
-            kwargs["model"] = f"openai_like/{model_name}"
+            kwargs["model"] = f"openai/{model_name}"
             kwargs["api_base"] = api_base
-            kwargs["custom_llm_provider"] = "openai_like"
+            kwargs["custom_llm_provider"] = "openai"
             lib_logger.debug(
-                f"Routing custom provider {provider} through openai_like: "
+                f"Routing custom provider {provider} through openai: "
                 f"model={kwargs['model']}, api_base={api_base}"
             )
 

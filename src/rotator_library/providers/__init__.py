@@ -48,13 +48,13 @@ class DynamicOpenAICompatibleProvider:
 
         self.model_definitions = ModelDefinitions()
 
-    def get_models(self, api_key: str, client):
+    async def get_models(self, api_key: str, client):
         """Delegate to OpenAI-compatible provider implementation."""
         from .openai_compatible_provider import OpenAICompatibleProvider
 
         # Create temporary instance to reuse logic
         temp_provider = OpenAICompatibleProvider(self.provider_name)
-        return temp_provider.get_models(api_key, client)
+        return await temp_provider.get_models(api_key, client)
 
     def get_model_options(self, model_name: str) -> Dict[str, any]:
         """Get model options from static definitions."""

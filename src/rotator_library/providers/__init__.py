@@ -2,10 +2,14 @@
 # Copyright (c) 2026 Mirrowel
 
 import importlib
+import logging
 import pkgutil
 import os
 from typing import Dict, Type
 from .provider_interface import ProviderInterface
+
+# Module-level logger
+lib_logger = logging.getLogger("rotator_library")
 
 # --- Provider Plugin System ---
 
@@ -49,12 +53,54 @@ class DynamicOpenAICompatibleProvider:
         self.model_definitions = ModelDefinitions()
 
     async def get_models(self, api_key: str, client):
-        """Delegate to OpenAI-compatible provider implementation."""
-        from .openai_compatible_provider import OpenAICompatibleProvider
+        """
+        Fetch models from the OpenAI-compatible API.
+        Combines static definitions with dynamic discovery.
 
-        # Create temporary instance to reuse logic
-        temp_provider = OpenAICompatibleProvider(self.provider_name)
-        return await temp_provider.get_models(api_key, client)
+        Note: We implement this directly instead of delegating to OpenAICompatibleProvider
+        because OpenAICompatibleProvider is a singleton, and concurrent calls from multiple
+        dynamic providers would share the same instance (race condition).
+        """
+        models = []
+
+        # First, get static model definitions from PROVIDER_MODELS env var
+        static_models = self.model_definitions.get_all_provider_models(
+            self.provider_name
+        )
+        if static_models:
+            models.extend(static_models)
+            lib_logger.info(
+                f"Loaded {len(static_models)} static models for {self.provider_name}"
+            )
+
+        # Build set of static model names for efficient lookup
+        static_model_names = {m.split("/")[-1] for m in static_models}
+
+        # Then, try dynamic discovery to get additional models
+        try:
+            models_url = f"{self.api_base.rstrip('/')}/models"
+            response = await client.get(
+                models_url, headers={"Authorization": f"Bearer {api_key}"}
+            )
+            response.raise_for_status()
+
+            dynamic_models = [
+                f"{self.provider_name}/{model['id']}"
+                for model in response.json().get("data", [])
+                if model["id"] not in static_model_names
+            ]
+
+            if dynamic_models:
+                models.extend(dynamic_models)
+                lib_logger.debug(
+                    f"Discovered {len(dynamic_models)} additional models for {self.provider_name}"
+                )
+
+        except Exception as e:
+            # Log at debug level for troubleshooting, but don't fail - static models are sufficient
+            lib_logger.debug(f"Dynamic model discovery for {self.provider_name} failed: {e}")
+
+        return models
 
     def get_model_options(self, model_name: str) -> Dict[str, any]:
         """Get model options from static definitions."""

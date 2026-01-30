@@ -117,9 +117,14 @@ BASE_URLS = [
 # Required headers for Antigravity API calls
 # These headers are CRITICAL for gemini-3-pro-high/low to work
 # Without X-Goog-Api-Client and Client-Metadata, only gemini-3-pro-preview works
-# User-Agent matches official Antigravity Electron client
+ANTIGRAVITY_USER_AGENT = "antigravity/1.15.8 windows/amd64"
+ANTIGRAVITY_USER_AGENT_LEGACY = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Antigravity/1.104.0 Chrome/138.0.7204.235 "
+    "Electron/37.3.1 Safari/537.36"
+)
 ANTIGRAVITY_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Antigravity/1.104.0 Chrome/138.0.7204.235 Electron/37.3.1 Safari/537.36",
+    "User-Agent": ANTIGRAVITY_USER_AGENT,
     "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
     "Client-Metadata": '{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}',
 }
@@ -592,7 +597,7 @@ def _generate_stable_session_id(contents: List[Dict[str, Any]]) -> str:
                 if text:
                     # SHA256 hash and extract first 8 bytes as int64
                     h = hashlib.sha256(text.encode("utf-8")).digest()
-                    # Use big-endian to match Go's binary.BigEndian.Uint64
+                    # Use big-endian for 64-bit integer conversion
                     n = struct.unpack(">Q", h[:8])[0] & 0x7FFFFFFFFFFFFFFF
                     return f"-{n}"
 
@@ -1579,46 +1584,43 @@ class AntigravityProvider(
         self, credential_path: Optional[str] = None
     ) -> Dict[str, str]:
         """
-        Return the Antigravity API headers, optionally with device profile.
+        Return the Antigravity API headers with per-credential fingerprinting.
 
-        If credential_path is provided and has a valid email, builds dynamic
-        Client-Metadata header with device profile for hardware ID binding.
+        If credential_path is provided and has a valid email, returns complete
+        fingerprint headers (User-Agent, X-Goog-Api-Client, Client-Metadata,
+        X-Goog-QuotaUser, X-Client-Device-Id) unique to that credential.
         Otherwise returns static default headers.
 
         Args:
-            credential_path: Optional credential path for device profile lookup
+            credential_path: Optional credential path for fingerprint lookup
 
         Returns:
             Dict of HTTP headers for Antigravity API
         """
-        # Start with static headers (User-Agent, X-Goog-Api-Client)
-        headers = {
-            "User-Agent": ANTIGRAVITY_HEADERS["User-Agent"],
-            "X-Goog-Api-Client": ANTIGRAVITY_HEADERS["X-Goog-Api-Client"],
-        }
-
-        # Try to build dynamic Client-Metadata with device profile
+        # Try to get per-credential fingerprint headers
         if credential_path:
             email = self._get_credential_email(credential_path)
             if email:
                 try:
                     from .utilities.device_profile import (
-                        get_or_create_device_profile,
-                        build_client_metadata_header,
+                        get_or_create_fingerprint,
+                        build_fingerprint_headers,
                     )
 
-                    profile = get_or_create_device_profile(email)
-                    if profile:
-                        headers["Client-Metadata"] = build_client_metadata_header(
-                            profile
-                        )
-                        return headers
+                    fingerprint = get_or_create_fingerprint(email)
+                    if fingerprint:
+                        # Returns all 5 headers: User-Agent, X-Goog-Api-Client,
+                        # Client-Metadata, X-Goog-QuotaUser, X-Client-Device-Id
+                        return build_fingerprint_headers(fingerprint)
                 except Exception as e:
-                    lib_logger.debug(f"Failed to build device profile headers: {e}")
+                    lib_logger.debug(f"Failed to build fingerprint headers: {e}")
 
-        # Fallback to static Client-Metadata
-        headers["Client-Metadata"] = ANTIGRAVITY_HEADERS["Client-Metadata"]
-        return headers
+        # Fallback to static headers (no fingerprint available)
+        return {
+            "User-Agent": ANTIGRAVITY_HEADERS["User-Agent"],
+            "X-Goog-Api-Client": ANTIGRAVITY_HEADERS["X-Goog-Api-Client"],
+            "Client-Metadata": ANTIGRAVITY_HEADERS["Client-Metadata"],
+        }
 
     # NOTE: _load_tier_from_file() is inherited from GeminiCredentialManager mixin
     # NOTE: get_credential_tier_name() is inherited from GeminiCredentialManager mixin
@@ -3611,7 +3613,7 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
             # Then add existing parts (shifted to later positions)
             new_parts.extend(existing_parts)
 
-        # Set the combined system instruction with role "user" (per Go implementation)
+        # Set the combined system instruction with role "user"
         if new_parts:
             request[target_key] = {
                 "role": "user",
@@ -4714,7 +4716,14 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         # Reset internal attempt counter for this request (thread-safe via ContextVar)
         _internal_attempt_count.set(1)
 
-        for attempt in range(EMPTY_RESPONSE_MAX_ATTEMPTS):
+        # Use the maximum of all retry limits to ensure the loop runs enough iterations
+        # for whichever error type needs the most retries. Each error type enforces its
+        # own limit via internal checks (EMPTY_RESPONSE_MAX_ATTEMPTS for empty/429,
+        # CAPACITY_EXHAUSTED_MAX_ATTEMPTS for 503).
+        max_loop_attempts = max(
+            EMPTY_RESPONSE_MAX_ATTEMPTS, CAPACITY_EXHAUSTED_MAX_ATTEMPTS
+        )
+        for attempt in range(max_loop_attempts):
             chunk_count = 0
 
             try:

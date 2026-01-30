@@ -48,13 +48,43 @@ class DynamicOpenAICompatibleProvider:
 
         self.model_definitions = ModelDefinitions()
 
-    def get_models(self, api_key: str, client):
-        """Delegate to OpenAI-compatible provider implementation."""
-        from .openai_compatible_provider import OpenAICompatibleProvider
+    async def get_models(self, api_key: str, client):
+        """
+        Fetch models from the OpenAI-compatible API.
+        Combines static definitions with dynamic discovery.
 
-        # Create temporary instance to reuse logic
-        temp_provider = OpenAICompatibleProvider(self.provider_name)
-        return temp_provider.get_models(api_key, client)
+        Note: We can't delegate to OpenAICompatibleProvider because it's a singleton,
+        and concurrent calls from multiple dynamic providers would share the same instance.
+        """
+        models = []
+
+        # Get static model definitions from PROVIDER_MODELS env var
+        static_models = self.model_definitions.get_all_provider_models(
+            self.provider_name
+        )
+        if static_models:
+            models.extend(static_models)
+
+        # Try dynamic discovery to get additional models
+        try:
+            models_url = f"{self.api_base.rstrip('/')}/models"
+            response = await client.get(
+                models_url, headers={"Authorization": f"Bearer {api_key}"}
+            )
+            response.raise_for_status()
+
+            static_model_names = {m.split("/")[-1] for m in static_models}
+            dynamic_models = [
+                f"{self.provider_name}/{model['id']}"
+                for model in response.json().get("data", [])
+                if model["id"] not in static_model_names
+            ]
+            models.extend(dynamic_models)
+
+        except Exception:
+            pass  # Static models are sufficient if dynamic discovery fails
+
+        return models
 
     def get_model_options(self, model_name: str) -> Dict[str, any]:
         """Get model options from static definitions."""
@@ -90,12 +120,14 @@ def _register_providers():
         module = importlib.import_module(full_module_path)
 
         # Look for a class that inherits from ProviderInterface
+        # and is defined in this module (not just imported)
         for attribute_name in dir(module):
             attribute = getattr(module, attribute_name)
             if (
                 isinstance(attribute, type)
                 and issubclass(attribute, ProviderInterface)
                 and attribute is not ProviderInterface
+                and getattr(attribute, "__module__", None) == full_module_path
             ):
                 # Derives 'gemini_cli' from 'gemini_cli_provider.py'
                 # Remap 'nvidia' to 'nvidia_nim' to align with litellm's provider name

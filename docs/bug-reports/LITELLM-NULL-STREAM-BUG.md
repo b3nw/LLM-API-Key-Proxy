@@ -150,14 +150,65 @@ From `failures.log`:
 }
 ```
 
-## Hypothesis
+## Root Cause Analysis
 
-LiteLLM has a bug where, under specific conditions with large/complex payloads routed through the OpenAI-compatible path, `acompletion()` returns `None` instead of the expected `CustomStreamWrapper`. Possible causes:
+### Identified Code Path
 
-1. **Silent exception handling** that catches an error and returns None
-2. **Memory pressure** during async response object creation
-3. **Race condition** in streaming handler initialization
-4. **Timeout** in upstream connection handled incorrectly
+The bug is in **LiteLLM's `acompletion` function** (`litellm/main.py`, lines 593-625):
+
+```python
+# litellm/main.py:593-625
+try:
+    func = partial(completion, **completion_kwargs, **kwargs)
+    ctx = contextvars.copy_context()
+    func_with_context = partial(ctx.run, func)
+
+    init_response = await loop.run_in_executor(None, func_with_context)
+    if isinstance(init_response, dict) or isinstance(init_response, ModelResponse):
+        # CACHING SCENARIO
+        if isinstance(init_response, dict):
+            response = ModelResponse(**init_response)
+        response = init_response
+    elif asyncio.iscoroutine(init_response):
+        response = await init_response  # <-- Could return None if coroutine fails silently
+    else:
+        response = init_response  # type: ignore  # <-- Could be None
+
+    if isinstance(response, CustomStreamWrapper):
+        response.set_logging_event_loop(loop=loop)
+    return response  # <-- NO VALIDATION THAT response IS NOT None!
+```
+
+### Missing Validation
+
+LiteLLM lacks a critical check before returning:
+
+```python
+# What SHOULD exist:
+if response is None:
+    raise OpenAIError(
+        status_code=500,
+        message="acompletion returned None - empty response from provider"
+    )
+return response
+```
+
+### Flow for OpenAI-Compatible Streaming
+
+1. `litellm.acompletion()` calls `completion()` in a thread executor
+2. `completion()` calls `openai_chat_completions.completion()` with `acompletion=True`, `stream=True`
+3. This returns a **coroutine** to `async_streaming()`
+4. Back in `acompletion()`, `init_response` is the coroutine
+5. `response = await init_response` awaits the coroutine
+6. If something in `async_streaming()` fails silently (no exception raised), `response` is `None`
+7. **Return `None` without any validation**
+
+### Potential Triggers
+
+1. **Silent HTTP errors** from custom OpenAI-compatible providers not properly surfaced by httpx/openai SDK
+2. **Memory pressure** during large payload handling causing object creation to fail
+3. **Race condition** in the sync-to-async boundary via `run_in_executor`
+4. **OpenAI SDK edge case** where `with_raw_response.create()` returns empty on specific error conditions
 
 ## Workaround Applied
 
@@ -187,15 +238,42 @@ This prevents the `AttributeError` crash and enables the credential rotation/ret
 
 ## Recommended Actions
 
-1. **Update LiteLLM** to latest version to check if this is already fixed
-2. **File upstream bug** with LiteLLM if issue persists
-3. **Monitor** for recurrence after workaround deployment
+### Completed ✅
+1. **✅ Confirmed on latest LiteLLM** (v1.81.5) - Issue persists
+2. **✅ Applied workaround** - Defensive check in `streaming.py`
+3. **✅ Root cause analysis** - Identified missing validation in `acompletion()`
+
+### Next Steps
+1. **File upstream bug** with LiteLLM GitHub including:
+   - This root cause analysis
+   - Reproduction steps
+   - Proposed fix (add None validation before return)
+2. **Monitor logs** for `"Received None stream"` entries to track occurrence rate
+3. **Consider adding retry** at executor level for empty responses (optional, current workaround allows credential rotation which may suffice)
+
+### Proposed Upstream Fix
+
+Add validation in `litellm/main.py` before returning from `acompletion()`:
+
+```python
+# After line 624 (before return response)
+if response is None:
+    raise OpenAIError(
+        status_code=500,
+        message=f"acompletion returned None for model={model}, stream={stream}. "
+                "This typically indicates a silent failure in the response handling."
+    )
+return response
+```
 
 ## Related Files
 
-- `src/rotator_library/client/streaming.py` - Workaround location
-- `src/rotator_library/client/executor.py:796` - Where litellm.acompletion is called
-- `src/rotator_library/provider_config.py:696-743` - Custom provider routing logic
+| File | Purpose |
+|------|---------|
+| `src/rotator_library/client/streaming.py:82-95` | Workaround - None stream check |
+| `src/rotator_library/client/executor.py:796` | LiteLLM acompletion call |
+| `venv/.../litellm/main.py:593-625` | Root cause - acompletion function |
+| `venv/.../litellm/llms/openai/openai.py:953-1023` | async_streaming function |
 
 ## Commit Reference
 
@@ -206,4 +284,6 @@ fix/anthropic-nonstreaming-null-response @ e45d7f3
 ---
 
 **Prepared by**: Antigravity (AI Assistant)  
+**Updated**: 2026-01-30  
 **Reviewed by**: Pending
+

@@ -79,6 +79,21 @@ class StreamingHandler:
         thinking_tokens = 0
 
         # Use manual iteration to allow continue after partial JSON errors
+        if stream is None:
+            lib_logger.error(
+                f"Received None stream for model {model} - provider returned empty response"
+            )
+            if cred_context:
+                from ..error_handler import ClassifiedError
+                cred_context.mark_failure(
+                    ClassifiedError(
+                        error_type="empty_response",
+                        message="Provider returned empty stream",
+                        retry_after=None,
+                    )
+                )
+            raise StreamedAPIError("Provider returned empty stream", data=None)
+        
         stream_iterator = stream.__aiter__()
 
         try:

@@ -52,13 +52,17 @@ class TransactionEntry:
     prompt_tokens: Optional[int] = None
     completion_tokens: Optional[int] = None
     has_provider_logs: bool = False
+    # File availability info (lazy-loaded)
+    has_request: bool = False
+    has_response: bool = False
+    has_streaming: bool = False
     _metadata_loaded: bool = field(default=False, repr=False)
 
     def load_metadata(self) -> None:
         """Load metadata from metadata.json if available."""
         if self._metadata_loaded:
             return
-        
+
         metadata_path = self.dir_path / "metadata.json"
         if metadata_path.exists():
             try:
@@ -72,7 +76,43 @@ class TransactionEntry:
                 self.has_provider_logs = data.get("has_provider_logs", False)
             except (json.JSONDecodeError, IOError):
                 pass
+
+        # Check for file availability based on API format
+        provider_base_dir = self.dir_path
+        if self.api_format == "ant":
+            # Anthropic format: files at root and in openai/ subdirectory
+            self.has_request = (self.dir_path / "anthropic_request.json").exists()
+            self.has_response = (self.dir_path / "anthropic_response.json").exists()
+            openai_dir = self.dir_path / "openai"
+            self.has_streaming = (openai_dir / "streaming_chunks.jsonl").exists()
+            provider_base_dir = openai_dir
+        else:
+            # OAI format: files at root
+            self.has_request = (self.dir_path / "request.json").exists()
+            self.has_response = (self.dir_path / "response.json").exists()
+            self.has_streaming = (self.dir_path / "streaming_chunks.jsonl").exists()
+
+        if not self.has_provider_logs:
+            provider_dir = provider_base_dir / "provider"
+            self.has_provider_logs = provider_dir.exists() and any(provider_dir.iterdir())
+
         self._metadata_loaded = True
+
+    def get_log_level_indicator(self) -> str:
+        """Get an indicator showing the level of logging available.
+
+        Returns:
+            A string indicator:
+            - "📄" = metadata only
+            - "📋" = has request/response
+            - "📦" = has provider logs (full logging)
+        """
+        if self.has_provider_logs:
+            return "📦"  # Full logging with provider details
+        elif self.has_request or self.has_response:
+            return "📋"  # Has request/response
+        else:
+            return "📄"  # Metadata only
 
 
 @dataclass
@@ -195,27 +235,35 @@ class LogViewer:
         """Parse a transaction directory name into a TransactionEntry."""
         dir_name = dir_path.name
         parts = dir_name.split("_")
-        
-        # Expected format: MMDD_HHMMSS_{api_format}_{provider}_{model}_{request_id}
-        # Or older format: MMDD_HHMMSS_{provider}_{model}_{request_id}
+
+        # Expected format: MMDD_HHMMSS_{api_format}_{provider}_{model...}_{request_id}
+        # Or older format: MMDD_HHMMSS_{provider}_{model...}_{request_id}
+        # Note: model may contain underscores (from sanitized slashes like provider/lab/name)
+        # The request_id is always exactly 8 characters at the end
         if len(parts) < 5:
             return None
-        
+
         try:
             date_str = parts[0]  # MMDD
             time_str = parts[1]  # HHMMSS
-            
-            # Handle both old and new format
-            if len(parts) >= 6:
+
+            # Request ID is always the last part (8 chars from uuid4)
+            request_id = parts[-1]
+
+            # Handle both old and new format by detecting api_format
+            # New format has api_format like "oai" or "ant" at parts[2]
+            # Note: This assumes old-format logs don't have providers literally named "ant" or "oai"
+            if len(parts) >= 6 and parts[2] in ("oai", "ant"):
                 api_format = parts[2]
                 provider = parts[3]
-                model = parts[4]
-                request_id = parts[5]
+                model_start_index = 4
             else:
                 api_format = "oai"  # Default for old format
                 provider = parts[2]
-                model = parts[3]
-                request_id = parts[4]
+                model_start_index = 3
+
+            # Model is everything between provider and request_id
+            model = "_".join(parts[model_start_index:-1])
             
             # Parse timestamp from metadata.json for accuracy (has full year)
             full_timestamp = None
@@ -380,11 +428,12 @@ class LogViewer:
             table.add_column("Status", width=6, justify="center")
             table.add_column("Tokens", width=10, justify="right")
             table.add_column("Duration", width=8, justify="right")
-            
+            table.add_column("Logs", width=4, justify="center")
+
             for i, entry in enumerate(page_entries):
                 row_num = str(start_idx + i + 1)
                 ts = entry.timestamp.strftime("%m-%d %H:%M:%S")
-                
+
                 # Color-code status
                 status = str(entry.status_code) if entry.status_code else "-"
                 if entry.status_code == 200:
@@ -393,10 +442,11 @@ class LogViewer:
                     status = f"[yellow]{status}[/yellow]"
                 elif entry.status_code and entry.status_code >= 500:
                     status = f"[red]{status}[/red]"
-                
+
                 tokens = self._format_tokens(entry.prompt_tokens, entry.completion_tokens)
                 duration = self._format_duration(entry.duration_ms)
-                
+                log_indicator = entry.get_log_level_indicator()
+
                 table.add_row(
                     row_num,
                     ts,
@@ -405,14 +455,16 @@ class LogViewer:
                     status,
                     tokens,
                     duration,
+                    log_indicator,
                 )
-            
+
             self.console.print()
             self.console.print(table)
             self.console.print()
+            self.console.print("[dim]Logs: 📄=metadata only  📋=req/resp  📦=full (provider logs)[/dim]")
             self.console.print(f"Page {page + 1}/{total_pages}")
             self.console.print()
-            
+
             # Show different options based on filter state
             if self.filters.is_active():
                 self.console.print("[dim][N] Next  [P] Prev  [1-N] View Details  [F] Filter  [C] Clear Filters  [B] Back[/dim]")
@@ -511,34 +563,83 @@ class LogViewer:
             # Available files
             self.console.print("[bold]📁 Available Files[/bold]")
             self.console.print("━" * 50)
-            
-            files = []
-            for f in ["request.json", "response.json", "metadata.json", "streaming_chunks.jsonl"]:
-                if (entry.dir_path / f).exists():
-                    files.append(f)
-            
-            provider_dir = entry.dir_path / "provider"
-            if provider_dir.exists() and any(provider_dir.iterdir()):
-                files.append("provider/")
-            
-            for i, f in enumerate(files, 1):
-                self.console.print(f"   {i}. {f}")
+
+            files = []  # List of (display_name, actual_path) tuples
+
+            def _display_file_status(base_path: Path, files_to_check: List[Tuple[str, str]], display_prefix: str = "") -> None:
+                """Check for files and print their status."""
+                for filename, description in files_to_check:
+                    path = base_path / filename
+                    display_name = f"{display_prefix}{filename}"
+                    if path.exists():
+                        files.append((display_name, path))
+                        self.console.print(f"   {len(files)}. [green]✓[/green] {display_name} [dim]({description})[/dim]")
+                    else:
+                        self.console.print(f"      [dim]✗ {display_name}[/dim]")
+
+            def _display_provider_dir_status(provider_dir: Path, display_name: str) -> None:
+                """Check for provider directory and print its status."""
+                if provider_dir.exists() and any(provider_dir.iterdir()):
+                    files.append((display_name, provider_dir))
+                    self.console.print(f"   {len(files)}. [green]✓[/green] {display_name} [cyan](provider-level logs)[/cyan]")
+                else:
+                    self.console.print(f"      [dim]✗ {display_name} (no provider logs)[/dim]")
+
+            # Handle different API formats
+            if entry.api_format == "ant":
+                # Anthropic format
+                self.console.print("[dim]API Format: Anthropic[/dim]")
+                self.console.print()
+
+                ant_files = [
+                    ("anthropic_request.json", "Anthropic-native request"),
+                    ("anthropic_response.json", "Anthropic-native response"),
+                    ("metadata.json", "Transaction metadata"),
+                ]
+                _display_file_status(entry.dir_path, ant_files)
+
+                # Check for OpenAI translation subdirectory
+                openai_dir = entry.dir_path / "openai"
+                if openai_dir.exists():
+                    self.console.print()
+                    self.console.print("[dim]OpenAI Translation Layer:[/dim]")
+                    oai_files = [
+                        ("request.json", "OpenAI-compatible request"),
+                        ("response.json", "OpenAI-compatible response"),
+                        ("streaming_chunks.jsonl", "Streaming chunks"),
+                    ]
+                    _display_file_status(openai_dir, oai_files, display_prefix="openai/")
+                    _display_provider_dir_status(openai_dir / "provider", "openai/provider/")
+            else:
+                # OAI format
+                self.console.print("[dim]API Format: OpenAI[/dim]")
+                self.console.print()
+
+                expected_files = [
+                    ("request.json", "OpenAI-compatible request"),
+                    ("response.json", "OpenAI-compatible response"),
+                    ("metadata.json", "Transaction metadata"),
+                    ("streaming_chunks.jsonl", "Streaming chunks (if streaming)"),
+                ]
+                _display_file_status(entry.dir_path, expected_files)
+                _display_provider_dir_status(entry.dir_path / "provider", "provider/")
             
             self.console.print()
             self.console.print("[dim][1-N] View File  [B] Back[/dim]")
-            
+
             choice = Prompt.ask("Select", default="b").lower()
-            
+
             if choice == "b":
                 return
             elif choice.isdigit():
                 idx = int(choice) - 1
                 if 0 <= idx < len(files):
-                    filename = files[idx]
-                    if filename == "provider/":
-                        self._view_provider_logs(entry)
+                    display_name, path = files[idx]
+                    if display_name.endswith("/"):
+                        # It's a directory (provider logs)
+                        self._view_provider_logs_dir(path)
                     else:
-                        self._view_json_file(entry.dir_path / filename)
+                        self._view_json_file(path)
 
     def _view_json_file(self, file_path: Path) -> None:
         """Display JSON file with syntax highlighting."""
@@ -565,35 +666,44 @@ class LogViewer:
         Prompt.ask("Press Enter to go back", default="")
 
     def _view_provider_logs(self, entry: TransactionEntry) -> None:
-        """View provider-level logs."""
-        provider_dir = entry.dir_path / "provider"
-        
+        """View provider-level logs (legacy wrapper)."""
+        self._view_provider_logs_dir(entry.dir_path / "provider")
+
+    def _view_provider_logs_dir(self, provider_dir: Path) -> None:
+        """View provider-level logs from a directory path."""
         while True:
             self._clear_screen("📂 Provider Logs")
-            
-            files = list(provider_dir.iterdir())
+
+            files = sorted(provider_dir.iterdir(), key=lambda x: x.name) if provider_dir.exists() else []
             if not files:
                 self.console.print("[dim]No provider logs found.[/dim]")
                 Prompt.ask("Press Enter to go back", default="")
                 return
-            
+
             self.console.print()
             for i, f in enumerate(files, 1):
-                size = f.stat().st_size if f.is_file() else 0
-                size_str = f"{size/1024:.1f}KB" if size >= 1024 else f"{size}B"
-                self.console.print(f"   {i}. {f.name} ({size_str})")
-            
+                if f.is_dir():
+                    self.console.print(f"   {i}. 📁 {f.name}/")
+                else:
+                    size = f.stat().st_size
+                    size_str = f"{size/1024:.1f}KB" if size >= 1024 else f"{size}B"
+                    self.console.print(f"   {i}. {f.name} ({size_str})")
+
             self.console.print()
             self.console.print("[dim][1-N] View File  [B] Back[/dim]")
-            
+
             choice = Prompt.ask("Select", default="b").lower()
-            
+
             if choice == "b":
                 return
             elif choice.isdigit():
                 idx = int(choice) - 1
                 if 0 <= idx < len(files):
-                    self._view_json_file(files[idx])
+                    selected = files[idx]
+                    if selected.is_dir():
+                        self._view_provider_logs_dir(selected)
+                    else:
+                        self._view_json_file(selected)
 
     # ==================== Failure Log ====================
 

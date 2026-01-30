@@ -132,6 +132,16 @@ class AnthropicHandler:
                 **openai_request,
             )
 
+            # Handle null/empty response from upstream provider
+            if response is None:
+                from ..error_handler import EmptyResponseError
+
+                raise EmptyResponseError(
+                    provider=provider,
+                    model=original_model,
+                    message=f"Provider returned empty response for non-streaming request to {original_model}",
+                )
+
             # Convert OpenAI response to Anthropic format
             openai_response = (
                 response.model_dump()

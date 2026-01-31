@@ -12,6 +12,7 @@ scattered throughout client.py, including:
 - NVIDIA thinking parameter
 - iflow stream_options removal
 - dedaluslabs tool_choice=auto removal
+- kimi-k2.5 mandatory top_p
 
 Transforms are applied in a defined order with logging of modifications.
 """
@@ -62,6 +63,7 @@ class ProviderTransforms:
             "nvidia_nim": [self._transform_nvidia_thinking],
             "iflow": [self._transform_iflow_stream_options],
             "dedaluslabs": [self._transform_dedaluslabs_tool_choice],
+            "kimi-k2.5": [self._transform_kimi_parameters],
         }
 
     def _get_plugin_instance(self, provider: str) -> Optional[Any]:
@@ -371,6 +373,26 @@ class ProviderTransforms:
         if kwargs.get("tool_choice") == "auto":
             del kwargs["tool_choice"]
             return "dedaluslabs: removed tool_choice=auto"
+        return None
+
+    def _transform_kimi_parameters(
+        self,
+        kwargs: Dict[str, Any],
+        model: str,
+        provider: str,
+    ) -> Optional[str]:
+        """
+        Set top_p=0.95 for Kimi K2.5 models.
+
+        The Kimi K2.5 API (via various providers) strictly requires top_p to be 0.95.
+        Other values or missing top_p results in a 400 error.
+        """
+        if "kimi-k2.5" not in model.lower():
+            return None
+
+        if kwargs.get("top_p") != 0.95:
+            kwargs["top_p"] = 0.95
+            return "kimi-k2.5: set top_p=0.95 (mandatory)"
         return None
 
     # =========================================================================

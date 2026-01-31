@@ -565,16 +565,24 @@ class RequestExecutor:
                                 # Make the API call
                                 if plugin and plugin.has_custom_logic():
                                     kwargs["credential_identifier"] = cred
-                                    response = await plugin.acompletion(
-                                        self._http_client, **kwargs
-                                    )
+                                    if context.request_type == "embedding":
+                                        response = await plugin.aembedding(
+                                            self._http_client, **kwargs
+                                        )
+                                    else:
+                                        response = await plugin.acompletion(
+                                            self._http_client, **kwargs
+                                        )
                                 else:
                                     # Standard LiteLLM call
                                     kwargs["api_key"] = cred
                                     self._apply_litellm_logger(kwargs)
                                     # Remove internal context before litellm call
                                     kwargs.pop("transaction_context", None)
-                                    response = await litellm.acompletion(**kwargs)
+                                    if context.request_type == "embedding":
+                                        response = await litellm.aembedding(**kwargs)
+                                    else:
+                                        response = await litellm.acompletion(**kwargs)
 
                                 # Success! Extract token usage if available
                                 (

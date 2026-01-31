@@ -11,10 +11,11 @@ Provides an interactive interface for:
 
 import json
 import fnmatch
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
 from rich.console import Console
 from rich.panel import Panel
@@ -57,6 +58,94 @@ class TransactionEntry:
     has_response: bool = False
     has_streaming: bool = False
     _metadata_loaded: bool = field(default=False, repr=False)
+    # Extracted user prompt (lazy-loaded from request file)
+    user_prompt: Optional[str] = None
+    _prompt_loaded: bool = field(default=False, repr=False)
+    # Cached request data (lazy-loaded)
+    _request_data: Optional[Dict[str, Any]] = field(default=None, repr=False)
+    _request_loaded: bool = field(default=False, repr=False)
+
+    # Display constants
+    PROMPT_PREVIEW_LEN: ClassVar[int] = 30
+    CONVERSATION_TRUNCATE_LEN: ClassVar[int] = 500
+
+    def get_request_path(self) -> Path:
+        """Get the request file path based on API format."""
+        if self.api_format == "ant":
+            return self.dir_path / "anthropic_request.json"
+        return self.dir_path / "request.json"
+
+    def load_request_data(self) -> Optional[Dict[str, Any]]:
+        """Load and cache request data from the request file.
+        
+        Returns the messages array from the request, or None if unavailable.
+        """
+        if self._request_loaded:
+            return self._request_data
+        self._request_loaded = True
+
+        request_path = self.get_request_path()
+        if not request_path.exists():
+            return None
+
+        try:
+            with open(request_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            # Navigate to the actual request data
+            request_data = data.get("data", data)
+            self._request_data = request_data
+            return self._request_data
+        except (json.JSONDecodeError, IOError, KeyError) as e:
+            logging.debug(f"Failed to load request data from {request_path}: {e}")
+            return None
+
+    @staticmethod
+    def extract_text_from_content(content) -> Optional[str]:
+        """Extract text from message content, returns None if no text found.
+        
+        Handles both string content and array content formats.
+        Filters out system-reminder blocks.
+        """
+        if isinstance(content, str):
+            return content
+        elif isinstance(content, list):
+            text_parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    if item.get("type") == "text":
+                        text = item.get("text", "")
+                        # Skip system-reminder blocks
+                        if not text.strip().startswith("<system-reminder>"):
+                            text_parts.append(text)
+                elif isinstance(item, str):
+                    text_parts.append(item)
+            return "\n".join(text_parts).strip() if text_parts else None
+        return None
+
+    def load_user_prompt(self) -> None:
+        """Load the user prompt from the request file if available."""
+        if self._prompt_loaded:
+            return
+        self._prompt_loaded = True
+
+        request_data = self.load_request_data()
+        if not request_data:
+            return
+
+        messages = request_data.get("messages", [])
+        if not messages:
+            return
+
+        # Find user messages with actual text content (not just tool results)
+        # In agentic loops, later user messages are often just tool results,
+        # so we search forward to find the first message with text
+        for msg in messages:
+            if msg.get("role") == "user":
+                content = msg.get("content")
+                extracted = self.extract_text_from_content(content)
+                if extracted:
+                    self.user_prompt = extracted
+                    return
 
     def load_metadata(self) -> None:
         """Load metadata from metadata.json if available."""
@@ -176,6 +265,12 @@ class LogViewer:
         self.failures_log = self.logs_dir / "failures.log"
         self.filters = FilterState()
         self.page_size = 20
+
+    def _load_entry_data(self, entries: List[TransactionEntry]) -> None:
+        """Load metadata and prompt for a list of entries."""
+        for entry in entries:
+            entry.load_metadata()
+            entry.load_user_prompt()
 
     def _clear_screen(self, subtitle: str = "") -> None:
         """Clear screen and show header."""
@@ -390,9 +485,8 @@ class LogViewer:
         end_idx = min(start_idx + self.page_size, total)
         page_entries = entries[start_idx:end_idx]
         
-        # Load metadata for displayed entries
-        for entry in page_entries:
-            entry.load_metadata()
+        # Load metadata and prompts for displayed entries
+        self._load_entry_data(page_entries)
         
         while True:
             self._clear_screen(f"📜 Recent Transactions ({total} total)")
@@ -422,13 +516,14 @@ class LogViewer:
             # Build table
             table = Table(show_header=True, header_style="bold", box=None)
             table.add_column("#", style="dim", width=4)
-            table.add_column("Timestamp", width=17)
-            table.add_column("Provider", width=12)
-            table.add_column("Model", width=25, overflow="ellipsis")
-            table.add_column("Status", width=6, justify="center")
-            table.add_column("Tokens", width=10, justify="right")
-            table.add_column("Duration", width=8, justify="right")
-            table.add_column("Logs", width=4, justify="center")
+            table.add_column("Timestamp", width=14)
+            table.add_column("Provider", width=10)
+            table.add_column("Model", width=20, overflow="ellipsis")
+            table.add_column("Prompt", width=TransactionEntry.PROMPT_PREVIEW_LEN, overflow="ellipsis")
+            table.add_column("Status", width=5, justify="center")
+            table.add_column("Tokens", width=9, justify="right")
+            table.add_column("Duration", width=7, justify="right")
+            table.add_column("Logs", width=3, justify="center")
 
             for i, entry in enumerate(page_entries):
                 row_num = str(start_idx + i + 1)
@@ -444,14 +539,22 @@ class LogViewer:
                     status = f"[red]{status}[/red]"
 
                 tokens = self._format_tokens(entry.prompt_tokens, entry.completion_tokens)
-                duration = self._format_duration(entry.duration_ms)
                 log_indicator = entry.get_log_level_indicator()
+                # Truncate prompt for display
+                prompt = entry.user_prompt or "-"
+                max_len = TransactionEntry.PROMPT_PREVIEW_LEN
+                if len(prompt) > max_len:
+                    prompt = prompt[:max_len - 3] + "..."
+                # Replace newlines with spaces for table display
+                prompt = prompt.replace("\n", " ").replace("\r", "")
+                duration = self._format_duration(entry.duration_ms)
 
                 table.add_row(
                     row_num,
                     ts,
                     entry.provider,
                     entry.model,
+                    f"[dim]{prompt}[/dim]",
                     status,
                     tokens,
                     duration,
@@ -480,15 +583,13 @@ class LogViewer:
                 start_idx = page * self.page_size
                 end_idx = min(start_idx + self.page_size, total)
                 page_entries = entries[start_idx:end_idx]
-                for entry in page_entries:
-                    entry.load_metadata()
+                self._load_entry_data(page_entries)
             elif choice == "p" and page > 0:
                 page -= 1
                 start_idx = page * self.page_size
                 end_idx = min(start_idx + self.page_size, total)
                 page_entries = entries[start_idx:end_idx]
-                for entry in page_entries:
-                    entry.load_metadata()
+                self._load_entry_data(page_entries)
             elif choice == "f":
                 self.filter_menu()
                 # Reload with new filters
@@ -500,8 +601,7 @@ class LogViewer:
                 start_idx = 0
                 end_idx = min(self.page_size, total)
                 page_entries = entries[start_idx:end_idx]
-                for entry in page_entries:
-                    entry.load_metadata()
+                self._load_entry_data(page_entries)
             elif choice == "c":
                 # Clear all filters and reload
                 self.filters = FilterState()
@@ -513,8 +613,7 @@ class LogViewer:
                 start_idx = 0
                 end_idx = min(self.page_size, total)
                 page_entries = entries[start_idx:end_idx]
-                for entry in page_entries:
-                    entry.load_metadata()
+                self._load_entry_data(page_entries)
                 continue  # Force immediate screen refresh
             elif choice.isdigit():
                 idx = int(choice) - 1
@@ -625,12 +724,16 @@ class LogViewer:
                 _display_provider_dir_status(entry.dir_path / "provider", "provider/")
             
             self.console.print()
-            self.console.print("[dim][1-N] View File  [B] Back[/dim]")
+            self.console.print("[dim][1-N] View File  [P] View Prompt  [V] View Conversation  [B] Back[/dim]")
 
             choice = Prompt.ask("Select", default="b").lower()
 
             if choice == "b":
                 return
+            elif choice == "p":
+                self._view_prompt_only(entry)
+            elif choice == "v":
+                self._view_conversation(entry)
             elif choice.isdigit():
                 idx = int(choice) - 1
                 if 0 <= idx < len(files):
@@ -662,6 +765,122 @@ class LogViewer:
         except IOError as e:
             self.console.print(f"[red]Error reading file: {e}[/red]")
         
+        self.console.print()
+        Prompt.ask("Press Enter to go back", default="")
+
+    def _view_prompt_only(self, entry: TransactionEntry) -> None:
+        """Display just the user prompt, extracted from the request."""
+        self._clear_screen("💬 User Prompt")
+
+        # Load prompt if not already loaded
+        entry.load_user_prompt()
+
+        self.console.print()
+        self.console.print(f"[dim]Transaction: {entry.request_id}[/dim]")
+        self.console.print(f"[dim]Model: {entry.model}[/dim]")
+        self.console.print()
+        self.console.print("━" * 60)
+        self.console.print()
+
+        if entry.user_prompt:
+            # Wrap text at terminal width for readability
+            self.console.print(entry.user_prompt)
+        else:
+            self.console.print("[yellow]No user prompt found in request.[/yellow]")
+            self.console.print("[dim]This may happen if:[/dim]")
+            self.console.print("[dim]  • The request file doesn't exist[/dim]")
+            self.console.print("[dim]  • The request has no messages array[/dim]")
+            self.console.print("[dim]  • All content was tool results (no human text)[/dim]")
+
+        self.console.print()
+        Prompt.ask("Press Enter to go back", default="")
+
+    def _view_conversation(self, entry: TransactionEntry) -> None:
+        """Display the conversation messages without tools/system prompts."""
+        self._clear_screen("📝 Conversation")
+
+        self.console.print()
+        self.console.print(f"[dim]Transaction: {entry.request_id}[/dim]")
+        self.console.print(f"[dim]Model: {entry.model}[/dim]")
+        self.console.print()
+
+        request_data = entry.load_request_data()
+        if not request_data:
+            self.console.print("[yellow]Request file not found or invalid.[/yellow]")
+            self.console.print()
+            Prompt.ask("Press Enter to go back", default="")
+            return
+
+        messages = request_data.get("messages", [])
+
+        if not messages:
+            self.console.print("[yellow]No messages found in request.[/yellow]")
+            self.console.print()
+            Prompt.ask("Press Enter to go back", default="")
+            return
+
+        self.console.print(f"[bold]Messages ({len(messages)} turns):[/bold]")
+        self.console.print()
+
+        for i, msg in enumerate(messages, 1):
+            role = msg.get("role", "unknown")
+            content = msg.get("content")
+
+            # Role header with color coding
+            role_display_map = {
+                "user": "[bold cyan]👤 User[/bold cyan]",
+                "assistant": "[bold green]🤖 Assistant[/bold green]",
+                "system": "[bold yellow]⚙️ System[/bold yellow]",
+            }
+            role_display = role_display_map.get(role, f"[bold]{role}[/bold]")
+
+            self.console.print(f"[dim]───── Message {i} ─────[/dim]")
+            self.console.print(role_display)
+
+            if isinstance(content, str):
+                # Handle simple string content (common in OpenAI format)
+                max_len = TransactionEntry.CONVERSATION_TRUNCATE_LEN
+                display_text = content if len(content) <= max_len else content[:max_len - 3] + "..."
+                self.console.print(display_text)
+            elif isinstance(content, list):
+                text_parts = []
+                tool_uses = 0
+                tool_results = 0
+
+                for item in content:
+                    if isinstance(item, dict):
+                        item_type = item.get("type", "")
+                        if item_type == "text":
+                            text = item.get("text", "")
+                            # Skip system-reminder blocks
+                            if text.strip().startswith("<system-reminder>"):
+                                continue
+                            text_parts.append(text)
+                        elif item_type == "tool_use":
+                            tool_uses += 1
+                        elif item_type == "tool_result":
+                            tool_results += 1
+                    elif isinstance(item, str):
+                        text_parts.append(item)
+
+                # Show text content
+                if text_parts:
+                    combined = "\n".join(text_parts)
+                    max_len = TransactionEntry.CONVERSATION_TRUNCATE_LEN
+                    display_text = combined if len(combined) <= max_len else combined[:max_len - 3] + "..."
+                    self.console.print(display_text)
+
+                # Show tool summary
+                if tool_uses or tool_results:
+                    summaries = []
+                    if tool_uses:
+                        summaries.append(f"{tool_uses} tool call(s)")
+                    if tool_results:
+                        summaries.append(f"{tool_results} tool result(s)")
+                    self.console.print(f"[dim]  [{', '.join(summaries)}][/dim]")
+
+            self.console.print()
+
         self.console.print()
         Prompt.ask("Press Enter to go back", default="")
 

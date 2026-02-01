@@ -96,7 +96,7 @@ class TransactionEntry:
             request_data = data.get("data", data)
             self._request_data = request_data
             return self._request_data
-        except (json.JSONDecodeError, IOError, KeyError) as e:
+        except (json.JSONDecodeError, IOError, KeyError, AttributeError) as e:
             logging.debug(f"Failed to load request data from {request_path}: {e}")
             return None
 

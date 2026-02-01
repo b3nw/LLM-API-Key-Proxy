@@ -78,7 +78,8 @@ class TransactionEntry:
     def load_request_data(self) -> Optional[Dict[str, Any]]:
         """Load and cache request data from the request file.
         
-        Returns the messages array from the request, or None if unavailable.
+        Returns the full request data dictionary (containing 'messages', 'model', etc.),
+        or None if the file is unavailable or invalid.
         """
         if self._request_loaded:
             return self._request_data
@@ -100,27 +101,52 @@ class TransactionEntry:
             return None
 
     @staticmethod
+    def parse_content_details(content) -> Tuple[List[str], int, int]:
+        """Parse message content into text parts and tool usage counts.
+        
+        Handles both string content and array content formats.
+        System-reminder blocks are skipped (not included in text_parts).
+        
+        Returns:
+            Tuple of (text_parts, tool_use_count, tool_result_count)
+        """
+        text_parts: List[str] = []
+        tool_uses = 0
+        tool_results = 0
+
+        if isinstance(content, str):
+            text_parts.append(content)
+            return text_parts, tool_uses, tool_results
+
+        if not isinstance(content, list):
+            return text_parts, tool_uses, tool_results
+
+        for item in content:
+            if isinstance(item, dict):
+                item_type = item.get("type", "")
+                if item_type == "text":
+                    text = item.get("text", "")
+                    # Skip system-reminder blocks entirely
+                    if not text.strip().startswith("<system-reminder>"):
+                        text_parts.append(text)
+                elif item_type == "tool_use":
+                    tool_uses += 1
+                elif item_type == "tool_result":
+                    tool_results += 1
+            elif isinstance(item, str):
+                text_parts.append(item)
+
+        return text_parts, tool_uses, tool_results
+
+    @staticmethod
     def extract_text_from_content(content) -> Optional[str]:
         """Extract text from message content, returns None if no text found.
         
         Handles both string content and array content formats.
         Filters out system-reminder blocks.
         """
-        if isinstance(content, str):
-            return content
-        elif isinstance(content, list):
-            text_parts = []
-            for item in content:
-                if isinstance(item, dict):
-                    if item.get("type") == "text":
-                        text = item.get("text", "")
-                        # Skip system-reminder blocks
-                        if not text.strip().startswith("<system-reminder>"):
-                            text_parts.append(text)
-                elif isinstance(item, str):
-                    text_parts.append(item)
-            return "\n".join(text_parts).strip() if text_parts else None
-        return None
+        text_parts, _, _ = TransactionEntry.parse_content_details(content)
+        return "\n".join(text_parts).strip() if text_parts else None
 
     def load_user_prompt(self) -> None:
         """Load the user prompt from the request file if available."""
@@ -843,25 +869,8 @@ class LogViewer:
                 display_text = content if len(content) <= max_len else content[:max_len - 3] + "..."
                 self.console.print(display_text)
             elif isinstance(content, list):
-                text_parts = []
-                tool_uses = 0
-                tool_results = 0
-
-                for item in content:
-                    if isinstance(item, dict):
-                        item_type = item.get("type", "")
-                        if item_type == "text":
-                            text = item.get("text", "")
-                            # Skip system-reminder blocks
-                            if text.strip().startswith("<system-reminder>"):
-                                continue
-                            text_parts.append(text)
-                        elif item_type == "tool_use":
-                            tool_uses += 1
-                        elif item_type == "tool_result":
-                            tool_results += 1
-                    elif isinstance(item, str):
-                        text_parts.append(item)
+                # Use centralized parsing logic
+                text_parts, tool_uses, tool_results = TransactionEntry.parse_content_details(content)
 
                 # Show text content
                 if text_parts:

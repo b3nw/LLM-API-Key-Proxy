@@ -142,11 +142,23 @@ class AnthropicHandler:
             )
 
             # Convert OpenAI response to Anthropic format
+            # Handle null/empty responses by defaulting to empty dict
             openai_response = (
                 response.model_dump()
-                if hasattr(response, "model_dump")
-                else dict(response)
+                if response and hasattr(response, "model_dump")
+                else dict(response or {})
             )
+
+            # Validate response has choices - LiteLLM may return None or empty
+            # responses on malformed upstream replies
+            if not openai_response.get("choices"):
+                from ..error_handler import EmptyResponseError
+
+                raise EmptyResponseError(
+                    provider=provider,
+                    model=original_model,
+                    message=f"Provider returned empty or invalid response for non-streaming request to {original_model}",
+                )
             anthropic_response = openai_to_anthropic_response(
                 openai_response, original_model
             )

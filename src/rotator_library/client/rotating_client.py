@@ -381,6 +381,7 @@ class RotatingClient:
             provider=provider,
             kwargs=kwargs,
             streaming=False,
+            request_type="embedding",
             credentials=self.all_credentials.get(provider, []),
             deadline=time.time() + self.global_timeout,
             request=request,

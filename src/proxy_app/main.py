@@ -714,6 +714,116 @@ async def verify_anthropic_api_key(
     raise HTTPException(status_code=401, detail="Invalid or missing API Key")
 
 
+async def convert_to_sse_format(
+    request: Request,
+    response: Any,
+    logger: Optional[RawIOLogger] = None,
+) -> AsyncGenerator[str, None]:
+    """
+    Convert a non-streaming response to SSE format for clients expecting streaming.
+    
+    This is used when we internally force non-streaming (e.g., for NanoGPT thinking
+    models where LiteLLM drops the reasoning field in streaming mode) but the client
+    originally requested streaming.
+    
+    Args:
+        request: The original request object for disconnect checking
+        response: The non-streaming response object from LiteLLM
+        logger: Optional logger for raw I/O logging
+    """
+    try:
+        # Convert response to dict
+        response_dict = response.model_dump() if hasattr(response, 'model_dump') else response
+        
+        # Create a base for all chunks to reduce duplication
+        base_chunk_info = {
+            "id": response_dict.get("id"),
+            "created": response_dict.get("created"),
+            "model": response_dict.get("model"),
+            "object": "chat.completion.chunk",
+        }
+        
+        # Convert message to delta format
+        if response_dict.get("choices"):
+            original_choice = response_dict["choices"][0]
+            message = original_choice.get("message", {})
+            
+            # First chunk: send role and content
+            delta = {"role": message.get("role", "assistant")}
+            
+            # Include content if present
+            if message.get("content"):
+                delta["content"] = message["content"]
+            
+            # Include reasoning_content if present (the whole point of this workaround)
+            if message.get("reasoning_content"):
+                delta["reasoning_content"] = message["reasoning_content"]
+            
+            # Include provider_specific_fields from message
+            if message.get("provider_specific_fields"):
+                delta["provider_specific_fields"] = message["provider_specific_fields"]
+            
+            # First chunk with delta content
+            chunk = {
+                **base_chunk_info,
+                "system_fingerprint": response_dict.get("system_fingerprint"),
+                "choices": [{
+                    "index": 0,
+                    "delta": delta,
+                    "finish_reason": None,
+                    "logprobs": original_choice.get("logprobs"),
+                }],
+                "provider_specific_fields": response_dict.get("provider_specific_fields"),
+            }
+            
+            # Check for client disconnect before yielding
+            if await request.is_disconnected():
+                return
+            if logger:
+                logger.log_stream_chunk(chunk)
+            yield f"data: {json.dumps(chunk)}\n\n"
+            
+            # Final chunk with finish_reason and usage
+            final_chunk = {
+                **base_chunk_info,
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": original_choice.get("finish_reason", "stop"),
+                    "logprobs": None,
+                }],
+                "usage": response_dict.get("usage"),
+                "provider_specific_fields": None,
+            }
+            # Check for client disconnect before yielding
+            if await request.is_disconnected():
+                return
+            if logger:
+                logger.log_stream_chunk(final_chunk)
+            yield f"data: {json.dumps(final_chunk)}\n\n"
+        
+        yield "data: [DONE]\n\n"
+        
+        # Log if logger provided
+        if logger:
+            logger.log_final_response(
+                status_code=200,
+                headers=None,
+                body=response_dict,
+            )
+            
+    except Exception as e:
+        logging.error(f"Error converting response to SSE format: {e}")
+        error_payload = {
+            "error": {
+                "message": f"Failed to convert response to streaming format: {str(e)}",
+                "type": "proxy_internal_error",
+            }
+        }
+        yield f"data: {json.dumps(error_payload)}\n\n"
+        yield "data: [DONE]\n\n"
+
+
 async def streaming_response_wrapper(
     request: Request,
     request_data: dict,
@@ -957,7 +1067,22 @@ async def chat_completions(
         )
         is_streaming = request_data.get("stream", False)
 
-        if is_streaming:
+        # WORKAROUND: NanoGPT thinking models lose reasoning_content in streaming mode
+        # LiteLLM drops the "reasoning" field from NanoGPT streaming deltas.
+        # We force non-streaming internally, then convert the response to SSE format
+        # for clients expecting streaming. See: docs/bugs/nanogpt_streaming_thinking_bug.md
+        force_non_streaming_for_sse = False
+        model_name = request_data.get("model", "")
+        if is_streaming and "nanogpt" in model_name.lower():
+            if model_name.endswith(":thinking") or model_name.endswith("-thinking"):
+                logging.info(
+                    f"NanoGPT thinking model detected: forcing non-streaming with SSE conversion "
+                    f"for {model_name} (LiteLLM streaming bug workaround)"
+                )
+                request_data["stream"] = False
+                force_non_streaming_for_sse = True
+
+        if is_streaming and not force_non_streaming_for_sse:
             response_generator = await client.acompletion(
                 request=request, **request_data
             )
@@ -965,6 +1090,13 @@ async def chat_completions(
                 streaming_response_wrapper(
                     request, request_data, response_generator, raw_logger
                 ),
+                media_type="text/event-stream",
+            )
+        elif force_non_streaming_for_sse:
+            # Get non-streaming response but return as SSE for client compatibility
+            response = await client.acompletion(request=request, **request_data)
+            return StreamingResponse(
+                convert_to_sse_format(request, response, raw_logger),
                 media_type="text/event-stream",
             )
         else:

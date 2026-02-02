@@ -15,6 +15,7 @@ A personal fork of [Mirrowel/LLM-API-Key-Proxy](https://github.com/Mirrowel/LLM-
 | **Cursor** | Cursor IDE API with quota monitoring integration |
 | **Firmware.ai** | AI aggregator with shared quota tracking |
 | **DedalusLabs** | OpenAI-compatible provider with tool_choice handling |
+| **NanoGPT** | AI aggregator with thinking model streaming workaround |
 
 ### Fixes & Improvements
 
@@ -24,6 +25,7 @@ A personal fork of [Mirrowel/LLM-API-Key-Proxy](https://github.com/Mirrowel/LLM-
 - **Dynamic provider singleton fix** — Prevents api_base sharing between dynamic providers
 - **Kimi K2.5 transform** — Auto-enforces `top_p=0.95` for Kimi models
 - **Quota group sync** — Dynamic model discovery for accurate quota tracking
+- **NanoGPT thinking models** — SSE conversion workaround for reasoning content in streaming mode
 
 ### Tooling
 

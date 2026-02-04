@@ -2717,19 +2717,17 @@ class AntigravityProvider(
 
             if cached_sig:
                 thinking_part["thoughtSignature"] = cached_sig
+                parts.append(thinking_part)
                 lib_logger.debug(
                     f"Added reasoning_content with cached signature ({len(reasoning_content)} chars)"
                 )
             else:
-                # No cached signature - include thinking without signature
-                # This can happen if context was compressed and signature was lost,
-                # or if the client (e.g. OpenClaw) didn't preserve signatures.
-                # The Antigravity API may still accept unsigned thinking blocks.
-                lib_logger.debug(
-                    f"Adding reasoning_content without signature ({len(reasoning_content)} chars) - "
-                    f"cache miss or client didn't preserve signature"
+                # No cached signature - skip the thinking block
+                # This can happen if context was compressed and signature was lost
+                lib_logger.warning(
+                    f"Skipping reasoning_content - no valid signature found. "
+                    f"This may cause issues if thinking is enabled."
                 )
-            parts.append(thinking_part)
         elif (
             self._is_claude(model)
             and self._enable_signature_cache

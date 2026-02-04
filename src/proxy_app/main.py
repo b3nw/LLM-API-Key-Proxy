@@ -751,9 +751,8 @@ async def convert_to_sse_format(
             # First chunk: send role and content
             delta = {"role": message.get("role", "assistant")}
             
-            # Include content if present
-            if message.get("content"):
-                delta["content"] = message["content"]
+            # Include content - always include field for client compatibility (even if null)
+            delta["content"] = message.get("content")
             
             # Include reasoning_content if present (the whole point of this workaround)
             if message.get("reasoning_content"):

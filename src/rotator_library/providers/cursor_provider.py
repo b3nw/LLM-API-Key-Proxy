@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 import httpx
 
 from .openai_compatible_provider import OpenAICompatibleProvider
+from .provider_interface import ProviderInterface
 from .utilities.cursor_quota_tracker import CursorQuotaTracker
 
 if TYPE_CHECKING:
@@ -33,7 +34,7 @@ import logging
 lib_logger = logging.getLogger("rotator_library")
 
 
-class CursorProvider(CursorQuotaTracker, OpenAICompatibleProvider):
+class CursorProvider(CursorQuotaTracker, OpenAICompatibleProvider, ProviderInterface):
     """
     Provider implementation for Cursor AI with quota tracking.
 

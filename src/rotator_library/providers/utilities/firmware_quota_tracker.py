@@ -2,14 +2,21 @@
 Firmware.ai Quota Tracking Mixin
 
 Provides quota tracking for the Firmware.ai provider using their quota usage API.
-Firmware.ai uses a 5-hour rolling window quota system where:
-- `used` is already a ratio (0 to 1) indicating quota utilization
-- `reset` is an ISO 8601 UTC timestamp, or null when no active window
+Firmware.ai uses dual quota windows:
+- 5-hour rolling window: `windowUsed` (0-1 ratio), `windowReset` (ISO UTC or null)
+- Weekly budget: `weeklyUsed` (0-1 ratio), `weeklyReset` (ISO UTC)
+- `windowResetsRemaining`: Manual resets available this week (0-2)
 
 API Details:
 - Endpoint: GET https://app.firmware.ai/api/v1/quota
 - Auth: Authorization: Bearer <api_key>
-- Response: { used: float, reset: string|null }
+- Response: {
+    windowUsed: float,
+    windowReset: string|null,
+    weeklyUsed: float,
+    weeklyReset: string,
+    windowResetsRemaining: int
+  }
 
 Required from provider:
     - self.api_base: str (API base URL)
@@ -33,8 +40,9 @@ class FirmwareQuotaTracker:
     Mixin class providing quota tracking functionality for Firmware.ai provider.
 
     This mixin adds the following capabilities:
-    - Fetch quota usage from the Firmware.ai API
+    - Fetch quota usage from the Firmware.ai API (dual-window: 5-hour + weekly)
     - Track 5-hour rolling window quota limits
+    - Track weekly budget quota limits
     - Parse ISO 8601 reset timestamps
 
     Usage:
@@ -76,10 +84,18 @@ class FirmwareQuotaTracker:
             {
                 "status": "success" | "error",
                 "error": str | None,
-                "used": float,  # 0.0 to 1.0 (from API directly)
+                # 5-hour window quota
+                "used": float,  # 0.0 to 1.0 (windowUsed from API)
                 "remaining_fraction": float,  # 1.0 - used
                 "reset_at": float | None,  # Unix timestamp (seconds)
-                "has_active_window": bool,  # True if reset is not null
+                "has_active_window": bool,  # True if windowReset is not null
+                # Weekly budget quota
+                "weekly_used": float,  # 0.0 to 1.0 (weeklyUsed from API)
+                "weekly_remaining_fraction": float,  # 1.0 - weekly_used
+                "weekly_reset_at": float | None,  # Unix timestamp (seconds)
+                "has_active_weekly": bool,  # True if weeklyReset parsed
+                # Resets remaining
+                "resets_remaining": int,  # Manual resets available (0-2)
                 "fetched_at": float,
             }
         """
@@ -103,35 +119,76 @@ class FirmwareQuotaTracker:
             response.raise_for_status()
             data = response.json()
 
-            # Parse response - API returns ratio directly
-            used_raw = data.get("used")
-            # Validate used is numeric
-            if not isinstance(used_raw, (int, float)):
-                lib_logger.warning(
-                    f"Firmware.ai quota API returned non-numeric 'used' value: {used_raw}"
-                )
-                used = 0.0
+            # Parse 5-hour window quota (new format: windowUsed, fallback: used)
+            window_used_raw = data.get("windowUsed")
+            if window_used_raw is None:
+                # Fallback to legacy format
+                window_used_raw = data.get("used")
+            if not isinstance(window_used_raw, (int, float)):
+                if window_used_raw is not None:
+                    lib_logger.warning(
+                        f"Firmware.ai quota API returned non-numeric window used value: {window_used_raw}"
+                    )
+                window_used = 0.0
             else:
-                used = float(used_raw)
-            reset_iso = data.get("reset")
+                window_used = float(window_used_raw)
+
+            # Parse window reset (new format: windowReset, fallback: reset)
+            window_reset_iso = data.get("windowReset")
+            if window_reset_iso is None:
+                window_reset_iso = data.get("reset")
 
             # Calculate remaining (inverse of used), clamped to 0.0-1.0
-            remaining_fraction = max(0.0, min(1.0, 1.0 - used))
+            remaining_fraction = max(0.0, min(1.0, 1.0 - window_used))
 
-            # Parse ISO 8601 reset timestamp
+            # Parse ISO 8601 reset timestamp for window
             reset_at = None
-            if reset_iso is not None:
-                reset_at = self._parse_iso_timestamp(reset_iso)
-            # Only mark active window if we successfully parsed the timestamp
+            if window_reset_iso is not None:
+                reset_at = self._parse_iso_timestamp(window_reset_iso)
             has_active_window = reset_at is not None
+
+            # Parse weekly quota (new fields)
+            weekly_used_raw = data.get("weeklyUsed")
+            if not isinstance(weekly_used_raw, (int, float)):
+                if weekly_used_raw is not None:
+                    lib_logger.warning(
+                        f"Firmware.ai quota API returned non-numeric weekly used value: {weekly_used_raw}"
+                    )
+                weekly_used = 0.0
+            else:
+                weekly_used = float(weekly_used_raw)
+
+            weekly_remaining_fraction = max(0.0, min(1.0, 1.0 - weekly_used))
+
+            # Parse weekly reset timestamp
+            weekly_reset_iso = data.get("weeklyReset")
+            weekly_reset_at = None
+            if weekly_reset_iso is not None:
+                weekly_reset_at = self._parse_iso_timestamp(weekly_reset_iso)
+            has_active_weekly = weekly_reset_at is not None
+
+            # Parse resets remaining (0-2)
+            resets_remaining_raw = data.get("windowResetsRemaining", 0)
+            if isinstance(resets_remaining_raw, (int, float)):
+                resets_remaining = int(resets_remaining_raw)
+            else:
+                resets_remaining = 0
 
             return {
                 "status": "success",
                 "error": None,
-                "used": used,
+                # 5-hour window
+                "used": window_used,
                 "remaining_fraction": remaining_fraction,
                 "reset_at": reset_at,
                 "has_active_window": has_active_window,
+                # Weekly budget
+                "weekly_used": weekly_used,
+                "weekly_remaining_fraction": weekly_remaining_fraction,
+                "weekly_reset_at": weekly_reset_at,
+                "has_active_weekly": has_active_weekly,
+                # Resets remaining
+                "resets_remaining": resets_remaining,
                 "fetched_at": time.time(),
             }
 
@@ -142,10 +199,18 @@ class FirmwareQuotaTracker:
             return {
                 "status": "error",
                 "error": error_msg,
+                # 5-hour window
                 "used": None,
                 "remaining_fraction": None,  # None preserves cached value
                 "reset_at": None,
                 "has_active_window": False,
+                # Weekly budget
+                "weekly_used": None,
+                "weekly_remaining_fraction": None,
+                "weekly_reset_at": None,
+                "has_active_weekly": False,
+                # Resets remaining
+                "resets_remaining": 0,
                 "fetched_at": time.time(),
             }
         except Exception as e:
@@ -154,10 +219,18 @@ class FirmwareQuotaTracker:
             return {
                 "status": "error",
                 "error": type(e).__name__,
+                # 5-hour window
                 "used": None,
                 "remaining_fraction": None,  # None preserves cached value
                 "reset_at": None,
                 "has_active_window": False,
+                # Weekly budget
+                "weekly_used": None,
+                "weekly_remaining_fraction": None,
+                "weekly_reset_at": None,
+                "has_active_weekly": False,
+                # Resets remaining
+                "resets_remaining": 0,
                 "fetched_at": time.time(),
             }
 

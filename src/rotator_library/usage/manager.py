@@ -928,6 +928,16 @@ class UsageManager:
                 "fair_cycle": {},
             }
 
+            # Add provider-specific metadata (e.g., resets_remaining for Firmware)
+            plugin = self._provider_plugins.get(self.provider)
+            if plugin and hasattr(plugin, "get_credential_metadata"):
+                try:
+                    metadata = plugin.get_credential_metadata(state.accessor)
+                    if metadata:
+                        cred_stats["provider_metadata"] = metadata
+                except Exception:
+                    pass  # Ignore metadata errors
+
             stats["total_requests"] += state.totals.request_count
             stats["tokens"]["output"] += state.totals.output_tokens
             stats["tokens"]["input_cached"] += state.totals.prompt_tokens_cache_read
@@ -987,8 +997,18 @@ class UsageManager:
                     },
                 }
 
-            # Add group usage stats
+            # Get hidden quota groups from provider plugin
+            hidden_groups = set()
+            plugin = self._provider_plugins.get(self.provider)
+            if plugin and hasattr(plugin, "hidden_quota_groups"):
+                hidden_groups = plugin.hidden_quota_groups
+
+            # Add group usage stats (filtering hidden groups)
             for group_key, group_stats in state.group_usage.items():
+                # Skip hidden groups (e.g., legacy groups)
+                if group_key in hidden_groups:
+                    continue
+
                 group_windows = {}
                 for window_name, window in group_stats.windows.items():
                     group_windows[window_name] = {

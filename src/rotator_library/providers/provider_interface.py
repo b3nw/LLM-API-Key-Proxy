@@ -11,6 +11,7 @@ from typing import (
     AsyncGenerator,
     Union,
     FrozenSet,
+    Set,
     Tuple,
     TYPE_CHECKING,
 )
@@ -142,6 +143,10 @@ class ProviderInterface(ABC, metaclass=SingletonABCMeta):
     # Models that share quota/cooldown timing
     # Can be overridden via env: QUOTA_GROUPS_{PROVIDER}_{GROUP}="model1,model2"
     model_quota_groups: QuotaGroupMap = {}
+
+    # Quota groups to hide from TUI display (e.g., legacy groups)
+    # Groups in this set will not appear in quota-stats endpoint responses
+    hidden_quota_groups: Set[str] = set()
 
     # Model usage weights for grouped usage calculation
     # When calculating combined usage for quota groups, each model's usage
@@ -353,6 +358,25 @@ class ProviderInterface(ABC, metaclass=SingletonABCMeta):
         if tier is None:
             return None  # Tier not yet discovered
         return self._resolve_tier_priority(tier)
+
+    def get_credential_metadata(self, credential: str) -> Dict[str, Any]:
+        """
+        Returns provider-specific metadata for a credential.
+
+        This metadata is included in quota-stats API responses for the TUI
+        to display additional information (e.g., manual resets remaining).
+
+        Args:
+            credential: The credential identifier (API key or path)
+
+        Returns:
+            Dict with provider-specific metadata (empty by default)
+
+        Example:
+            For Firmware.ai:
+            {"resets_remaining": 2}  # Manual resets available this week
+        """
+        return {}
 
     def get_model_tier_requirement(self, model: str) -> Optional[int]:
         """

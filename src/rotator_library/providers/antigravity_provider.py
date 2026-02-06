@@ -10,6 +10,7 @@ A clean, well-structured provider for Google's Antigravity API, supporting:
 - Gemini 3 (Pro/Flash/Image) with thinkingLevel
 - Claude (Sonnet 4.5) via Antigravity proxy
 - Claude (Opus 4.5) via Antigravity proxy
+- Claude (Opus 4.6) via Antigravity proxy
 
 Key Features:
 - Unified streaming/non-streaming handling
@@ -157,6 +158,7 @@ AVAILABLE_MODELS = [
     # Claude models
     "claude-sonnet-4.5",  # Uses -thinking variant when reasoning_effort provided
     "claude-opus-4.5",  # ALWAYS uses -thinking variant (non-thinking doesn't exist)
+    "claude-opus-4.6",  # ALWAYS uses -thinking variant (non-thinking doesn't exist)
     # Other models
     # "gpt-oss-120b-medium",  # GPT-OSS model, shares quota with Claude
 ]
@@ -249,6 +251,7 @@ MODEL_ALIAS_MAP = {
     # Claude: API/internal names → public user-facing names
     "claude-sonnet-4-5": "claude-sonnet-4.5",
     "claude-opus-4-5": "claude-opus-4.5",
+    "claude-opus-4-6": "claude-opus-4.6",
 }
 MODEL_ALIAS_REVERSE = {v: k for k, v in MODEL_ALIAS_MAP.items()}
 
@@ -1065,6 +1068,7 @@ class AntigravityProvider(
     - Gemini 3 (Pro/Flash/Image) with thinkingLevel
     - Claude Sonnet 4.5 via Antigravity proxy
     - Claude Opus 4.5 via Antigravity proxy
+    - Claude Opus 4.6 via Antigravity proxy
 
     Features:
     - Unified streaming/non-streaming handling
@@ -1122,8 +1126,11 @@ class AntigravityProvider(
             "claude-sonnet-4-5-thinking",
             "claude-opus-4-5",
             "claude-opus-4-5-thinking",
+            "claude-opus-4-6",
+            "claude-opus-4-6-thinking",
             "claude-sonnet-4.5",
             "claude-opus-4.5",
+            "claude-opus-4.6",
             "gpt-oss-120b-medium",
         ],
         # Gemini 3 Pro variants share quota
@@ -3516,12 +3523,12 @@ Analyze what you did wrong, correct it, and retry the function call. Output ONLY
         internal_model = self._alias_to_internal(model)
 
         # Map Claude models to their -thinking variant
-        # claude-opus-4-5: ALWAYS use -thinking (non-thinking variant doesn't exist)
+        # claude-opus-*: ALWAYS use -thinking (non-thinking variant doesn't exist)
         # claude-sonnet-4-5: only use -thinking when reasoning_effort is provided
         if self._is_claude(internal_model) and not internal_model.endswith("-thinking"):
-            if internal_model == "claude-opus-4-5":
-                # Opus 4.5 ALWAYS requires -thinking variant
-                internal_model = "claude-opus-4-5-thinking"
+            if internal_model in ("claude-opus-4-5", "claude-opus-4-6"):
+                # Opus models ALWAYS require -thinking variant
+                internal_model = f"{internal_model}-thinking"
             elif internal_model == "claude-sonnet-4-5" and reasoning_effort:
                 # Sonnet 4.5 uses -thinking only when reasoning_effort is provided
                 internal_model = "claude-sonnet-4-5-thinking"

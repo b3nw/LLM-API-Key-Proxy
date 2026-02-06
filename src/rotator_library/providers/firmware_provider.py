@@ -1,7 +1,10 @@
 """
 Firmware.ai Provider with Quota Tracking
 
-Provider implementation for the Firmware.ai API with 5-hour rolling window quota tracking.
+Provider implementation for the Firmware.ai API with dual-window quota tracking:
+- 5-hour rolling window: Primary usage limit
+- Weekly budget: Secondary usage limit
+
 Uses the FirmwareQuotaTracker mixin to fetch quota usage from their API.
 
 Environment variables:
@@ -63,10 +66,12 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
     # (e.g., firmware/anthropic/claude-sonnet-4-5) not in LiteLLM's pricing database
     skip_cost_calculation: bool = True
 
-    # Quota groups for tracking 5-hour rolling window limits
-    # Uses a virtual model "firmware/_quota" for credential-level quota tracking
+    # Quota groups for tracking dual-window limits
+    # - window: 5-hour rolling window (primary)
+    # - weekly: Weekly budget limit (secondary)
     model_quota_groups = {
-        "firmware_global": ["firmware/_quota"],
+        "window": ["firmware/_window"],
+        "weekly": ["firmware/_weekly"],
     }
 
     def __init__(self, *args, **kwargs):
@@ -98,8 +103,9 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
         """
         Get the quota group for a model.
 
-        All Firmware.ai models share the same credential-level quota pool,
-        so they all belong to the same quota group.
+        All Firmware.ai models share the same credential-level quota pool.
+        Returns "window" as the primary group for blocking decisions.
+        Weekly quota is tracked separately via background job.
 
         Args:
             model: Model name (ignored - all models share quota)
@@ -107,14 +113,15 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
         Returns:
             Quota group identifier for shared credential-level tracking
         """
-        return "firmware_global"
+        return "window"
 
     def get_models_in_quota_group(self, group: str) -> List[str]:
         """
         Get all models in a quota group.
 
-        For Firmware.ai, we use a virtual model "firmware/_quota" to track the
-        credential-level 5-hour rolling window quota.
+        For Firmware.ai, we use virtual models to track credential-level quotas:
+        - firmware/_window: 5-hour rolling window
+        - firmware/_weekly: Weekly budget
 
         Args:
             group: Quota group name
@@ -122,9 +129,16 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
         Returns:
             List of model names in the group
         """
-        if group == "firmware_global":
-            return ["firmware/_quota"]
-        return []
+        return self.model_quota_groups.get(group, [])
+
+    def get_quota_groups(self) -> List[str]:
+        """
+        Get the list of quota groups for this provider.
+
+        Returns:
+            List of quota group names
+        """
+        return list(self.model_quota_groups.keys())
 
     def get_usage_reset_config(self, credential: str) -> Optional[Dict[str, Any]]:
         """
@@ -194,6 +208,8 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
         """
         Refresh quota usage for all credentials in parallel.
 
+        Updates both window (5-hour) and weekly quota baselines.
+
         Args:
             usage_manager: UsageManager instance
             credentials: List of API keys
@@ -211,35 +227,75 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
                         # Update quota cache
                         self._quota_cache[api_key] = usage_data
 
-                        # Calculate values for usage manager
-                        remaining_fraction = usage_data.get("remaining_fraction", 0.0)
-                        reset_ts = usage_data.get("reset_at")
+                        # Get stable ID for cooldown application
+                        stable_id = usage_manager.registry.get_stable_id(
+                            api_key, usage_manager.provider
+                        )
+                        state = usage_manager.states.get(stable_id)
 
-                        # Store baseline in usage manager
-                        # Since Firmware.ai uses credential-level quota, we use a virtual model name
-                        if remaining_fraction <= 0.0 and reset_ts:
-                            stable_id = usage_manager.registry.get_stable_id(
-                                api_key, usage_manager.provider
+                        # === 5-hour window quota ===
+                        window_used = usage_data.get("used", 0.0)
+                        window_remaining = usage_data.get("remaining_fraction", 0.0)
+                        window_reset_ts = usage_data.get("reset_at")
+
+                        # Apply cooldown if window quota exhausted
+                        # Use group name "window" so it matches get_model_quota_group()
+                        if window_remaining <= 0.0 and window_reset_ts and state:
+                            await usage_manager.tracking.apply_cooldown(
+                                state=state,
+                                reason="quota_exhausted",
+                                until=window_reset_ts,
+                                model_or_group="window",
+                                source="api_quota",
                             )
-                            state = usage_manager.states.get(stable_id)
-                            if state:
-                                await usage_manager.tracking.apply_cooldown(
-                                    state=state,
-                                    reason="quota_exhausted",
-                                    until=reset_ts,
-                                    model_or_group="firmware/_quota",
-                                    source="api_quota",
-                                )
+
+                        # Update window quota baseline
+                        # Use 100 as synthetic max (represents 100%)
+                        # quota_used = used fraction * 100
                         await usage_manager.update_quota_baseline(
                             api_key,
-                            "firmware/_quota",  # Virtual model for credential-level tracking
-                            quota_reset_ts=reset_ts,
+                            "firmware/_window",
+                            quota_max_requests=100,
+                            quota_reset_ts=window_reset_ts,
+                            quota_used=int(window_used * 100),
+                            quota_group="window",
                         )
 
+                        # === Weekly quota ===
+                        weekly_used = usage_data.get("weekly_used", 0.0)
+                        weekly_remaining = usage_data.get("weekly_remaining_fraction", 0.0)
+                        weekly_reset_ts = usage_data.get("weekly_reset_at")
+
+                        # Apply cooldown if weekly quota exhausted
+                        # Use group name "window" so requests are actually blocked
+                        # (all models map to "window" group via get_model_quota_group)
+                        if weekly_remaining <= 0.0 and weekly_reset_ts and state:
+                            await usage_manager.tracking.apply_cooldown(
+                                state=state,
+                                reason="weekly_quota_exhausted",
+                                until=weekly_reset_ts,
+                                model_or_group="window",
+                                source="api_quota",
+                            )
+
+                        # Update weekly quota baseline
+                        # Use 100 as synthetic max (represents 100%)
+                        await usage_manager.update_quota_baseline(
+                            api_key,
+                            "firmware/_weekly",
+                            quota_max_requests=100,
+                            quota_reset_ts=weekly_reset_ts,
+                            quota_used=int(weekly_used * 100),
+                            quota_group="weekly",
+                        )
+
+                        # Log both quotas
+                        resets_remaining = usage_data.get("resets_remaining", 0)
                         lib_logger.debug(
-                            f"Updated Firmware.ai quota baseline: "
-                            f"{remaining_fraction * 100:.1f}% remaining, "
-                            f"active_window={usage_data.get('has_active_window', False)}"
+                            f"Updated Firmware.ai quota baselines: "
+                            f"window={window_remaining * 100:.1f}% remaining, "
+                            f"weekly={weekly_remaining * 100:.1f}% remaining, "
+                            f"resets_available={resets_remaining}"
                         )
 
                 except Exception as e:

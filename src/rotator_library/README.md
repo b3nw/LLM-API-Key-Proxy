@@ -275,9 +275,9 @@ Use this tool to:
 ### Antigravity
 -   **Auth**: Uses OAuth 2.0 flow similar to Gemini CLI, with Antigravity-specific credentials and scopes.
 -   **Credential Prioritization**: Automatic detection and prioritization of paid vs free tier credentials (paid tier resets every 5 hours, free tier resets weekly).
--   **Models**: Supports Gemini 3 Pro, Gemini 2.5 Flash/Flash Lite, Claude Sonnet 4.5 (with/without thinking), Claude Opus 4.5 (thinking only), and GPT-OSS 120B via Google's internal Antigravity API.
+-   **Models**: Supports Gemini 3 Pro, Gemini 2.5 Flash/Flash Lite, Claude Sonnet 4.5 (with/without thinking), Claude Opus 4.5/4.6 (thinking only), and GPT-OSS 120B via Google's internal Antigravity API.
 -   **Quota Groups**: Models that share quota are automatically grouped:
-    - Claude/GPT-OSS: `claude-sonnet-4-5`, `claude-opus-4-5`, `gpt-oss-120b-medium`
+    - Claude/GPT-OSS: `claude-sonnet-4-5`, `claude-opus-4-5`, `claude-opus-4-6`, `gpt-oss-120b-medium`
     - Gemini 3 Pro: `gemini-3-pro-high`, `gemini-3-pro-low`, `gemini-3-pro-preview`
     - Gemini 2.5 Flash: `gemini-2.5-flash`, `gemini-2.5-flash-thinking`, `gemini-2.5-flash-lite`
     - All models in a group deplete the usage of the group equally. So in claude group - it is beneficial to use only Opus, and forget about Sonnet and GPT-OSS.
@@ -289,7 +289,7 @@ Use this tool to:
     - Gemini 3: Uses `thinkingLevel` (string: "low"/"high")
     - Gemini 2.5 Flash: Uses `-thinking` variant when `reasoning_effort` is provided
     - Claude Sonnet 4.5: Uses `thinkingBudget` (optional - supports both thinking and non-thinking modes)
-    - Claude Opus 4.5: Uses `thinkingBudget` (always uses thinking variant)
+    - Claude Opus 4.5/4.6: Uses `thinkingBudget` (always uses thinking variant)
 -   **Base URL Fallback**: Automatic fallback between sandbox and production endpoints.
 -   **Fair Cycle Rotation**: Enabled by default in sequential mode. Ensures all credentials cycle before reuse.
 -   **Custom Caps**: Configurable per-tier caps with offset cooldowns for pacing usage. See `config/defaults.py`.

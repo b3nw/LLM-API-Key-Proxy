@@ -1433,6 +1433,15 @@ class QuotaViewer:
 
                     content_lines.append(line)
 
+        # Provider-specific metadata (e.g., Firmware.ai resets remaining)
+        provider_metadata = cred.get("provider_metadata", {})
+        resets_remaining = provider_metadata.get("resets_remaining")
+        if resets_remaining is not None:
+            content_lines.append("")
+            content_lines.append(
+                f"[dim]Manual resets remaining this week:[/dim] [cyan]{resets_remaining}[/cyan]"
+            )
+
         # Model usage (show if no group usage, or if toggle enabled via config)
         model_usage = cred.get("model_usage", {})
         # Check config for show_models setting, default to showing only if no group_usage

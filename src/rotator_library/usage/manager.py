@@ -330,6 +330,25 @@ class UsageManager:
                 if self._storage:
                     self._storage.mark_dirty()
 
+            # Clean up stale quota groups from previous code versions
+            # Only prune when the provider explicitly defines quota groups
+            valid_groups = self._get_valid_quota_groups()
+            if valid_groups is not None:
+                total_groups_removed = 0
+                for stable_id, state in self._states.items():
+                    removed = self._cleanup_stale_groups_for_state(
+                        state, valid_groups
+                    )
+                    total_groups_removed += removed
+
+                if total_groups_removed > 0:
+                    lib_logger.info(
+                        f"Cleaned up {total_groups_removed} stale quota group(s) "
+                        f"for {self.provider}"
+                    )
+                    if self._storage:
+                        self._storage.mark_dirty()
+
             self._initialized = True
             lib_logger.debug(
                 f"UsageManager initialized for {self.provider} with {len(credentials)} credentials"
@@ -1722,6 +1741,54 @@ class UsageManager:
                 )
 
         return removed_count
+
+    def _get_valid_quota_groups(self) -> Optional[set]:
+        """Get the set of valid quota group names from the provider plugin.
+
+        Returns:
+            Set of valid group names, or None if the provider doesn't define groups
+        """
+        plugin_instance = self._get_provider_plugin_instance()
+        if not plugin_instance:
+            return None
+
+        quota_groups = getattr(plugin_instance, "model_quota_groups", None)
+        if not quota_groups:
+            return None
+
+        return set(quota_groups.keys())
+
+    def _cleanup_stale_groups_for_state(
+        self, state: "CredentialState", valid_groups: set
+    ) -> int:
+        """Remove stale quota groups from a credential state.
+
+        Removes group_usage entries that aren't in the provider's
+        model_quota_groups. These can accumulate from previous code versions
+        that used different group names.
+
+        Args:
+            state: The credential state to clean up
+            valid_groups: Set of valid group names from the provider
+
+        Returns:
+            Number of groups removed
+        """
+        if not state.group_usage:
+            return 0
+
+        groups_to_remove = [
+            name for name in state.group_usage.keys() if name not in valid_groups
+        ]
+
+        for group_name in groups_to_remove:
+            del state.group_usage[group_name]
+            lib_logger.debug(
+                f"Removed stale quota group '{group_name}' from "
+                f"{mask_credential(state.accessor, style='full')}"
+            )
+
+        return len(groups_to_remove)
 
     async def clear_cooldown_if_exists(
         self,

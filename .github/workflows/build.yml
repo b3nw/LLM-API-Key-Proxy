@@ -851,34 +851,17 @@ jobs:
 
         cat > releasenotes.md <<-EOF
         ## Build Information
-        | Field | Value |
-        |-------|-------|
-        | 📦 **Version** | \`${{ steps.version.outputs.version }}\` |
-        | 💾 **Binary Size** | Win: \`${{ steps.metadata.outputs.win_build_size }}\`, Linux: \`${{ steps.metadata.outputs.linux_build_size }}\`, macOS: \`${{ steps.metadata.outputs.macos_build_size }}\` |
-        | 🔗 **Commit** | [\`${{ steps.get_sha.outputs.sha }}\`](https://github.com/${{ github.repository }}/commit/${{ github.sha }}) |
-        | 📅 **Build Date** | \`${{ steps.version.outputs.timestamp }}\` |
-        | ⚡ **Trigger** | \`${{ github.event_name }}\` |
+        | 📦 Version | 💾 Size | 🔗 Commit | 📅 Date |
+        |------------|---------|-----------|---------|
+        | \`${{ steps.version.outputs.version }}\` | Win: \`${{ steps.metadata.outputs.win_build_size }}\` / Linux: \`${{ steps.metadata.outputs.linux_build_size }}\` / macOS: \`${{ steps.metadata.outputs.macos_build_size }}\` | [\`${{ steps.get_sha.outputs.sha }}\`](https://github.com/${{ github.repository }}/commit/${{ github.sha }}) | \`${{ steps.version.outputs.timestamp }}\` |
 
-        ## 📋 What's Changed
+        ## What's Changed
 
         $CHANGELOG_CONTENT
 
-        ### 📁 Included Files
-        Each OS-specific archive contains the following files:
-        $FILE_TABLE
-
-        ### 📦 Archives
-        $ARCHIVE_LIST
-
-        ## 🔗 Useful Links
-        - 📖 [Documentation](https://github.com/${{ github.repository }}/wiki)
-        - 🐛 [Report Issues](https://github.com/${{ github.repository }}/issues)
-        - 💬 [Discussions](https://github.com/${{ github.repository }}/discussions)
-        - 🌟 [Star this repo](https://github.com/${{ github.repository }}) if you find it useful!
-
         ---
-        
-        > **Note**: This is an automated build release.
+
+        **Archives**: $WINDOWS_ARCHIVE / $LINUX_ARCHIVE / $MACOS_ARCHIVE
 
         $CHANGELOG_URL
         EOF

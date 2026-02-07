@@ -279,6 +279,15 @@ GEMINI_API_KEY_1="your-gemini-key"
 GEMINI_API_KEY_2="another-gemini-key"
 OPENAI_API_KEY_1="your-openai-key"
 ANTHROPIC_API_KEY_1="your-anthropic-key"
+
+# DedalusLabs
+DEDALUSLABS_API_BASE=https://api.dedaluslabs.ai/v1
+DEDALUSLABS_API_KEY_1=dsk-live-xxxxx
+
+# ZenMux (free models only, requires custom headers)
+ZENMUX_API_BASE=https://zenmux.ai/api/v1
+IGNORE_MODELS_ZENMUX="*"
+WHITELIST_MODELS_ZENMUX="*-free"
 ```
 
 > Copy `.env.example` to `.env` as a starting point.

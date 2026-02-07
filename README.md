@@ -16,6 +16,7 @@ A personal fork of [Mirrowel/LLM-API-Key-Proxy](https://github.com/Mirrowel/LLM-
 | **Firmware.ai** | AI aggregator with shared quota tracking |
 | **DedalusLabs** | OpenAI-compatible provider with tool_choice handling |
 | **NanoGPT** | AI aggregator with thinking model streaming workaround |
+| **ZenMux** | Free tier models from zenmux.ai (no API key required) |
 
 ### Fixes & Improvements
 
@@ -58,6 +59,11 @@ FIRMWARE_API_KEY_1=your-firmware-key
 # DedalusLabs
 DEDALUSLABS_API_BASE=https://api.dedaluslabs.ai/v1
 DEDALUSLABS_API_KEY_1=dsk-live-xxxxx
+
+# ZenMux (free models only, requires custom headers)
+ZENMUX_API_BASE=https://zenmux.ai/api/v1
+IGNORE_MODELS_ZENMUX="*"
+WHITELIST_MODELS_ZENMUX="*-free"
 ```
 
 ---

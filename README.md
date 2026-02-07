@@ -14,6 +14,7 @@ A personal fork of [Mirrowel/LLM-API-Key-Proxy](https://github.com/Mirrowel/LLM-
 |----------|-------------|
 | **Cursor** | Cursor IDE API with quota monitoring integration |
 | **Firmware.ai** | AI aggregator with shared quota tracking |
+| **Firmware Ext** | Firmware.ai via Chrome Extension API (cookie-based JWT auth, coexists with standard provider) |
 | **DedalusLabs** | OpenAI-compatible provider with tool_choice handling |
 | **NanoGPT** | AI aggregator with thinking model streaming workaround |
 | **ZenMux** | Free tier models from zenmux.ai (no API key required) |
@@ -52,9 +53,12 @@ See upstream documentation for base configuration. Fork-specific variables:
 # Cursor provider
 CURSOR_API_KEY_1=your-cursor-key
 
-# Firmware.ai
+# Firmware.ai (standard OpenAI-compatible API)
 FIRMWARE_API_BASE=https://api.firmware.ai/v1
 FIRMWARE_API_KEY_1=your-firmware-key
+
+# Firmware Ext (Chrome Extension API — JWT from firmware-token browser cookie)
+FIRMWARE_EXT_API_KEY_1=eyJhbGc...your-jwt-here
 
 # DedalusLabs
 DEDALUSLABS_API_BASE=https://api.dedaluslabs.ai/v1

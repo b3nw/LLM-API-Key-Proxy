@@ -9,7 +9,8 @@ Firmware.ai uses a 5-hour rolling window quota system where:
 API Details:
 - Endpoint: GET https://app.firmware.ai/api/v1/quota
 - Auth: Authorization: Bearer <api_key>
-- Response: { used: float, reset: string|null }
+- Response: { windowUsed: float, windowReset: string|null, weeklyUsed: float, weeklyReset: string, windowResetsRemaining: int }
+  (legacy format also supported: { used: float, reset: string|null })
 
 Required from provider:
     - self.api_base: str (API base URL)
@@ -104,7 +105,8 @@ class FirmwareQuotaTracker:
             data = response.json()
 
             # Parse response - API returns ratio directly
-            used_raw = data.get("used")
+            # Support both new format (windowUsed/windowReset) and legacy (used/reset)
+            used_raw = data.get("windowUsed", data.get("used"))
             # Validate used is numeric
             if not isinstance(used_raw, (int, float)):
                 lib_logger.warning(
@@ -113,7 +115,7 @@ class FirmwareQuotaTracker:
                 used = 0.0
             else:
                 used = float(used_raw)
-            reset_iso = data.get("reset")
+            reset_iso = data.get("windowReset", data.get("reset"))
 
             # Calculate remaining (inverse of used), clamped to 0.0-1.0
             remaining_fraction = max(0.0, min(1.0, 1.0 - used))

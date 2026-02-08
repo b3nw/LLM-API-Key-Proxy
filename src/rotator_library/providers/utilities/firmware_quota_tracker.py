@@ -77,10 +77,13 @@ class FirmwareQuotaTracker:
             {
                 "status": "success" | "error",
                 "error": str | None,
-                "used": float,  # 0.0 to 1.0 (from API directly)
+                "used": float,  # 0.0 to 1.0 (window usage from API)
                 "remaining_fraction": float,  # 1.0 - used
                 "reset_at": float | None,  # Unix timestamp (seconds)
                 "has_active_window": bool,  # True if reset is not null
+                "weekly_used": float,  # 0.0 to 1.0 (weekly usage from API)
+                "weekly_remaining_fraction": float,  # 1.0 - weekly_used
+                "weekly_reset_at": float | None,  # Unix timestamp (seconds)
                 "fetched_at": float,
             }
         """
@@ -127,6 +130,21 @@ class FirmwareQuotaTracker:
             # Only mark active window if we successfully parsed the timestamp
             has_active_window = reset_at is not None
 
+            # Parse weekly quota data
+            weekly_used_raw = data.get("weeklyUsed")
+            if not isinstance(weekly_used_raw, (int, float)):
+                # Field missing or non-numeric — return None to skip update
+                weekly_used = None
+                weekly_remaining_fraction = None
+            else:
+                weekly_used = float(weekly_used_raw)
+                weekly_remaining_fraction = max(0.0, min(1.0, 1.0 - weekly_used))
+
+            weekly_reset_iso = data.get("weeklyReset")
+            weekly_reset_at = None
+            if weekly_reset_iso is not None:
+                weekly_reset_at = self._parse_iso_timestamp(weekly_reset_iso)
+
             return {
                 "status": "success",
                 "error": None,
@@ -134,6 +152,9 @@ class FirmwareQuotaTracker:
                 "remaining_fraction": remaining_fraction,
                 "reset_at": reset_at,
                 "has_active_window": has_active_window,
+                "weekly_used": weekly_used,
+                "weekly_remaining_fraction": weekly_remaining_fraction,
+                "weekly_reset_at": weekly_reset_at,
                 "fetched_at": time.time(),
             }
 
@@ -148,6 +169,9 @@ class FirmwareQuotaTracker:
                 "remaining_fraction": None,  # None preserves cached value
                 "reset_at": None,
                 "has_active_window": False,
+                "weekly_used": None,
+                "weekly_remaining_fraction": None,
+                "weekly_reset_at": None,
                 "fetched_at": time.time(),
             }
         except Exception as e:
@@ -160,6 +184,9 @@ class FirmwareQuotaTracker:
                 "remaining_fraction": None,  # None preserves cached value
                 "reset_at": None,
                 "has_active_window": False,
+                "weekly_used": None,
+                "weekly_remaining_fraction": None,
+                "weekly_reset_at": None,
                 "fetched_at": time.time(),
             }
 

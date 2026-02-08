@@ -44,12 +44,10 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
     # (e.g., firmware/anthropic/claude-sonnet-4-5) not in LiteLLM's pricing database
     skip_cost_calculation: bool = True
 
-    # Quota groups for tracking limits
-    # - firmware_global: credential-level request tracking via virtual model
-    # - window: 5-hour rolling window usage from Firmware API (percentage scale)
-    # - weekly: weekly usage from Firmware API (percentage scale)
+    # Quota groups for tracking API-reported limits (percentage scale)
+    # - window: 5-hour rolling window usage from Firmware API
+    # - weekly: weekly usage from Firmware API
     model_quota_groups = {
-        "firmware_global": ["firmware/_quota"],
         "window": ["firmware/_window_quota"],
         "weekly": ["firmware/_weekly_quota"],
     }
@@ -79,8 +77,8 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
         """
         Get the quota group for a model.
 
-        All Firmware.ai models share the same credential-level quota pool,
-        so they all belong to the same quota group.
+        All Firmware.ai models share the same 5-hour rolling window quota,
+        so they all belong to the window group.
 
         Args:
             model: Model name (ignored - all models share quota)
@@ -88,7 +86,7 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
         Returns:
             Quota group identifier for shared credential-level tracking
         """
-        return "firmware_global"
+        return "window"
 
     def get_models_in_quota_group(self, group: str) -> List[str]:
         """
@@ -203,16 +201,9 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
                                     state=state,
                                     reason="quota_exhausted",
                                     until=reset_ts,
-                                    model_or_group="firmware/_quota",
+                                    model_or_group="window",
                                     source="api_quota",
                                 )
-
-                        # Update firmware_global baseline (request-count tracking)
-                        await usage_manager.update_quota_baseline(
-                            api_key,
-                            "firmware/_quota",
-                            quota_reset_ts=reset_ts,
-                        )
 
                         # Update window quota (5-hour rolling window, percentage scale)
                         window_used = usage_data.get("used")
@@ -252,7 +243,7 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
                                         state=state,
                                         reason="weekly_quota_exhausted",
                                         until=weekly_reset_ts,
-                                        model_or_group="firmware/_quota",
+                                        model_or_group="weekly",
                                         source="api_quota",
                                     )
 

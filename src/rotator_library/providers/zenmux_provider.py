@@ -17,15 +17,15 @@ if not lib_logger.handlers:
 
 class ZenmuxProvider(ProviderInterface):
     """
-    Provider for ZenMux (zenmux.ai) - OpenAI-compatible API with custom headers.
+    Provider for ZenMux via OpenCode Zen gateway - OpenAI-compatible API.
 
-    ZenMux provides free tier models that can be accessed without an API key
-    by sending specific identification headers.
+    Accesses free tier models through OpenCode's Zen gateway which proxies
+    to ZenMux. Uses a public API key for free models.
 
     Free models have the "-free" suffix in their model IDs.
 
     Environment Variables:
-        ZENMUX_API_BASE - The API base URL (default: https://zenmux.ai/api/v1)
+        ZENMUX_API_BASE - The API base URL (default: https://opencode.ai/zen/v1)
 
     Custom Headers Required:
         HTTP-Referer: https://opencode.ai/
@@ -37,7 +37,7 @@ class ZenmuxProvider(ProviderInterface):
 
     def __init__(self):
         super().__init__()
-        self.api_base = os.getenv("ZENMUX_API_BASE", "https://zenmux.ai/api/v1")
+        self.api_base = os.getenv("ZENMUX_API_BASE", "https://opencode.ai/zen/v1")
 
     def _get_headers(self) -> Dict[str, str]:
         """Return the custom headers required by ZenMux."""
@@ -110,10 +110,9 @@ class ZenmuxProvider(ProviderInterface):
         # Ensure api_base is set
         kwargs["api_base"] = self.api_base
 
-        # For free models, we don't need an api_key, but LiteLLM might expect one.
-        # Set a dummy key if not provided.
+        # Use the public API key for the OpenCode Zen gateway
         if not kwargs.get("api_key"):
-            kwargs["api_key"] = "not-needed-for-free-models"
+            kwargs["api_key"] = "public"
 
         # Call LiteLLM with the custom headers
         is_streaming = kwargs.get("stream", False)
@@ -152,7 +151,7 @@ class ZenmuxProvider(ProviderInterface):
         kwargs["api_base"] = self.api_base
 
         if not kwargs.get("api_key"):
-            kwargs["api_key"] = "not-needed-for-free-models"
+            kwargs["api_key"] = "public"
 
         return await litellm.aembedding(**kwargs)
 

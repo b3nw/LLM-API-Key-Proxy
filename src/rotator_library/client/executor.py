@@ -770,6 +770,10 @@ class RequestExecutor:
                                 plugin
                                 and getattr(plugin, "skip_cost_calculation", False)
                             )
+                            # Use plugin's cost calculator if available
+                            cost_calculator = None
+                            if plugin and hasattr(plugin, "calculate_cost"):
+                                cost_calculator = plugin.calculate_cost
 
                             # Execute request with retries
                             for attempt in range(self._max_retries):
@@ -806,6 +810,7 @@ class RequestExecutor:
                                         context.request,
                                         cred_context,
                                         skip_cost_calculation=skip_cost_calculation,
+                                        cost_calculator=cost_calculator,
                                     )
 
                                     lib_logger.info(
@@ -1256,6 +1261,22 @@ class RequestExecutor:
         plugin = self._get_plugin_instance(provider)
         if plugin and getattr(plugin, "skip_cost_calculation", False):
             return 0.0
+
+        # If the plugin provides its own cost calculation (e.g. from provider
+        # API pricing data), use it instead of LiteLLM's internal database.
+        if plugin and hasattr(plugin, "calculate_cost"):
+            try:
+                usage = getattr(response, "usage", None)
+                if usage:
+                    prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
+                    completion_tokens = getattr(usage, "completion_tokens", 0) or 0
+                    cost = plugin.calculate_cost(model, prompt_tokens, completion_tokens)
+                    if cost > 0:
+                        return cost
+            except Exception as exc:
+                lib_logger.debug(
+                    f"Plugin cost calculation failed for {model}: {exc}"
+                )
 
         try:
             if isinstance(response, litellm.EmbeddingResponse):

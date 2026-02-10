@@ -17,7 +17,7 @@ import codecs
 import json
 import logging
 import re
-from typing import Any, AsyncGenerator, AsyncIterator, Dict, Optional, TYPE_CHECKING
+from typing import Any, AsyncGenerator, AsyncIterator, Callable, Dict, Optional, TYPE_CHECKING
 
 import litellm
 
@@ -48,6 +48,7 @@ class StreamingHandler:
         request: Optional[Any] = None,
         cred_context: Optional["CredentialContext"] = None,
         skip_cost_calculation: bool = False,
+        cost_calculator: Optional[Callable[[str, int, int], float]] = None,
     ) -> AsyncGenerator[str, None]:
         """
         Wrap a LiteLLM stream with error handling and usage tracking.
@@ -238,11 +239,19 @@ class StreamingHandler:
                 if cred_context:
                     approx_cost = 0.0
                     if not skip_cost_calculation:
-                        approx_cost = self._calculate_stream_cost(
-                            model,
-                            prompt_tokens_uncached + prompt_tokens_cached,
-                            completion_tokens + thinking_tokens,
-                        )
+                        total_prompt = prompt_tokens_uncached + prompt_tokens_cached
+                        total_completion = completion_tokens + thinking_tokens
+                        if cost_calculator:
+                            try:
+                                approx_cost = cost_calculator(
+                                    model, total_prompt, total_completion
+                                )
+                            except Exception:
+                                approx_cost = 0.0
+                        if approx_cost == 0.0:
+                            approx_cost = self._calculate_stream_cost(
+                                model, total_prompt, total_completion,
+                            )
                     cred_context.mark_success(
                         prompt_tokens=prompt_tokens_uncached,
                         completion_tokens=completion_tokens,

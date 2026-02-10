@@ -2,9 +2,12 @@
 # Copyright (c) 2026 Mirrowel
 
 import importlib
+import logging
 import pkgutil
 import os
 from typing import Dict, Type
+
+lib_logger = logging.getLogger("rotator_library")
 from .provider_interface import ProviderInterface
 
 # --- Provider Plugin System ---
@@ -31,8 +34,14 @@ class DynamicOpenAICompatibleProvider:
     will override their default endpoint without creating a custom provider.
     """
 
-    # Class attribute - no need to instantiate
-    skip_cost_calculation: bool = True
+    # Cost calculation is handled by this plugin using pricing from the
+    # provider's /v1/models response, not by LiteLLM's internal database.
+    skip_cost_calculation: bool = False
+
+    # Class-level pricing cache shared across all instances.
+    # Key: full model name (e.g. "lightning_ai/anthropic/claude-opus-4-6")
+    # Value: (input_cost_per_token, output_cost_per_token)
+    _all_provider_pricing: Dict[str, Dict[str, tuple]] = {}
 
     def __init__(self, provider_name: str):
         self.provider_name = provider_name
@@ -48,10 +57,73 @@ class DynamicOpenAICompatibleProvider:
 
         self.model_definitions = ModelDefinitions()
 
+        # Eagerly fetch pricing on first instantiation for this provider
+        if provider_name not in DynamicOpenAICompatibleProvider._all_provider_pricing:
+            DynamicOpenAICompatibleProvider._all_provider_pricing[provider_name] = {}
+            self._fetch_pricing_sync()
+
+    @property
+    def _model_pricing(self) -> Dict[str, tuple]:
+        """Access the shared pricing dict for this provider."""
+        return DynamicOpenAICompatibleProvider._all_provider_pricing.get(
+            self.provider_name, {}
+        )
+
+    def _fetch_pricing_sync(self):
+        """Eagerly fetch model pricing from the provider's /v1/models endpoint."""
+        import httpx as _httpx
+
+        provider_upper = self.provider_name.upper()
+        # Find the first API key for this provider
+        api_key = None
+        for i in range(1, 20):
+            key = os.getenv(f"{provider_upper}_API_KEY_{i}")
+            if key:
+                api_key = key
+                break
+        if not api_key:
+            return
+
+        try:
+            models_url = f"{self.api_base.rstrip('/')}/models"
+            resp = _httpx.get(
+                models_url,
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=15.0,
+            )
+            resp.raise_for_status()
+            api_models = resp.json().get("data", [])
+            pricing_dict = DynamicOpenAICompatibleProvider._all_provider_pricing[
+                self.provider_name
+            ]
+            captured = 0
+            for model_data in api_models:
+                model_id = model_data.get("id", "")
+                full_model_name = f"{self.provider_name}/{model_id}"
+                pricing = model_data.get("pricing")
+                if pricing:
+                    input_cost = pricing.get("input_cost_per_million_tokens")
+                    output_cost = pricing.get("output_cost_per_million_tokens")
+                    if input_cost is not None or output_cost is not None:
+                        pricing_dict[full_model_name] = (
+                            float(input_cost or 0),
+                            float(output_cost or 0),
+                        )
+                        captured += 1
+            if captured:
+                lib_logger.info(
+                    f"Captured pricing for {captured} models from {self.provider_name}"
+                )
+        except Exception as exc:
+            lib_logger.debug(
+                f"Failed to fetch pricing for {self.provider_name}: {exc}"
+            )
+
     async def get_models(self, api_key: str, client):
         """
         Fetch models from the OpenAI-compatible API.
         Combines static definitions with dynamic discovery.
+        Also captures per-model pricing if provided by the API.
 
         Note: We can't delegate to OpenAICompatibleProvider because it's a singleton,
         and concurrent calls from multiple dynamic providers would share the same instance.
@@ -74,17 +146,69 @@ class DynamicOpenAICompatibleProvider:
             response.raise_for_status()
 
             static_model_names = {m.split("/")[-1] for m in static_models}
-            dynamic_models = [
-                f"{self.provider_name}/{model['id']}"
-                for model in response.json().get("data", [])
-                if model["id"] not in static_model_names
-            ]
-            models.extend(dynamic_models)
+            api_models = response.json().get("data", [])
+
+            pricing_dict = DynamicOpenAICompatibleProvider._all_provider_pricing.setdefault(
+                self.provider_name, {}
+            )
+
+            for model_data in api_models:
+                model_id = model_data.get("id", "")
+                full_model_name = f"{self.provider_name}/{model_id}"
+
+                if model_id not in static_model_names:
+                    models.append(full_model_name)
+
+                # Capture pricing if the API provides it
+                pricing = model_data.get("pricing")
+                if pricing:
+                    input_cost = pricing.get("input_cost_per_million_tokens")
+                    output_cost = pricing.get("output_cost_per_million_tokens")
+                    if input_cost is not None or output_cost is not None:
+                        # Despite the field name, these are per-token costs
+                        # (verified: $15/M tokens = $0.000015 per token)
+                        pricing_dict[full_model_name] = (
+                            float(input_cost or 0),
+                            float(output_cost or 0),
+                        )
+
+
+            if self._model_pricing:
+                lib_logger.info(
+                    f"Captured pricing for {len(self._model_pricing)} models "
+                    f"from {self.provider_name}"
+                )
 
         except Exception:
             pass  # Static models are sufficient if dynamic discovery fails
 
         return models
+
+    def calculate_cost(
+        self,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+    ) -> float:
+        """
+        Calculate cost using pricing captured from the provider's API.
+
+        Args:
+            model: Full model name (e.g. "lightning_ai/anthropic/claude-opus-4-6")
+            prompt_tokens: Number of input tokens
+            completion_tokens: Number of output tokens
+
+        Returns:
+            Approximate cost in dollars, or 0.0 if no pricing available
+        """
+        pricing = self._model_pricing.get(model)
+        if not pricing:
+            return 0.0
+
+        input_cost_per_token, output_cost_per_token = pricing
+        return (prompt_tokens * input_cost_per_token) + (
+            completion_tokens * output_cost_per_token
+        )
 
     def get_model_options(self, model_name: str) -> Dict[str, any]:
         """Get model options from static definitions."""
@@ -135,11 +259,7 @@ def _register_providers():
                 if provider_name == "nvidia":
                     provider_name = "nvidia_nim"
                 PROVIDER_PLUGINS[provider_name] = attribute
-                import logging
-
-                logging.getLogger("rotator_library").debug(
-                    f"Registered provider: {provider_name}"
-                )
+                lib_logger.debug(f"Registered provider: {provider_name}")
 
     # Then, create dynamic plugins for custom OpenAI-compatible providers
     # These use the pattern: <NAME>_API_BASE where NAME is not a known LiteLLM provider
@@ -171,11 +291,7 @@ def _register_providers():
             # Create and register the plugin class
             plugin_class = create_plugin_class(provider_name)
             PROVIDER_PLUGINS[provider_name] = plugin_class
-            import logging
-
-            logging.getLogger("rotator_library").debug(
-                f"Registered dynamic provider: {provider_name}"
-            )
+            lib_logger.debug(f"Registered dynamic provider: {provider_name}")
 
 
 # Discover and register providers when the package is imported

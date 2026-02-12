@@ -1519,6 +1519,47 @@ class UsageManager:
 
         return None
 
+    def get_window_request_count(
+        self,
+        accessor: str,
+        model: str,
+        quota_group: Optional[str] = None,
+    ) -> Optional[int]:
+        """Get the current request count from the primary usage window.
+
+        Used by quota trackers to support dynamic limit learning from
+        observed fraction changes. Returns the raw request_count from
+        the usage window without modifying any state.
+
+        Args:
+            accessor: Credential path/accessor string
+            model: Model name (with provider prefix, e.g., "antigravity/claude-sonnet-4-5")
+            quota_group: Optional quota group name (if quota is tracked at group level)
+
+        Returns:
+            Current request_count from the primary window, or None if not found.
+        """
+        stable_id = self._registry.get_stable_id(accessor, self.provider)
+        state = self._states.get(stable_id)
+        if not state:
+            return None
+
+        normalized_model = self._normalize_model(model)
+        group_key = quota_group or self._get_model_quota_group(normalized_model)
+
+        primary_def = self._window_manager.get_primary_definition()
+        if not primary_def:
+            return None
+
+        if group_key:
+            group_stats = state.get_group_stats(group_key)
+            window = group_stats.windows.get(primary_def.name)
+        else:
+            model_stats = state.get_model_stats(normalized_model)
+            window = model_stats.windows.get(primary_def.name)
+
+        return window.request_count if window else None
+
     # =========================================================================
     # WINDOW CLEANUP
     # =========================================================================

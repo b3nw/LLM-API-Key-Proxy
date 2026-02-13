@@ -401,7 +401,7 @@ class ProviderTransforms:
     # GLM-5 / GLM-4 thinking model minimum token floor
     GLM_MIN_MAX_TOKENS = 4096
 
-    def _transform_glm5_max_tokens(
+    def _transform_glm_max_tokens(
         self,
         kwargs: Dict[str, Any],
         model: str,

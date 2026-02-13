@@ -342,11 +342,18 @@ class QwenAuthBase:
             if not force and cached_creds and not self._is_token_expired(cached_creds):
                 return cached_creds
 
-            # [ROTATING TOKEN FIX] Always read fresh from disk before refresh.
+            # [ROTATING TOKEN FIX] Always read fresh credentials before refresh.
             # Qwen uses rotating refresh tokens - each refresh invalidates the previous token.
             # If we use a stale cached token, refresh will fail with HTTP 400.
-            # Reading fresh from disk ensures we have the latest token.
-            await self._read_creds_from_file(path)
+            if path.startswith("env://"):
+                # For env:// paths, clear cache and re-load from environment variables.
+                # Env vars are static at runtime, but clearing cache ensures we pick up
+                # any updates from _save_credentials that modified the cached copy.
+                self._credentials_cache.pop(path, None)
+                await self._load_credentials(path)
+            else:
+                # For file paths, read fresh from disk to get the latest rotating token.
+                await self._read_creds_from_file(path)
             creds_from_file = self._credentials_cache[path]
 
             lib_logger.debug(f"Refreshing Qwen OAuth token for '{Path(path).name}'...")
@@ -529,24 +536,13 @@ class QwenAuthBase:
         - env:// virtual path: credential_identifier is "env://provider/index"
         - Direct API key: credential_identifier is the API key string itself
         """
-        # Check for env:// virtual paths first (before os.path.isfile check)
-        if credential_identifier.startswith("env://"):
-            lib_logger.debug(
-                f"Using OAuth credentials from env path: {credential_identifier}"
-            )
-            creds = await self._load_credentials(credential_identifier)
+        is_oauth = credential_identifier.startswith("env://") or os.path.isfile(
+            credential_identifier
+        )
 
-            if self._is_token_expired(creds):
-                creds = await self._refresh_token(credential_identifier)
-
-            base_url = creds.get("resource_url", "https://portal.qwen.ai/v1")
-            if not base_url.startswith("http"):
-                base_url = f"https://{base_url}"
-            access_token = creds["access_token"]
-        elif os.path.isfile(credential_identifier):
-            # OAuth credential: file path to JSON
+        if is_oauth:
             lib_logger.debug(
-                f"Using OAuth credentials from file: {credential_identifier}"
+                f"Using OAuth credentials from: {credential_identifier}"
             )
             creds = await self._load_credentials(credential_identifier)
 

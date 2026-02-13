@@ -535,9 +535,13 @@ class QwenAuthBase:
         - env:// virtual path: credential_identifier is "env://provider/index"
         - Direct API key: credential_identifier is the API key string itself
         """
-        is_oauth = credential_identifier.startswith("env://") or os.path.isfile(
-            credential_identifier
-        )
+        try:
+            is_oauth = credential_identifier.startswith("env://") or os.path.isfile(
+                credential_identifier
+            )
+        except (OSError, ValueError):
+            # os.path.isfile can raise on invalid path strings (e.g. very long API keys)
+            is_oauth = False
 
         if is_oauth:
             lib_logger.debug(

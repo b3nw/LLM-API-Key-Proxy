@@ -65,8 +65,8 @@ class ProviderTransforms:
             "iflow": [self._transform_iflow_stream_options],
             "dedaluslabs": [self._transform_dedaluslabs_tool_choice],
             "kimi-k2.5": [self._transform_kimi_parameters],
-            "glm-5": [self._transform_glm5_max_tokens],
-            "glm-4": [self._transform_glm5_max_tokens],
+            "glm-5": [self._transform_glm_max_tokens],
+            "glm-4": [self._transform_glm_max_tokens],
         }
 
     def _get_plugin_instance(self, provider: str) -> Optional[Any]:

@@ -342,18 +342,17 @@ class QwenAuthBase:
             if not force and cached_creds and not self._is_token_expired(cached_creds):
                 return cached_creds
 
-            # [ROTATING TOKEN FIX] Always read fresh credentials before refresh.
+            # [ROTATING TOKEN FIX] Read fresh credentials before refresh.
             # Qwen uses rotating refresh tokens - each refresh invalidates the previous token.
             # If we use a stale cached token, refresh will fail with HTTP 400.
-            if path.startswith("env://"):
-                # For env:// paths, clear cache and re-load from environment variables.
-                # Env vars are static at runtime, but clearing cache ensures we pick up
-                # any updates from _save_credentials that modified the cached copy.
-                self._credentials_cache.pop(path, None)
-                await self._load_credentials(path)
-            else:
-                # For file paths, read fresh from disk to get the latest rotating token.
+            if not path.startswith("env://"):
+                # For file paths, read fresh from disk to pick up tokens that may have
+                # been updated by another process or a previous refresh cycle.
                 await self._read_creds_from_file(path)
+            # For env:// paths, the in-memory cache is the single source of truth.
+            # _save_credentials updates the cache after each refresh, so the cache
+            # always holds the latest rotating tokens. Re-reading from static env vars
+            # would discard the rotated refresh_token and break subsequent refreshes.
             creds_from_file = self._credentials_cache[path]
 
             lib_logger.debug(f"Refreshing Qwen OAuth token for '{Path(path).name}'...")

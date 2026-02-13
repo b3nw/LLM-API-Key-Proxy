@@ -524,12 +524,26 @@ class QwenAuthBase:
         """
         Returns the API base URL and access token.
 
-        Supports both credential types:
-        - OAuth: credential_identifier is a file path to JSON credentials
-        - API Key: credential_identifier is the API key string itself
+        Supports three credential types:
+        - OAuth file: credential_identifier is a file path to JSON credentials
+        - env:// virtual path: credential_identifier is "env://provider/index"
+        - Direct API key: credential_identifier is the API key string itself
         """
-        # Detect credential type
-        if os.path.isfile(credential_identifier):
+        # Check for env:// virtual paths first (before os.path.isfile check)
+        if credential_identifier.startswith("env://"):
+            lib_logger.debug(
+                f"Using OAuth credentials from env path: {credential_identifier}"
+            )
+            creds = await self._load_credentials(credential_identifier)
+
+            if self._is_token_expired(creds):
+                creds = await self._refresh_token(credential_identifier)
+
+            base_url = creds.get("resource_url", "https://portal.qwen.ai/v1")
+            if not base_url.startswith("http"):
+                base_url = f"https://{base_url}"
+            access_token = creds["access_token"]
+        elif os.path.isfile(credential_identifier):
             # OAuth credential: file path to JSON
             lib_logger.debug(
                 f"Using OAuth credentials from file: {credential_identifier}"

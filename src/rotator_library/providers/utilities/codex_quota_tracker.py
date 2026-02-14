@@ -301,6 +301,11 @@ class CodexQuotaTracker:
         """Initialize quota tracker state. Call from provider's __init__."""
         self._quota_cache: Dict[str, CodexQuotaSnapshot] = {}
         self._quota_refresh_interval: int = DEFAULT_QUOTA_REFRESH_INTERVAL
+        self._usage_manager: Optional["UsageManager"] = None
+
+    def set_usage_manager(self, usage_manager: "UsageManager") -> None:
+        """Set the UsageManager reference for pushing quota updates."""
+        self._usage_manager = usage_manager
 
     # =========================================================================
     # QUOTA API FETCHING
@@ -448,6 +453,7 @@ class CodexQuotaTracker:
         Update cached quota info from response headers.
 
         Call this after each API response to keep quota cache up-to-date.
+        Also pushes quota data to the UsageManager if available.
 
         Args:
             credential_path: Credential that made the request
@@ -484,7 +490,75 @@ class CodexQuotaTracker:
                 f"{remaining:.0f}% remaining, resets in {reset_str}"
             )
 
+        # Push quota data to UsageManager if available
+        if self._usage_manager:
+            self._push_quota_to_usage_manager(credential_path, snapshot)
+
         return snapshot
+
+    def _push_quota_to_usage_manager(
+        self,
+        credential_path: str,
+        snapshot: CodexQuotaSnapshot,
+    ) -> None:
+        """
+        Push parsed quota snapshot to the UsageManager.
+
+        Translates the primary/secondary rate limit windows into
+        update_quota_baseline calls so the TUI can display quota status.
+        """
+        if not self._usage_manager:
+            return
+
+        provider_prefix = getattr(self, "provider_env_name", "codex")
+
+        try:
+            import asyncio
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            return
+
+        async def _push():
+            try:
+                if snapshot.primary:
+                    used_pct = snapshot.primary.used_percent
+                    # Convert percentage to a request count on a 100-scale
+                    quota_used = int(used_pct)
+                    await self._usage_manager.update_quota_baseline(
+                        accessor=credential_path,
+                        model=f"{provider_prefix}/_5h_window",
+                        quota_max_requests=100,
+                        quota_reset_ts=snapshot.primary.reset_at,
+                        quota_used=quota_used,
+                        quota_group="5h-limit",
+                        force=True,
+                        apply_exhaustion=snapshot.primary.is_exhausted,
+                    )
+
+                if snapshot.secondary:
+                    used_pct = snapshot.secondary.used_percent
+                    quota_used = int(used_pct)
+                    await self._usage_manager.update_quota_baseline(
+                        accessor=credential_path,
+                        model=f"{provider_prefix}/_weekly_window",
+                        quota_max_requests=100,
+                        quota_reset_ts=snapshot.secondary.reset_at,
+                        quota_used=quota_used,
+                        quota_group="weekly-limit",
+                        force=True,
+                        apply_exhaustion=snapshot.secondary.is_exhausted,
+                    )
+            except Exception as e:
+                lib_logger.debug(
+                    f"Failed to push Codex quota to UsageManager: {e}"
+                )
+
+        # Schedule the async push - we're already in an async context
+        # when this is called from the streaming/non-streaming handlers
+        if loop.is_running():
+            asyncio.ensure_future(_push())
+        else:
+            loop.run_until_complete(_push())
 
     def get_cached_quota(
         self,

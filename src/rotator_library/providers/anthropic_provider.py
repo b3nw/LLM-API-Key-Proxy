@@ -161,8 +161,10 @@ def _convert_openai_to_anthropic_messages(
                                             "data": data,
                                         },
                                     })
-                                except Exception:
-                                    pass
+                                except (ValueError, IndexError):
+                                    lib_logger.debug(
+                                        "Failed to parse data URI image in user message, skipping."
+                                    )
                 if parts:
                     anthropic_messages.append({"role": "user", "content": parts})
             continue

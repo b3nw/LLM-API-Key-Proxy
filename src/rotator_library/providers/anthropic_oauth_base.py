@@ -29,9 +29,13 @@ from glob import glob
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+import webbrowser
+from urllib.parse import urlencode, urlparse, parse_qs
+
 import httpx
 from rich.console import Console
 from rich.panel import Panel
+from rich.prompt import Prompt as RichPrompt
 from rich.text import Text
 from rich.markup import escape as rich_escape
 
@@ -361,7 +365,7 @@ class AnthropicOAuthBase:
             if not refresh_token:
                 raise ValueError("No refresh_token found in Anthropic credentials.")
 
-            max_retries = 3
+            max_retries = self._refresh_max_retries
             new_token_data = None
             last_error = None
 
@@ -377,7 +381,7 @@ class AnthropicOAuthBase:
                                 "client_id": self.CLIENT_ID,
                             },
                             headers={"Content-Type": "application/json"},
-                            timeout=30.0,
+                            timeout=self._refresh_timeout_seconds,
                         )
                         response.raise_for_status()
                         new_token_data = response.json()
@@ -677,8 +681,6 @@ class AnthropicOAuthBase:
         # Anthropic uses the PKCE verifier as the state value (per opencode-anthropic-auth plugin)
         state = code_verifier
 
-        from urllib.parse import urlencode
-
         auth_params = {
             "code": "true",  # Required by Anthropic OAuth
             "client_id": self.CLIENT_ID,
@@ -718,7 +720,6 @@ class AnthropicOAuthBase:
         console.print(f"[bold]URL:[/bold] [link={auth_url}]{escaped_url}[/link]\n")
 
         if not is_headless:
-            import webbrowser
             try:
                 webbrowser.open(auth_url)
                 lib_logger.info("Browser opened successfully for Anthropic OAuth flow")
@@ -749,7 +750,6 @@ class AnthropicOAuthBase:
         # 3. Bare code
         auth_code = raw_input
         if "?" in raw_input or raw_input.startswith("http"):
-            from urllib.parse import urlparse, parse_qs
             parsed = urlparse(raw_input)
             qs = parse_qs(parsed.query)
             if "code" in qs:
@@ -797,7 +797,6 @@ class AnthropicOAuthBase:
             }
 
             # Prompt for an identifier — Anthropic's token response contains no email
-            from rich.prompt import Prompt as RichPrompt
             try:
                 identifier = RichPrompt.ask(
                     "\n[bold]Enter an identifier for this credential "

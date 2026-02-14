@@ -8,6 +8,7 @@ from .providers.qwen_auth_base import QwenAuthBase
 from .providers.iflow_auth_base import IFlowAuthBase
 from .providers.antigravity_auth_base import AntigravityAuthBase
 from .providers.openai_oauth_base import OpenAIOAuthBase
+from .providers.anthropic_oauth_base import AnthropicOAuthBase
 
 PROVIDER_MAP = {
     "gemini_cli": GeminiAuthBase,
@@ -15,6 +16,7 @@ PROVIDER_MAP = {
     "iflow": IFlowAuthBase,
     "antigravity": AntigravityAuthBase,
     "codex": OpenAIOAuthBase,
+    "anthropic": AnthropicOAuthBase,
 }
 
 def get_provider_auth_class(provider_name: str):

@@ -12,6 +12,7 @@ A personal fork of [Mirrowel/LLM-API-Key-Proxy](https://github.com/Mirrowel/LLM-
 
 | Provider | Description |
 |----------|-------------|
+| **Codex** | OpenAI Codex (Responses API) with OAuth-based quota tracking |
 | **Cursor** | Cursor IDE API with quota monitoring integration |
 | **ZenMux** | OpenAI-compatible provider with custom header support for free models |
 | **DedalusLabs** | OpenAI-compatible provider with tool_choice handling |
@@ -46,6 +47,9 @@ Or use the Komodo stack for deployment.
 See upstream documentation for base configuration. Fork-specific variables:
 
 ```bash
+# OpenAI Codex (OAuth)
+CODEX_API_KEY_1=env://oauth_creds/codex_oauth_1.json
+
 # Cursor provider
 CURSOR_API_KEY_1=your-cursor-key
 

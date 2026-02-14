@@ -634,7 +634,7 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
         }
 
         if account_id:
-            headers["chatgpt-account-id"] = account_id
+            headers["ChatGPT-Account-Id"] = account_id
 
         # Add any extra headers
         headers.update(extra_headers)

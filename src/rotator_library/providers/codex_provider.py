@@ -512,7 +512,7 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
     skip_cost_calculation: bool = True  # Cost calculation handled differently
 
     # Rotation configuration
-    default_rotation_mode: str = "balanced"
+    default_rotation_mode: str = "sequential"
 
     # Tier configuration
     tier_priorities: Dict[str, int] = {

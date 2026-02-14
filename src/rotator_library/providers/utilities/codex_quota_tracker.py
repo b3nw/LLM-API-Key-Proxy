@@ -761,6 +761,8 @@ class CodexQuotaTracker:
         self,
         quota_results: Dict[str, Dict[str, Any]],
         usage_manager: "UsageManager",
+        force: bool = False,
+        is_initial_fetch: bool = False,
     ) -> int:
         """
         Store Codex quota baselines into UsageManager.
@@ -772,6 +774,8 @@ class CodexQuotaTracker:
         Args:
             quota_results: Dict from fetch_initial_baselines mapping cred_path -> quota data
             usage_manager: UsageManager instance to store baselines in
+            force: If True, always overwrite existing values
+            is_initial_fetch: If True, apply exhaustion cooldowns
 
         Returns:
             Number of baselines successfully stored
@@ -799,14 +803,19 @@ class CodexQuotaTracker:
             # Store primary window (5h limit) under virtual model "_5h_window"
             if primary:
                 primary_remaining = primary.get("remaining_fraction", 1.0)
+                primary_used_pct = primary.get("used_percent", 0)
                 primary_reset = primary.get("reset_at")
+                is_exhausted = primary.get("is_exhausted", False)
                 try:
                     await usage_manager.update_quota_baseline(
-                        cred_path,
-                        f"{provider_prefix}/_5h_window",
-                        primary_remaining,
-                        max_requests=100,  # Percentage scale
-                        reset_timestamp=primary_reset,
+                        accessor=cred_path,
+                        model=f"{provider_prefix}/_5h_window",
+                        quota_max_requests=100,
+                        quota_reset_ts=primary_reset,
+                        quota_used=int(primary_used_pct),
+                        quota_group="5h-limit",
+                        force=force,
+                        apply_exhaustion=is_exhausted and is_initial_fetch,
                     )
                     stored_count += 1
                     lib_logger.debug(
@@ -821,14 +830,19 @@ class CodexQuotaTracker:
             # Store secondary window (weekly limit) under virtual model "_weekly_window"
             if secondary:
                 secondary_remaining = secondary.get("remaining_fraction", 1.0)
+                secondary_used_pct = secondary.get("used_percent", 0)
                 secondary_reset = secondary.get("reset_at")
+                is_exhausted = secondary.get("is_exhausted", False)
                 try:
                     await usage_manager.update_quota_baseline(
-                        cred_path,
-                        f"{provider_prefix}/_weekly_window",
-                        secondary_remaining,
-                        max_requests=100,  # Percentage scale
-                        reset_timestamp=secondary_reset,
+                        accessor=cred_path,
+                        model=f"{provider_prefix}/_weekly_window",
+                        quota_max_requests=100,
+                        quota_reset_ts=secondary_reset,
+                        quota_used=int(secondary_used_pct),
+                        quota_group="weekly-limit",
+                        force=force,
+                        apply_exhaustion=is_exhausted and is_initial_fetch,
                     )
                     stored_count += 1
                     lib_logger.debug(

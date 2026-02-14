@@ -219,11 +219,8 @@ class AnthropicOAuthBase:
         refresh_token = oauth_data.get("refreshToken", "")
         expires_at = oauth_data.get("expiresAt", 0)
 
-        # expiresAt is in milliseconds
-        if expires_at > 1e12:
-            expiry_date = expires_at / 1000
-        else:
-            expiry_date = expires_at
+        # expiresAt may be in milliseconds — normalise to seconds
+        expiry_date = self._normalize_expiry(expires_at)
 
         creds = {
             "access_token": access_token,
@@ -314,33 +311,33 @@ class AnthropicOAuthBase:
     # TOKEN EXPIRY CHECKS
     # =========================================================================
 
+    def _normalize_expiry(self, raw: Any) -> float:
+        """Normalize an expiry value to a Unix timestamp in seconds.
+
+        Handles string coercion and millisecond timestamps (values > 1e12).
+        Returns 0.0 on invalid input so callers treat the token as expired.
+        """
+        if isinstance(raw, str):
+            try:
+                raw = float(raw)
+            except ValueError:
+                return 0.0
+        try:
+            ts = float(raw)
+        except (TypeError, ValueError):
+            return 0.0
+        if ts > 1e12:
+            ts /= 1000
+        return ts
+
     def _is_token_expired(self, creds: Dict[str, Any]) -> bool:
         """Check if access token is expired or near expiry."""
-        expiry_timestamp = creds.get("expiry_date", 0)
-        if isinstance(expiry_timestamp, str):
-            try:
-                expiry_timestamp = float(expiry_timestamp)
-            except ValueError:
-                expiry_timestamp = 0
-
-        # Handle milliseconds vs seconds
-        if expiry_timestamp > 1e12:
-            expiry_timestamp = expiry_timestamp / 1000
-
+        expiry_timestamp = self._normalize_expiry(creds.get("expiry_date", 0))
         return expiry_timestamp < time.time() + self.REFRESH_EXPIRY_BUFFER_SECONDS
 
     def _is_token_truly_expired(self, creds: Dict[str, Any]) -> bool:
         """Check if token is TRULY expired (past actual expiry)."""
-        expiry_timestamp = creds.get("expiry_date", 0)
-        if isinstance(expiry_timestamp, str):
-            try:
-                expiry_timestamp = float(expiry_timestamp)
-            except ValueError:
-                expiry_timestamp = 0
-
-        if expiry_timestamp > 1e12:
-            expiry_timestamp = expiry_timestamp / 1000
-
+        expiry_timestamp = self._normalize_expiry(creds.get("expiry_date", 0))
         return expiry_timestamp < time.time()
 
     # =========================================================================
@@ -738,36 +735,45 @@ class AnthropicOAuthBase:
 
         # Use asyncio-compatible input
         loop = asyncio.get_running_loop()
-        raw_input = await loop.run_in_executor(None, input, "> ")
-        raw_input = raw_input.strip()
+        pasted_input = await loop.run_in_executor(None, input, "> ")
+        pasted_input = pasted_input.strip()
 
-        if not raw_input:
+        if not pasted_input:
             raise Exception("No authorization code provided.")
 
         # Parse the code from whatever the user pasted:
         # 1. Full redirect URL: extract ?code= query param
         # 2. code#state fragment format (as shown on Anthropic callback page)
         # 3. Bare code
-        auth_code = raw_input
-        if "?" in raw_input or raw_input.startswith("http"):
-            parsed = urlparse(raw_input)
+        auth_code = pasted_input
+        if "?" in pasted_input or pasted_input.startswith("http"):
+            parsed = urlparse(pasted_input)
             qs = parse_qs(parsed.query)
             if "code" in qs:
                 auth_code = qs["code"][0]
             else:
                 # Fallback: treat everything before # as the code
-                auth_code = raw_input.split("#")[0].split("?")[-1]
-        elif "#" in raw_input:
+                auth_code = pasted_input.split("#")[0].split("?")[-1]
+        elif "#" in pasted_input:
             # code#state format — take only the part before #
-            auth_code = raw_input.split("#")[0]
+            auth_code = pasted_input.split("#")[0]
 
         auth_code = auth_code.strip()
         if not auth_code:
             raise Exception("Could not extract authorization code from input.")
 
-        # Extract state from the raw input (if present as code#state)
-        # Anthropic requires state to be echoed back in the token exchange
-        raw_state = raw_input.split("#")[1] if "#" in raw_input else state
+        # Extract state from the user's input to echo back in the token exchange.
+        # - Full URL: state is in the query string (?state=...)
+        # - code#state format: state follows the '#'
+        # - Bare code: use the locally-generated state (code_verifier)
+        if "?" in pasted_input or pasted_input.startswith("http"):
+            _qs = parse_qs(urlparse(pasted_input).query)
+            raw_state = _qs.get("state", [state])[0] or state
+        elif "#" in pasted_input:
+            _parts = pasted_input.split("#", 1)
+            raw_state = _parts[1].strip() if len(_parts) > 1 and _parts[1].strip() else state
+        else:
+            raw_state = state
 
         lib_logger.info("Exchanging authorization code for tokens...")
 

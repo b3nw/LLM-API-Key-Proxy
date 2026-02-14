@@ -1729,14 +1729,7 @@ async def setup_new_credential(provider_name: str):
         auth_instance = auth_class()
 
         # Build display name for better user experience
-        oauth_friendly_names = {
-            "gemini_cli": "Gemini CLI (OAuth)",
-            "qwen_code": "Qwen Code (OAuth - also supports API keys)",
-            "iflow": "iFlow",
-            "antigravity": "Antigravity (OAuth)",
-            "anthropic": "Claude / Claude Code (Pro & Max)",
-        }
-        display_name = oauth_friendly_names.get(
+        display_name = OAUTH_FRIENDLY_NAMES.get(
             provider_name, provider_name.replace("_", " ").title()
         )
 

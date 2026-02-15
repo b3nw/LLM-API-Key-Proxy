@@ -850,6 +850,15 @@ class QuotaViewer:
                             # No windows = no data, skip
                             continue
 
+                        # Skip groups that have no limits across any window
+                        # (e.g., rotation-only groups like "codex-global")
+                        has_any_limit = any(
+                            ws.get("total_max", 0) > 0
+                            for ws in windows.values()
+                        )
+                        if not has_any_limit:
+                            continue
+
                         # Process each window for this group
                         for window_name, window_stats in windows.items():
                             total_remaining = window_stats.get("total_remaining", 0)
@@ -1309,6 +1318,14 @@ class QuotaViewer:
             for group_name, group_stats in group_usage.items():
                 windows = group_stats.get("windows", {})
                 if not windows:
+                    continue
+
+                # Skip groups that have no limits (rotation-only groups)
+                has_any_limit = any(
+                    w.get("limit") is not None
+                    for w in windows.values()
+                )
+                if not has_any_limit:
                     continue
 
                 # Get per-group status info

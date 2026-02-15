@@ -42,6 +42,7 @@ from .utilities.codex_quota_tracker import CodexQuotaTracker
 from ..model_definitions import ModelDefinitions
 from ..timeout_config import TimeoutConfig
 from ..error_handler import EmptyResponseError, TransientQuotaError
+from ..core.errors import StreamedAPIError
 
 if TYPE_CHECKING:
     from ..usage_manager import UsageManager
@@ -140,6 +141,32 @@ DEFAULT_REASONING_COMPAT = os.getenv("CODEX_REASONING_COMPAT", "think-tags")
 # Empty response retry configuration
 EMPTY_RESPONSE_MAX_ATTEMPTS = max(1, env_int("CODEX_EMPTY_RESPONSE_ATTEMPTS", 3))
 EMPTY_RESPONSE_RETRY_DELAY = env_int("CODEX_EMPTY_RESPONSE_RETRY_DELAY", 2)
+
+# Garbled tool call retry configuration
+# When the Responses API model emits tool calls as garbled text content
+# instead of structured function_call output items, automatically retry.
+# The garbled output takes multiple forms but always contains the ChatML-era
+# tool call format "to=functions.<name>" in the text content. Known prefixes:
+#   - "+#+#+#+#+#+assistant to=functions.exec ..."
+#   - "♀♀♀♀assistant to=functions.exec մelon..."
+#   - Various Unicode noise + "assistant to=functions.<name>"
+# This is an intermittent issue where the model reverts to ChatGPT's internal
+# chat completion format instead of the Responses API's structured output.
+GARBLED_TOOL_CALL_MAX_RETRIES = max(1, env_int("CODEX_GARBLED_TOOL_CALL_RETRIES", 3))
+GARBLED_TOOL_CALL_RETRY_DELAY = env_int("CODEX_GARBLED_TOOL_CALL_RETRY_DELAY", 1)
+
+# Multiple detection markers — if ANY match, the stream is considered garbled.
+# The "to=functions." pattern is the universal signature across all variants.
+GARBLED_TOOL_CALL_MARKERS = [
+    "+#+#",                    # Original marker
+    "to=functions.",           # ChatML tool call format (universal across all garble variants)
+    "♀♀♀♀",                   # Unicode variant seen in production
+]
+
+
+def _is_garbled_tool_call(text: str) -> bool:
+    """Check if text content contains garbled tool call markers."""
+    return any(marker in text for marker in GARBLED_TOOL_CALL_MARKERS)
 
 # System instruction for Codex models - loaded from file to preserve exact bytes
 # The ChatGPT backend API validates this instruction matches exactly
@@ -653,6 +680,7 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
             "input": input_items,
             "stream": True,  # Always use streaming internally
             "store": False,
+            "text": {"verbosity": "medium"},  # Match pi's default; controls output structure
         }
 
         if instructions:
@@ -672,15 +700,166 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
         lib_logger.debug(f"Codex request to {normalized_model}: {json.dumps(payload, default=str)[:500]}...")
 
         if stream:
-            return self._stream_response(
+            return self._stream_with_retry(
                 client, headers, payload, requested_model, kwargs.get("reasoning_compat", DEFAULT_REASONING_COMPAT),
                 credential_path
             )
         else:
-            return await self._non_stream_response(
+            return await self._non_stream_with_retry(
                 client, headers, payload, requested_model, kwargs.get("reasoning_compat", DEFAULT_REASONING_COMPAT),
                 credential_path
             )
+
+    async def _stream_with_retry(
+        self,
+        client: httpx.AsyncClient,
+        headers: Dict[str, str],
+        payload: Dict[str, Any],
+        model: str,
+        reasoning_compat: str,
+        credential_path: str = "",
+    ) -> AsyncGenerator[litellm.ModelResponse, None]:
+        """
+        Wrapper around _stream_response that retries on garbled tool calls.
+
+        When the Responses API model intermittently emits tool calls as garbled
+        text content (containing markers like +#+# or to=functions.), this
+        wrapper detects the pattern and retries the entire request.
+
+        Uses a buffer-then-flush approach: all chunks are collected first,
+        then checked for the garbled marker. Only if the stream is clean
+        are chunks yielded to the caller. This allows true retry since
+        no chunks have been sent to the HTTP client yet.
+
+        Detection is done both per-chunk (for early abort) AND on the
+        accumulated text after stream completion (to catch markers that
+        are split across multiple SSE chunks).
+        """
+        for attempt in range(GARBLED_TOOL_CALL_MAX_RETRIES):
+            garbled_detected = False
+            buffered_chunks: list = []
+            accumulated_text = ""  # Track all text content across chunks
+
+            try:
+                async for chunk in self._stream_response(
+                    client, headers, payload, model, reasoning_compat, credential_path
+                ):
+                    # Extract content from this chunk for garble detection
+                    # NOTE: delta is a dict (not an object), so use dict access
+                    chunk_content = ""
+                    if hasattr(chunk, "choices") and chunk.choices:
+                        choice = chunk.choices[0]
+                        delta = getattr(choice, "delta", None)
+                        if delta:
+                            if isinstance(delta, dict):
+                                chunk_content = delta.get("content") or ""
+                            else:
+                                chunk_content = getattr(delta, "content", None) or ""
+
+                    # Accumulate text for cross-chunk detection
+                    if chunk_content:
+                        accumulated_text += chunk_content
+
+                    # Per-chunk check (catches garble within a single chunk)
+                    if chunk_content and _is_garbled_tool_call(chunk_content):
+                        garbled_detected = True
+                        lib_logger.warning(
+                            f"[Codex] Garbled tool call detected (per-chunk) in stream for {model}, "
+                            f"attempt {attempt + 1}/{GARBLED_TOOL_CALL_MAX_RETRIES}. "
+                            f"Content snippet: {chunk_content[:200]!r}"
+                        )
+                        break  # Stop consuming this stream
+
+                    buffered_chunks.append(chunk)
+
+                # Post-stream check: inspect accumulated text for markers split across chunks
+                if not garbled_detected and _is_garbled_tool_call(accumulated_text):
+                    garbled_detected = True
+                    # Find the garbled portion for logging
+                    snippet_start = max(0, len(accumulated_text) - 200)
+                    lib_logger.warning(
+                        f"[Codex] Garbled tool call detected (accumulated) in stream for {model}, "
+                        f"attempt {attempt + 1}/{GARBLED_TOOL_CALL_MAX_RETRIES}. "
+                        f"Tail of accumulated text: {accumulated_text[snippet_start:]!r}"
+                    )
+
+                if not garbled_detected:
+                    # Stream was clean — flush all buffered chunks to caller
+                    for chunk in buffered_chunks:
+                        yield chunk
+                    return  # Done
+
+            except Exception:
+                if garbled_detected:
+                    # Exception during stream teardown after garble detected - continue to retry
+                    pass
+                else:
+                    raise  # Non-garble exception - propagate
+
+            # Garbled stream detected — discard buffer and retry if we have attempts left
+            if attempt < GARBLED_TOOL_CALL_MAX_RETRIES - 1:
+                lib_logger.info(
+                    f"[Codex] Retrying request for {model} after garbled tool call "
+                    f"(attempt {attempt + 2}/{GARBLED_TOOL_CALL_MAX_RETRIES}). "
+                    f"Discarding {len(buffered_chunks)} buffered chunks, "
+                    f"{len(accumulated_text)} chars of accumulated text."
+                )
+                await asyncio.sleep(GARBLED_TOOL_CALL_RETRY_DELAY)
+            else:
+                lib_logger.error(
+                    f"[Codex] Garbled tool call persisted after {GARBLED_TOOL_CALL_MAX_RETRIES} "
+                    f"attempts for {model}. Flushing last attempt's buffer."
+                )
+                # Flush the last attempt's buffer (garbled but better than nothing)
+                for chunk in buffered_chunks:
+                    yield chunk
+                return
+
+    async def _non_stream_with_retry(
+        self,
+        client: httpx.AsyncClient,
+        headers: Dict[str, str],
+        payload: Dict[str, Any],
+        model: str,
+        reasoning_compat: str,
+        credential_path: str = "",
+    ) -> litellm.ModelResponse:
+        """
+        Wrapper around _non_stream_response that retries on garbled tool calls.
+
+        For non-streaming responses, the entire response is collected before
+        returning, so we can inspect the accumulated text and retry if the
+        garbled tool call marker is found.
+        """
+        for attempt in range(GARBLED_TOOL_CALL_MAX_RETRIES):
+            response = await self._non_stream_response(
+                client, headers, payload, model, reasoning_compat, credential_path
+            )
+
+            # Check accumulated content for garbled marker
+            content = None
+            if hasattr(response, "choices") and response.choices:
+                message = getattr(response.choices[0], "message", None)
+                if message:
+                    content = getattr(message, "content", None)
+
+            if content and _is_garbled_tool_call(content):
+                if attempt < GARBLED_TOOL_CALL_MAX_RETRIES - 1:
+                    lib_logger.warning(
+                        f"[Codex] Garbled tool call detected in non-stream response for {model}, "
+                        f"attempt {attempt + 1}/{GARBLED_TOOL_CALL_MAX_RETRIES}. "
+                        f"Content snippet: {content[:100]!r}. Retrying..."
+                    )
+                    await asyncio.sleep(GARBLED_TOOL_CALL_RETRY_DELAY)
+                    continue
+                else:
+                    lib_logger.error(
+                        f"[Codex] Garbled tool call persisted after {GARBLED_TOOL_CALL_MAX_RETRIES} "
+                        f"attempts for {model} (non-stream). Returning last response."
+                    )
+
+            return response
+
 
     async def _stream_response(
         self,
@@ -875,6 +1054,7 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
 
                 # Handle completion
                 elif kind == "response.completed":
+
                     # Determine finish reason
                     finish_reason = "stop"
                     if current_tool_calls:
@@ -939,7 +1119,7 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
                     error = evt.get("response", {}).get("error", {})
                     error_msg = error.get("message", "Response failed")
                     lib_logger.error(f"Codex response failed: {error_msg}")
-                    raise Exception(f"Codex response failed: {error_msg}")
+                    raise StreamedAPIError(f"Codex response failed: {error_msg}")
 
     async def _non_stream_response(
         self,
@@ -1058,7 +1238,7 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
                     error_message = error.get("message", "Response failed")
 
         if error_message:
-            raise Exception(f"Codex response failed: {error_message}")
+            raise StreamedAPIError(f"Codex response failed: {error_message}")
 
         # Build message
         message: Dict[str, Any] = {

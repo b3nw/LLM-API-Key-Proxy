@@ -186,7 +186,7 @@ CODEX_SYSTEM_INSTRUCTION = _load_codex_prompt()
 INJECT_CODEX_INSTRUCTION = env_bool("CODEX_INJECT_INSTRUCTION", True)
 
 # Whether to inject the identity override (allows user system prompts to take precedence)
-INJECT_IDENTITY_OVERRIDE = env_bool("CODEX_INJECT_IDENTITY_OVERRIDE", True)
+INJECT_IDENTITY_OVERRIDE = env_bool("CODEX_INJECT_IDENTITY_OVERRIDE", False)
 
 # Identity override instruction - injected as first user message to allow user's system prompt to take precedence
 # This tells the model to follow the user's actual instructions rather than being constrained by opencode defaults

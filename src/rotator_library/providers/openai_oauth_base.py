@@ -652,12 +652,55 @@ class OpenAIOAuthBase:
                         self._queued_credentials.discard(path)
                         self._unavailable_credentials.pop(path, None)
 
+    def _parse_callback_url(self, url: str, expected_state: str) -> str:
+        """
+        Parse an OAuth callback URL and extract the authorization code.
+
+        Accepts either a full URL (http://localhost:1455/auth/callback?code=...&state=...)
+        or just the raw authorization code string.
+
+        Returns the authorization code.
+        Raises Exception on state mismatch or missing code.
+        """
+        from urllib.parse import urlparse, parse_qs
+
+        url = url.strip()
+
+        # Check if it looks like a URL (contains :// or starts with ? or /)
+        if "://" in url or url.startswith("?") or url.startswith("/"):
+            parsed = urlparse(url)
+            query_params = parse_qs(parsed.query)
+
+            if "error" in query_params:
+                error = query_params["error"][0]
+                error_desc = query_params.get("error_description", [""])[0]
+                raise Exception(f"OAuth failed: {error} - {error_desc}")
+
+            if "code" not in query_params:
+                raise Exception(
+                    "No authorization code found in URL. "
+                    "Make sure you copied the full URL from your browser's address bar."
+                )
+
+            # Validate state if present
+            received_state = query_params.get("state", [None])[0]
+            if received_state and received_state != expected_state:
+                raise Exception("OAuth state mismatch. Please try again.")
+
+            return query_params["code"][0]
+
+        # Assume it's a raw authorization code
+        return url
+
     async def _perform_interactive_oauth(
         self, path: str, creds: Dict[str, Any], display_name: str
     ) -> Dict[str, Any]:
         """
         Perform interactive OAuth flow (browser-based authentication).
         Uses PKCE flow for OpenAI.
+
+        In headless/Docker environments, prompts the user to paste the full
+        redirect URL instead of relying on a localhost callback server.
         """
         is_headless = is_headless_environment()
 
@@ -665,85 +708,34 @@ class OpenAIOAuthBase:
         code_verifier, code_challenge = _generate_pkce()
         state = secrets.token_hex(32)
 
-        auth_code_future = asyncio.get_event_loop().create_future()
-        server = None
+        from urllib.parse import urlencode
 
-        async def handle_callback(reader, writer):
-            try:
-                request_line_bytes = await reader.readline()
-                if not request_line_bytes:
-                    return
-                path_str = request_line_bytes.decode("utf-8").strip().split(" ")[1]
-                while await reader.readline() != b"\r\n":
-                    pass
+        redirect_uri = f"http://localhost:{self.callback_port}{self.CALLBACK_PATH}"
 
-                from urllib.parse import urlparse, parse_qs
-                query_params = parse_qs(urlparse(path_str).query)
+        auth_params = {
+            "response_type": "code",
+            "client_id": self.CLIENT_ID,
+            "redirect_uri": redirect_uri,
+            "scope": " ".join(self.OAUTH_SCOPES),
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
+            "state": state,
+            "id_token_add_organizations": "true",
+            "codex_cli_simplified_flow": "true",
+        }
 
-                writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n")
+        auth_url = f"{self.AUTH_URL}?" + urlencode(auth_params)
 
-                if "code" in query_params:
-                    received_state = query_params.get("state", [None])[0]
-                    if received_state != state:
-                        if not auth_code_future.done():
-                            auth_code_future.set_exception(
-                                Exception("OAuth state mismatch")
-                            )
-                        writer.write(
-                            b"<html><body><h1>State Mismatch</h1><p>Security error. Please try again.</p></body></html>"
-                        )
-                    elif not auth_code_future.done():
-                        auth_code_future.set_result(query_params["code"][0])
-                        writer.write(
-                            b"<html><body><h1>Authentication successful!</h1><p>You can close this window.</p></body></html>"
-                        )
-                else:
-                    error = query_params.get("error", ["Unknown error"])[0]
-                    if not auth_code_future.done():
-                        auth_code_future.set_exception(Exception(f"OAuth failed: {error}"))
-                    writer.write(
-                        f"<html><body><h1>Authentication Failed</h1><p>Error: {error}</p></body></html>".encode()
-                    )
-
-                await writer.drain()
-            except Exception as e:
-                lib_logger.error(f"Error in OAuth callback handler: {e}")
-            finally:
-                writer.close()
-
-        try:
-            server = await asyncio.start_server(
-                handle_callback, "127.0.0.1", self.callback_port
+        if is_headless:
+            # === HEADLESS / DOCKER FLOW ===
+            # No callback server — user pastes the redirect URL manually
+            auth_panel_text = Text.from_markup(
+                "Running in headless/Docker environment.\n\n"
+                "1. Open the URL below in a browser on another machine.\n"
+                "2. Complete the login/authorization.\n"
+                "3. Your browser will redirect to a localhost URL that won't load — [bold]this is expected[/bold].\n"
+                "4. Copy the [bold]full URL[/bold] from your browser's address bar and paste it below."
             )
-
-            from urllib.parse import urlencode
-
-            redirect_uri = f"http://localhost:{self.callback_port}{self.CALLBACK_PATH}"
-
-            auth_params = {
-                "response_type": "code",
-                "client_id": self.CLIENT_ID,
-                "redirect_uri": redirect_uri,
-                "scope": " ".join(self.OAUTH_SCOPES),
-                "code_challenge": code_challenge,
-                "code_challenge_method": "S256",
-                "state": state,
-                "id_token_add_organizations": "true",
-                "codex_cli_simplified_flow": "true",
-            }
-
-            auth_url = f"{self.AUTH_URL}?" + urlencode(auth_params)
-
-            if is_headless:
-                auth_panel_text = Text.from_markup(
-                    "Running in headless environment (no GUI detected).\n"
-                    "Please open the URL below in a browser on another machine to authorize:\n"
-                )
-            else:
-                auth_panel_text = Text.from_markup(
-                    "1. Your browser will now open to log in and authorize the application.\n"
-                    "2. If it doesn't open automatically, please open the URL below manually."
-                )
 
             console.print(
                 Panel(
@@ -756,7 +748,85 @@ class OpenAIOAuthBase:
             escaped_url = rich_escape(auth_url)
             console.print(f"[bold]URL:[/bold] [link={auth_url}]{escaped_url}[/link]\n")
 
-            if not is_headless:
+            console.print(
+                "[bold green]Paste the full redirect URL (or authorization code) here:[/bold green]"
+            )
+
+            loop = asyncio.get_event_loop()
+            raw_input = await loop.run_in_executor(None, input, "> ")
+
+            auth_code = self._parse_callback_url(raw_input, state)
+
+        else:
+            # === DESKTOP FLOW ===
+            # Start local callback server to catch the redirect
+            auth_code_future = asyncio.get_event_loop().create_future()
+            server = None
+
+            async def handle_callback(reader, writer):
+                try:
+                    request_line_bytes = await reader.readline()
+                    if not request_line_bytes:
+                        return
+                    path_str = request_line_bytes.decode("utf-8").strip().split(" ")[1]
+                    while await reader.readline() != b"\r\n":
+                        pass
+
+                    from urllib.parse import urlparse, parse_qs
+                    query_params = parse_qs(urlparse(path_str).query)
+
+                    writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n")
+
+                    if "code" in query_params:
+                        received_state = query_params.get("state", [None])[0]
+                        if received_state != state:
+                            if not auth_code_future.done():
+                                auth_code_future.set_exception(
+                                    Exception("OAuth state mismatch")
+                                )
+                            writer.write(
+                                b"<html><body><h1>State Mismatch</h1><p>Security error. Please try again.</p></body></html>"
+                            )
+                        elif not auth_code_future.done():
+                            auth_code_future.set_result(query_params["code"][0])
+                            writer.write(
+                                b"<html><body><h1>Authentication successful!</h1><p>You can close this window.</p></body></html>"
+                            )
+                    else:
+                        error = query_params.get("error", ["Unknown error"])[0]
+                        if not auth_code_future.done():
+                            auth_code_future.set_exception(Exception(f"OAuth failed: {error}"))
+                        writer.write(
+                            f"<html><body><h1>Authentication Failed</h1><p>Error: {error}</p></body></html>".encode()
+                        )
+
+                    await writer.drain()
+                except Exception as e:
+                    lib_logger.error(f"Error in OAuth callback handler: {e}")
+                finally:
+                    writer.close()
+
+            try:
+                server = await asyncio.start_server(
+                    handle_callback, "127.0.0.1", self.callback_port
+                )
+
+                auth_panel_text = Text.from_markup(
+                    "1. Your browser will now open to log in and authorize the application.\n"
+                    "2. If it doesn't open automatically, please open the URL below manually."
+                )
+
+                console.print(
+                    Panel(
+                        auth_panel_text,
+                        title=f"{self.ENV_PREFIX} OAuth Setup for [bold yellow]{display_name}[/bold yellow]",
+                        style="bold blue",
+                    )
+                )
+
+                escaped_url = rich_escape(auth_url)
+                console.print(f"[bold]URL:[/bold] [link={auth_url}]{escaped_url}[/link]\n")
+
                 try:
                     webbrowser.open(auth_url)
                     lib_logger.info("Browser opened successfully for OAuth flow")
@@ -765,18 +835,18 @@ class OpenAIOAuthBase:
                         f"Failed to open browser automatically: {e}. Please open the URL manually."
                     )
 
-            with console.status(
-                "[bold green]Waiting for you to complete authentication in the browser...[/bold green]",
-                spinner="dots",
-            ):
-                auth_code = await asyncio.wait_for(auth_code_future, timeout=310)
+                with console.status(
+                    "[bold green]Waiting for you to complete authentication in the browser...[/bold green]",
+                    spinner="dots",
+                ):
+                    auth_code = await asyncio.wait_for(auth_code_future, timeout=310)
 
-        except asyncio.TimeoutError:
-            raise Exception("OAuth flow timed out. Please try again.")
-        finally:
-            if server:
-                server.close()
-                await server.wait_closed()
+            except asyncio.TimeoutError:
+                raise Exception("OAuth flow timed out. Please try again.")
+            finally:
+                if server:
+                    server.close()
+                    await server.wait_closed()
 
         lib_logger.info("Exchanging authorization code for tokens...")
 

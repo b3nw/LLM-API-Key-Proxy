@@ -66,15 +66,23 @@ ANTHROPIC_USER_AGENT = "claude-cli/2.1.2 (external, cli)"
 # Tool name prefix for OAuth path
 TOOL_PREFIX = "mcp_"
 
-# Hardcoded model list for OAuth path (models available via subscription)
+# Models available via OAuth subscription (Claude Pro/Max)
 OAUTH_MODELS = [
-    "claude-opus-4-20250514",
-    "claude-sonnet-4-5-20250514",
-    "claude-sonnet-4-20250514",
-    "claude-3-5-haiku-20241022",
-    "claude-3-5-sonnet-20241022",
-    "claude-3-opus-20240229",
+    "claude-opus-4-6",
+    "claude-opus-4-5-20251101",
+    "claude-sonnet-4-5-20250929",
+    "claude-haiku-4-5-20251001",
 ]
+
+# Max output tokens per model family — used when caller doesn't specify max_tokens.
+# Maps model prefix → max output tokens.
+_MODEL_MAX_OUTPUT_TOKENS: Dict[str, int] = {
+    "claude-opus-4-6": 128_000,
+    "claude-opus-4-5": 64_000,
+    "claude-sonnet-4-5": 64_000,
+    "claude-haiku-4-5": 64_000,
+}
+_DEFAULT_MAX_TOKENS = 16_384  # Fallback for unknown models
 
 # Token prefixes for identifying credential types
 OAUTH_ACCESS_TOKEN_PREFIX = "sk-ant-oat"
@@ -187,10 +195,14 @@ def _convert_openai_to_anthropic_messages(
             for tc in tool_calls:
                 if isinstance(tc, dict) and tc.get("type") == "function":
                     func = tc.get("function", {})
-                    try:
-                        input_data = json.loads(func.get("arguments", "{}"))
-                    except (json.JSONDecodeError, TypeError):
-                        input_data = {}
+                    arguments = func.get("arguments", "{}")
+                    if isinstance(arguments, dict):
+                        input_data = arguments
+                    else:
+                        try:
+                            input_data = json.loads(arguments)
+                        except (json.JSONDecodeError, TypeError):
+                            input_data = {}
 
                     tool_name = func.get("name", "")
                     # Add mcp_ prefix if not already present
@@ -432,10 +444,16 @@ class AnthropicProvider(AnthropicOAuthBase, AnthropicQuotaTracker, ProviderInter
         model = kwargs.get("model", "")
         messages = kwargs.get("messages", [])
         tools = kwargs.get("tools")
-        # Default max_tokens — cap conservatively so older models (max 8192) aren't rejected.
-        # Callers can override via kwargs["max_tokens"].
-        _default_max = 8192
-        max_tokens = kwargs.get("max_tokens", _default_max)
+        # Derive max_tokens from model family if caller didn't specify
+        max_tokens = kwargs.get("max_tokens")
+        if max_tokens is None:
+            # Find matching prefix (longest match wins)
+            model_bare = model.split("/", 1)[-1] if "/" in model else model
+            max_tokens = _DEFAULT_MAX_TOKENS
+            for prefix, limit in _MODEL_MAX_OUTPUT_TOKENS.items():
+                if model_bare.startswith(prefix):
+                    max_tokens = limit
+                    break
         temperature = kwargs.get("temperature")
         top_p = kwargs.get("top_p")
         stop = kwargs.get("stop")
@@ -741,7 +759,6 @@ class AnthropicProvider(AnthropicOAuthBase, AnthropicQuotaTracker, ProviderInter
         full_text = ""
         thinking_text = ""
         tool_calls = []
-        tool_index = 0
 
         for block in data.get("content", []):
             block_type = block.get("type")
@@ -761,7 +778,6 @@ class AnthropicProvider(AnthropicOAuthBase, AnthropicQuotaTracker, ProviderInter
                         "arguments": json.dumps(block.get("input", {})),
                     },
                 })
-                tool_index += 1
 
         # Build message
         message: Dict[str, Any] = {"role": "assistant"}

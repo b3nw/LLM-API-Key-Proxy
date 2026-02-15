@@ -3,7 +3,7 @@
 OpenAI Codex Provider
 
 Provider for OpenAI Codex models via the Responses API.
-Supports GPT-5, GPT-5.1, GPT-5.2, Codex, and Codex Mini models.
+Supports GPT-5, GPT-5.1, GPT-5.2, GPT-5.3 Codex, and Codex Spark models.
 
 Key Features:
 - OAuth-based authentication with PKCE
@@ -96,11 +96,11 @@ BASE_MODELS = [
     # Codex models
     "gpt-5-codex",
     "gpt-5.1-codex",
-    "gpt-5.2-codex",
-    "gpt-5.3-codex",
     "gpt-5.1-codex-max",
     "gpt-5.1-codex-mini",
-    "codex-mini",
+    "gpt-5.2-codex",
+    "gpt-5.3-codex",
+    "gpt-5.3-codex-spark",
 ]
 
 # Reasoning effort levels
@@ -114,11 +114,11 @@ REASONING_MODEL_EFFORTS = {
     "gpt-5.2": {"low", "medium", "high", "xhigh"},
     "gpt-5-codex": {"low", "medium", "high"},
     "gpt-5.1-codex": {"low", "medium", "high"},
-    "gpt-5.2-codex": {"low", "medium", "high", "xhigh"},
-    "gpt-5.3-codex": {"low", "medium", "high", "xhigh"},
     "gpt-5.1-codex-max": {"low", "medium", "high", "xhigh"},
     "gpt-5.1-codex-mini": {"low", "medium", "high"},
-    "codex-mini": {"low", "medium", "high"},
+    "gpt-5.2-codex": {"low", "medium", "high", "xhigh"},
+    "gpt-5.3-codex": {"low", "medium", "high", "xhigh"},
+    "gpt-5.3-codex-spark": {"low", "medium", "high"},
 }
 
 def _build_available_models() -> list:
@@ -186,6 +186,11 @@ def _allowed_efforts_for_model(model: str) -> set:
         return REASONING_EFFORTS
 
     normalized = base.split(":")[0]
+    # GPT-5.3-codex-spark is a lighter model without xhigh
+    if normalized.startswith("gpt-5.3-codex-spark"):
+        return {"low", "medium", "high"}
+    if normalized.startswith("gpt-5.3"):
+        return {"low", "medium", "high", "xhigh"}
     if normalized.startswith("gpt-5.2"):
         return {"low", "medium", "high", "xhigh"}
     if normalized.startswith("gpt-5.1-codex-max"):
@@ -277,8 +282,9 @@ def _normalize_model_name(name: str) -> str:
         "gpt-5.2-latest": "gpt-5.2",
         "gpt5-codex": "gpt-5-codex",
         "gpt-5-codex-latest": "gpt-5-codex",
-        "codex": "codex-mini",
-        "codex-mini-latest": "codex-mini",
+        "gpt-5.3-codex-latest": "gpt-5.3-codex",
+        "codex-spark": "gpt-5.3-codex-spark",
+        "gpt-5.3-codex-spark-latest": "gpt-5.3-codex-spark",
     }
 
     return mapping.get(base.lower(), base)

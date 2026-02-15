@@ -100,7 +100,6 @@ BASE_MODELS = [
     "gpt-5.1-codex-mini",
     "gpt-5.2-codex",
     "gpt-5.3-codex",
-    "gpt-5.3-codex-spark",
 ]
 
 # Reasoning effort levels
@@ -118,7 +117,6 @@ REASONING_MODEL_EFFORTS = {
     "gpt-5.1-codex-mini": {"low", "medium", "high"},
     "gpt-5.2-codex": {"low", "medium", "high", "xhigh"},
     "gpt-5.3-codex": {"low", "medium", "high", "xhigh"},
-    "gpt-5.3-codex-spark": {"low", "medium", "high"},
 }
 
 def _build_available_models() -> list:
@@ -186,9 +184,6 @@ def _allowed_efforts_for_model(model: str) -> set:
         return REASONING_EFFORTS
 
     normalized = base.split(":")[0]
-    # GPT-5.3-codex-spark is a lighter model without xhigh
-    if normalized.startswith("gpt-5.3-codex-spark"):
-        return {"low", "medium", "high"}
     if normalized.startswith("gpt-5.3"):
         return {"low", "medium", "high", "xhigh"}
     if normalized.startswith("gpt-5.2"):
@@ -283,8 +278,9 @@ def _normalize_model_name(name: str) -> str:
         "gpt5-codex": "gpt-5-codex",
         "gpt-5-codex-latest": "gpt-5-codex",
         "gpt-5.3-codex-latest": "gpt-5.3-codex",
-        "codex-spark": "gpt-5.3-codex-spark",
-        "gpt-5.3-codex-spark-latest": "gpt-5.3-codex-spark",
+        "codex-spark": "gpt-5.3-codex",
+        "gpt-5.3-codex-spark": "gpt-5.3-codex",
+        "gpt-5.3-codex-spark-latest": "gpt-5.3-codex",
         "codex-mini": "gpt-5.1-codex-mini",
     }
 

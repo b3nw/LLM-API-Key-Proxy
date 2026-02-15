@@ -317,13 +317,14 @@ def _normalize_model_name(name: str) -> str:
 def _convert_messages_to_responses_input(
     messages: List[Dict[str, Any]],
     inject_identity_override: bool = False,
-) -> List[Dict[str, Any]]:
+) -> tuple:
     """
     Convert OpenAI chat messages format to Responses API input format.
 
-    Args:
-        messages: OpenAI format messages
-        inject_identity_override: If True, inject the identity override as first user message
+    Returns:
+        Tuple of (input_items, system_instruction_text)
+        - input_items: list of Responses API input items
+        - system_instruction_text: combined system messages (for use as 'instructions' field), or None
     """
     input_items = []
     system_messages = []
@@ -410,10 +411,8 @@ def _convert_messages_to_responses_input(
             })
             continue
 
-    # Prepend identity override and system messages as user messages
+    # Prepend identity override as user message (if enabled)
     prepend_items = []
-
-    # 1. Identity override first (if enabled)
     if inject_identity_override and INJECT_IDENTITY_OVERRIDE:
         prepend_items.append({
             "type": "message",
@@ -421,15 +420,10 @@ def _convert_messages_to_responses_input(
             "content": [{"type": "input_text", "text": CODEX_IDENTITY_OVERRIDE}]
         })
 
-    # 2. System messages converted to user messages
-    for sys_content in system_messages:
-        prepend_items.append({
-            "type": "message",
-            "role": "user",
-            "content": [{"type": "input_text", "text": sys_content}]
-        })
+    # Return system messages as instructions text (joined), not as user messages
+    system_instruction = "\n\n".join(system_messages) if system_messages else None
 
-    return prepend_items + input_items
+    return prepend_items + input_items, system_instruction
 
 
 def _convert_tools_to_responses_format(tools: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
@@ -645,11 +639,16 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
         )
 
         # Convert messages to Responses API format
-        input_items = _convert_messages_to_responses_input(messages, inject_identity_override=True)
+        input_items, caller_instructions = _convert_messages_to_responses_input(messages, inject_identity_override=True)
 
-        # Use ONLY the base opencode instructions (system messages are converted to user messages)
-        # The ChatGPT backend API validates that instructions match exactly
-        instructions = CODEX_SYSTEM_INSTRUCTION if INJECT_CODEX_INSTRUCTION else None
+        # Use the caller's system prompt as instructions (e.g. openclaw's system prompt)
+        # Fall back to hardcoded CODEX_SYSTEM_INSTRUCTION only if caller didn't send one
+        if caller_instructions:
+            instructions = caller_instructions
+        elif INJECT_CODEX_INSTRUCTION:
+            instructions = CODEX_SYSTEM_INSTRUCTION
+        else:
+            instructions = None
 
         # Convert tools
         responses_tools = _convert_tools_to_responses_format(tools)
@@ -683,8 +682,12 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
             "text": {"verbosity": "medium"},  # Match pi's default; controls output structure
         }
 
-        if instructions:
-            payload["instructions"] = instructions
+        # The Codex Responses API requires the 'instructions' field — it's non-optional.
+        # Always include it; fall back to the Codex system instruction if nothing else.
+        if not instructions:
+            instructions = CODEX_SYSTEM_INSTRUCTION
+            lib_logger.warning("[Codex] instructions was empty/None after selection, forcing CODEX_SYSTEM_INSTRUCTION fallback")
+        payload["instructions"] = instructions
 
         if responses_tools:
             payload["tools"] = responses_tools
@@ -1054,6 +1057,7 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
 
                 # Handle completion
                 elif kind == "response.completed":
+                    resp_diag = evt.get("response", {})
 
                     # Determine finish reason
                     finish_reason = "stop"

@@ -302,6 +302,7 @@ class CodexQuotaTracker:
         self._quota_cache: Dict[str, CodexQuotaSnapshot] = {}
         self._quota_refresh_interval: int = DEFAULT_QUOTA_REFRESH_INTERVAL
         self._usage_manager: Optional["UsageManager"] = None
+        self._initial_baselines_fetched: bool = False
 
     def set_usage_manager(self, usage_manager: "UsageManager") -> None:
         """Set the UsageManager reference for pushing quota updates."""
@@ -707,6 +708,8 @@ class CodexQuotaTracker:
         Execute periodic quota refresh for active credentials.
 
         Called by BackgroundRefresher at the configured interval.
+        On first run, fetches baselines for ALL credentials and applies
+        exhaustion cooldowns so we don't waste requests on depleted keys.
 
         Args:
             usage_manager: UsageManager instance (for future baseline storage)
@@ -715,7 +718,46 @@ class CodexQuotaTracker:
         if not credentials:
             return
 
-        # Only refresh credentials that have been used recently
+        # On first run, fetch baselines for ALL credentials to detect exhaustion
+        if not self._initial_baselines_fetched:
+            self._initial_baselines_fetched = True
+            try:
+                quota_results = await self.fetch_initial_baselines(credentials)
+                stored = await self._store_baselines_to_usage_manager(
+                    quota_results,
+                    usage_manager,
+                    force=True,
+                    is_initial_fetch=True,
+                )
+                # Log any exhausted credentials detected on startup
+                exhausted = []
+                for cred_path, data in quota_results.items():
+                    if data.get("status") != "success":
+                        continue
+                    primary = data.get("primary")
+                    secondary = data.get("secondary")
+                    if primary and primary.get("is_exhausted"):
+                        exhausted.append(
+                            f"{_get_credential_identifier(cred_path)} (5h window)"
+                        )
+                    if secondary and secondary.get("is_exhausted"):
+                        exhausted.append(
+                            f"{_get_credential_identifier(cred_path)} (weekly)"
+                        )
+                if exhausted:
+                    lib_logger.warning(
+                        f"Codex startup: {len(exhausted)} exhausted quota(s) detected, "
+                        f"cooldowns applied: {', '.join(exhausted)}"
+                    )
+                else:
+                    lib_logger.info(
+                        f"Codex startup: {stored} baselines stored, no exhausted credentials"
+                    )
+            except Exception as e:
+                lib_logger.error(f"Codex startup baseline fetch failed: {e}")
+            return
+
+        # Subsequent runs: only refresh credentials that have been used recently
         now = time.time()
         active_credentials = []
 

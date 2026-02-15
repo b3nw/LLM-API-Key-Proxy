@@ -39,6 +39,7 @@ import litellm
 
 from .provider_interface import ProviderInterface, UsageResetConfigDef, QuotaGroupMap
 from .anthropic_oauth_base import AnthropicOAuthBase
+from .utilities.anthropic_quota_tracker import AnthropicQuotaTracker
 from ..model_definitions import ModelDefinitions
 from ..timeout_config import TimeoutConfig
 
@@ -272,7 +273,7 @@ def _strip_tool_prefix(name: str) -> str:
 # =============================================================================
 
 
-class AnthropicProvider(AnthropicOAuthBase, ProviderInterface):
+class AnthropicProvider(AnthropicOAuthBase, AnthropicQuotaTracker, ProviderInterface):
     """
     Anthropic Provider with dual credential routing.
 
@@ -310,12 +311,20 @@ class AnthropicProvider(AnthropicOAuthBase, ProviderInterface):
         ),
     }
 
+    # Model quota groups - all Anthropic models share per-account rate limits
+    # "anthropic-rpm" tracks the requests-per-minute window from API headers
+    model_quota_groups: QuotaGroupMap = {
+        "anthropic-rpm": list(OAUTH_MODELS),
+    }
+
     def __init__(self):
         ProviderInterface.__init__(self)
         AnthropicOAuthBase.__init__(self)
         self.model_definitions = ModelDefinitions()
         # Track which credentials are API keys vs OAuth
         self._credential_types: Dict[str, str] = {}
+        # Initialize quota tracker
+        self._init_quota_tracker()
 
     def has_custom_logic(self) -> bool:
         """This provider uses custom logic for OAuth credentials."""
@@ -516,9 +525,10 @@ class AnthropicProvider(AnthropicOAuthBase, ProviderInterface):
             json=payload,
             timeout=TimeoutConfig.streaming(),
         ) as response:
-            # Parse rate limit headers
+            # Parse rate limit headers and push to UsageManager
             if credential_path:
-                self._parse_rate_limit_headers(credential_path, response.headers)
+                response_headers = {k.lower(): v for k, v in response.headers.items()}
+                self.update_quota_from_headers(credential_path, response_headers)
 
             if response.status_code >= 400:
                 error_body = await response.aread()
@@ -710,9 +720,10 @@ class AnthropicProvider(AnthropicOAuthBase, ProviderInterface):
             timeout=TimeoutConfig.non_streaming(),
         )
 
-        # Parse rate limit headers
+        # Parse rate limit headers and push to UsageManager
         if credential_path:
-            self._parse_rate_limit_headers(credential_path, response.headers)
+            response_headers = {k.lower(): v for k, v in response.headers.items()}
+            self.update_quota_from_headers(credential_path, response_headers)
 
         if response.status_code >= 400:
             error_text = response.text
@@ -802,29 +813,12 @@ class AnthropicProvider(AnthropicOAuthBase, ProviderInterface):
         return response_obj
 
     # =========================================================================
-    # RATE LIMIT PARSING
+    # RATE LIMIT PARSING (delegated to AnthropicQuotaTracker)
     # =========================================================================
 
-    def _parse_rate_limit_headers(
-        self, credential_path: str, headers: httpx.Headers
-    ) -> None:
-        """Parse anthropic-ratelimit-* headers from response."""
-        try:
-            remaining_requests = headers.get("anthropic-ratelimit-requests-remaining")
-            remaining_tokens = headers.get("anthropic-ratelimit-tokens-remaining")
-            reset_requests = headers.get("anthropic-ratelimit-requests-reset")
-            reset_tokens = headers.get("anthropic-ratelimit-tokens-reset")
-
-            if remaining_requests is not None or remaining_tokens is not None:
-                lib_logger.debug(
-                    f"Anthropic rate limits for {Path(credential_path).name}: "
-                    f"requests_remaining={remaining_requests}, "
-                    f"tokens_remaining={remaining_tokens}, "
-                    f"requests_reset={reset_requests}, "
-                    f"tokens_reset={reset_tokens}"
-                )
-        except Exception:
-            pass
+    # Rate limit header parsing and quota updates are handled by
+    # the AnthropicQuotaTracker mixin's update_quota_from_headers() method.
+    # See: utilities/anthropic_quota_tracker.py
 
     @staticmethod
     def parse_quota_error(

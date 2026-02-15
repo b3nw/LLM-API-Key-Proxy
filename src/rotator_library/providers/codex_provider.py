@@ -285,6 +285,7 @@ def _normalize_model_name(name: str) -> str:
         "gpt-5.3-codex-latest": "gpt-5.3-codex",
         "codex-spark": "gpt-5.3-codex-spark",
         "gpt-5.3-codex-spark-latest": "gpt-5.3-codex-spark",
+        "codex-mini": "gpt-5.1-codex-mini",
     }
 
     return mapping.get(base.lower(), base)
@@ -489,7 +490,7 @@ def _apply_reasoning_to_message(
         think_block = f"<think>{rtxt}</think>"
         content_text = message.get("content") or ""
         if isinstance(content_text, str):
-            message["content"] = think_block + (content_text or "")
+            message["content"] = think_block + ("\n" + content_text if content_text else "")
 
     return message
 
@@ -546,10 +547,13 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
     }
 
     # Model quota groups - for Codex, these represent time-based rate limit windows
-    # rather than model groupings, since all Codex models share the same global limits
+    # rather than model groupings, since all Codex models share the same global limits.
+    # "codex-global" group ensures sequential rotation shares one sticky credential
+    # across all models, since they share the same per-account rate limits.
     model_quota_groups: QuotaGroupMap = {
         "5h-limit": ["_5h_window"],  # Primary window (5 hour rolling)
         "weekly-limit": ["_weekly_window"],  # Secondary window (weekly)
+        "codex-global": list(AVAILABLE_MODELS),  # Shared sequential rotation group
     }
 
     def __init__(self):
@@ -700,6 +704,7 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
         reasoning_summary_text = ""
         reasoning_full_text = ""
         sent_reasoning = False
+        streaming_reasoning = False  # True once we start streaming reasoning_content
 
         async with client.stream(
             "POST",
@@ -751,12 +756,7 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
                 if kind == "response.output_text.delta":
                     delta_text = evt.get("delta", "")
                     if delta_text:
-                        # If we have reasoning and haven't sent it yet, prepend it
-                        if not sent_reasoning and (reasoning_summary_text or reasoning_full_text):
-                            rtxt = "\n\n".join(filter(None, [reasoning_summary_text, reasoning_full_text]))
-                            if rtxt and reasoning_compat == "think-tags":
-                                delta_text = f"<think>{rtxt}</think>{delta_text}"
-                            sent_reasoning = True
+                        sent_reasoning = True  # Content has started, reasoning phase is over
 
                         chunk = litellm.ModelResponse(
                             id=response_id,
@@ -771,12 +771,42 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
                         )
                         yield chunk
 
-                # Handle reasoning delta
+                # Handle reasoning deltas - stream as reasoning_content in real-time
                 elif kind == "response.reasoning_summary_text.delta":
-                    reasoning_summary_text += evt.get("delta", "")
+                    rdelta = evt.get("delta", "")
+                    reasoning_summary_text += rdelta
+                    if rdelta:
+                        streaming_reasoning = True
+                        chunk = litellm.ModelResponse(
+                            id=response_id,
+                            created=created,
+                            model=model,
+                            object="chat.completion.chunk",
+                            choices=[{
+                                "index": 0,
+                                "delta": {"reasoning_content": rdelta, "role": "assistant"},
+                                "finish_reason": None,
+                            }],
+                        )
+                        yield chunk
 
                 elif kind == "response.reasoning_text.delta":
-                    reasoning_full_text += evt.get("delta", "")
+                    rdelta = evt.get("delta", "")
+                    reasoning_full_text += rdelta
+                    if rdelta:
+                        streaming_reasoning = True
+                        chunk = litellm.ModelResponse(
+                            id=response_id,
+                            created=created,
+                            model=model,
+                            object="chat.completion.chunk",
+                            choices=[{
+                                "index": 0,
+                                "delta": {"reasoning_content": rdelta, "role": "assistant"},
+                                "finish_reason": None,
+                            }],
+                        )
+                        yield chunk
 
                 # Handle function call arguments delta
                 elif kind == "response.function_call_arguments.delta":
@@ -854,10 +884,11 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
                     if current_tool_calls:
                         finish_reason = "tool_calls"
 
-                    # Send final chunk with reasoning if not sent
-                    if not sent_reasoning and (reasoning_summary_text or reasoning_full_text):
+                    # If reasoning was NOT streamed incrementally (edge case),
+                    # send it as a single reasoning_content chunk now
+                    if not sent_reasoning and not streaming_reasoning and (reasoning_summary_text or reasoning_full_text):
                         rtxt = "\n\n".join(filter(None, [reasoning_summary_text, reasoning_full_text]))
-                        if rtxt and reasoning_compat == "think-tags":
+                        if rtxt:
                             chunk = litellm.ModelResponse(
                                 id=response_id,
                                 created=created,
@@ -865,12 +896,11 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
                                 object="chat.completion.chunk",
                                 choices=[{
                                     "index": 0,
-                                    "delta": {"content": f"<think>{rtxt}</think>", "role": "assistant"},
+                                    "delta": {"reasoning_content": rtxt, "role": "assistant"},
                                     "finish_reason": None,
                                 }],
                             )
                             yield chunk
-                            sent_reasoning = True
 
                     # Extract usage if available
                     usage = None
@@ -882,6 +912,14 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
                             completion_tokens=u.get("output_tokens", 0),
                             total_tokens=u.get("total_tokens", 0),
                         )
+                        # Map Responses API input_tokens_details to prompt_tokens_details
+                        # so downstream _extract_usage_tokens picks up cached_tokens
+                        input_details = u.get("input_tokens_details") or {}
+                        cached = input_details.get("cached_tokens", 0) or 0
+                        if cached:
+                            usage.prompt_tokens_details = {
+                                "cached_tokens": cached,
+                            }
 
                     # Send final chunk
                     final_chunk = litellm.ModelResponse(
@@ -1010,6 +1048,13 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
                             completion_tokens=u.get("output_tokens", 0),
                             total_tokens=u.get("total_tokens", 0),
                         )
+                        # Map Responses API input_tokens_details to prompt_tokens_details
+                        input_details = u.get("input_tokens_details") or {}
+                        cached = input_details.get("cached_tokens", 0) or 0
+                        if cached:
+                            usage.prompt_tokens_details = {
+                                "cached_tokens": cached,
+                            }
 
                 # Handle errors
                 elif kind == "response.failed":

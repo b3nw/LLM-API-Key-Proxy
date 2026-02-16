@@ -1006,16 +1006,6 @@ class QuotaViewer:
                         cost_str,
                     )
 
-                # Add separator between providers (except last)
-                if idx < len(sorted_providers):
-                    table.add_row(
-                        "─" * TABLE_PROVIDER_WIDTH,
-                        "─" * TABLE_CREDS_WIDTH,
-                        "─" * TABLE_QUOTA_STATUS_WIDTH,
-                        "─" * TABLE_REQUESTS_WIDTH,
-                        "─" * TABLE_TOKENS_WIDTH,
-                        "─" * TABLE_COST_WIDTH,
-                    )
 
             self.console.print(table)
 
@@ -1047,23 +1037,31 @@ class QuotaViewer:
         # Menu
         self.console.print()
         self.console.print("━" * 78)
-        self.console.print()
 
         # Build provider menu options (use same sorted order as display)
         providers = self.cached_stats.get("providers", {}) if self.cached_stats else {}
         sorted_providers = sorted(providers.items(), key=provider_sort_key)
         provider_list = [name for name, _ in sorted_providers]
 
-        for idx, provider in enumerate(provider_list, 1):
-            self.console.print(f"   {idx}. View [cyan]{provider}[/cyan] details")
-
+        # Render provider list in 3 columns
+        cols = 3
+        col_width = 78 // cols
+        for row_start in range(0, len(provider_list), cols):
+            row_items = []
+            for c in range(cols):
+                i = row_start + c
+                if i < len(provider_list):
+                    # Pad the raw text before adding markup so columns align
+                    raw_entry = f"{i+1:>2}. {provider_list[i]}"
+                    padded = f"{raw_entry:<{col_width}}"
+                    # Re-apply cyan only to the provider name portion
+                    entry = f"{i+1:>2}. [cyan]{provider_list[i]}[/cyan]" + " " * (len(padded) - len(raw_entry))
+                    row_items.append(entry)
+            self.console.print(" " + " ".join(row_items))
         self.console.print()
-        self.console.print("   G. Toggle view mode (current/global)")
-        self.console.print("   R. Reload all stats (re-read from proxy)")
-        self.console.print("   S. Switch remote")
-        self.console.print("   M. Manage remotes")
-        self.console.print("   B. Back to main menu")
-        self.console.print()
+        self.console.print(
+            "   [G]lobal  [R]eload  [S]witch remote  [M]anage remotes  [B]ack"
+        )
         self.console.print("━" * 78)
 
         # Get input
@@ -1107,7 +1105,7 @@ class QuotaViewer:
                 f"[bold cyan]:bar_chart: {provider.title()} - Detailed Stats[/bold cyan]  |  {view_label}"
             )
             self.console.print("━" * 78)
-            self.console.print()
+
 
             if not self.cached_stats:
                 self.console.print("[yellow]No data available.[/yellow]")
@@ -1125,12 +1123,9 @@ class QuotaViewer:
                 else:
                     for idx, cred in enumerate(credentials, 1):
                         self._render_credential_panel(idx, cred, provider)
-                        self.console.print()
 
             # Menu
             self.console.print("━" * 78)
-            self.console.print()
-            self.console.print("   G.  Toggle view mode (current/global)")
 
             # Force refresh options (only for providers that support it)
             has_quota_groups = bool(
@@ -1140,49 +1135,29 @@ class QuotaViewer:
                 .get("quota_groups")
             )
 
-            # Model toggle option (only show if provider has quota groups) - MOVED UP
+            # Build inline action line
+            actions = ["[G]lobal"]
             if has_quota_groups:
                 show_models_status = (
                     "ON" if self.config.get_show_models(provider) else "OFF"
                 )
-                self.console.print(
-                    f"   T.  Toggle model details ({show_models_status})"
-                )
-
-            self.console.print("   R.  Reload stats (from proxy cache)")
-            self.console.print("   RA. Reload all stats")
+                actions.append(f"[T]oggle models ({show_models_status})")
+            actions.extend(["[R]eload", "[RA] Reload all", "[B]ack"])
+            self.console.print("   " + "  ".join(actions))
 
             if has_quota_groups:
-                self.console.print()
-                self.console.print(
-                    f"   F.  [yellow]Force refresh ALL {provider} quotas from API[/yellow]"
-                )
                 prov_stats_for_menu = (
                     self.cached_stats.get("providers", {}).get(provider, {})
                     if self.cached_stats
                     else {}
                 )
-                credentials = get_credentials_list(prov_stats_for_menu)
-                # Sort credentials naturally
-                credentials = sorted(credentials, key=natural_sort_key)
-                for idx, cred in enumerate(credentials, 1):
-                    identifier = cred.get("identifier", f"credential {idx}")
-                    email = cred.get("email", identifier)
+                cred_count = len(get_credentials_list(prov_stats_for_menu))
+                if cred_count > 0:
                     self.console.print(
-                        f"   F{idx}. Force refresh [{idx}] only ({email})"
+                        f"   [F] [yellow]Force refresh ALL {provider}[/yellow]  "
+                        f"[F1-F{cred_count}] per-credential"
                     )
 
-            # DEBUG: Add fake window for testing multi-window display
-            if has_quota_groups:
-                self.console.print()
-                self.console.print("   [dim]DEBUG:[/dim]")
-                self.console.print(
-                    "   W.  [dim]Add fake 'daily' window (test multi-window)[/dim]"
-                )
-
-            self.console.print()
-            self.console.print("   B.  Back to summary")
-            self.console.print()
             self.console.print("━" * 78)
 
             choice = Prompt.ask("Select option", default="B").strip().upper()
@@ -1229,13 +1204,6 @@ class QuotaViewer:
                         for err in rr["errors"]:
                             self.console.print(f"[red]  Error: {err}[/red]")
                     Prompt.ask("Press Enter to continue", default="")
-            elif choice == "W" and has_quota_groups:
-                # DEBUG: Inject fake "daily" window for testing multi-window display
-                self._inject_fake_daily_window(provider)
-                self.console.print(
-                    "[dim]Injected fake 'daily' window into cached stats[/dim]"
-                )
-                Prompt.ask("Press Enter to continue", default="")
             elif choice.startswith("F") and choice[1:].isdigit() and has_quota_groups:
                 idx = int(choice[1:])
                 prov_stats_for_refresh = (
@@ -1354,7 +1322,6 @@ class QuotaViewer:
         # Display group usage with per-window breakdown
         # Note: group_usage is pre-sorted by limit (lowest first) from the API
         if group_usage:
-            content_lines.append("")
             content_lines.append("[bold]Quota Groups:[/bold]")
 
             for group_name, group_stats in group_usage.items():

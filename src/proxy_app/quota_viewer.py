@@ -201,6 +201,31 @@ def format_cooldown(seconds: int) -> str:
         return f"{hours}h {mins}m" if mins > 0 else f"{hours}h"
 
 
+def format_time_remaining(reset_at: float) -> str:
+    """Format seconds until reset as a human-readable countdown string.
+
+    Returns strings like '12h 30m', '45m', '< 1m', or 'now' based on
+    how far away the reset timestamp is from the current time.
+    """
+    diff = reset_at - time.time()
+    if diff <= 0:
+        return "now"
+    total_minutes = int(diff // 60)
+    if total_minutes < 1:
+        return "< 1m"
+    hours = total_minutes // 60
+    mins = total_minutes % 60
+    if hours >= 24:
+        days = hours // 24
+        remaining_hours = hours % 24
+        if remaining_hours > 0:
+            return f"{days}d {remaining_hours}h"
+        return f"{days}d"
+    if hours > 0:
+        return f"{hours}h {mins}m" if mins > 0 else f"{hours}h"
+    return f"{mins}m"
+
+
 def natural_sort_key(item: Any) -> List:
     """
     Generate a sort key for natural/numeric sorting.
@@ -1359,10 +1384,12 @@ class QuotaViewer:
 
                     # Format reset time (only show if there's actual usage or cooldown)
                     reset_time_str = ""
+                    reset_countdown_str = ""
                     if reset_at and (request_count > 0 or group_cooldown_remaining):
                         try:
                             reset_dt = datetime.fromtimestamp(reset_at)
                             reset_time_str = reset_dt.strftime("%b %d %H:%M")
+                            reset_countdown_str = format_time_remaining(reset_at)
                         except (ValueError, OSError):
                             reset_time_str = ""
 
@@ -1418,9 +1445,14 @@ class QuotaViewer:
 
                     line = f"  [{color}]{display_name:<{DETAIL_GROUP_NAME_WIDTH}} {usage_str:<{DETAIL_USAGE_WIDTH}} {pct_str:>{DETAIL_PCT_WIDTH}} {bar}[/{color}]"
 
-                    # Add reset time if applicable
+                    # Add reset time with countdown if applicable
                     if reset_time_str:
-                        line += f"  Resets: {reset_time_str}"
+                        if reset_countdown_str and reset_countdown_str != "now":
+                            line += f"  Resets in {reset_countdown_str} ({reset_time_str})"
+                        elif reset_countdown_str == "now":
+                            line += f"  Resets now"
+                        else:
+                            line += f"  Resets: {reset_time_str}"
 
                     # Add indicators
                     indicators = []

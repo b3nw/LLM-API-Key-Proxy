@@ -314,6 +314,53 @@ def _normalize_model_name(name: str) -> str:
     return mapping.get(base.lower(), base)
 
 
+
+# Maximum length for call_id in the Codex Responses API
+MAX_CALL_ID_LENGTH = 64
+
+
+def _sanitize_call_id(raw_id: str, id_map: Dict[str, str]) -> str:
+    """
+    Sanitize a tool call_id to fit within the Codex Responses API's 64-char limit.
+
+    OpenClaw can send severely malformed tool_call_ids that include thinking tags,
+    full function arguments, or other garbage. This function:
+    1. Returns the raw ID unchanged if it's ≤ 64 chars and looks clean
+    2. Returns a previously-mapped sanitized ID if we've seen this raw ID before
+    3. Generates a deterministic hash-based replacement otherwise
+
+    The id_map dict is shared per request so function_call and function_call_output
+    items referencing the same original ID get the same sanitized replacement.
+    """
+    # Already mapped? Return the cached sanitized version
+    if raw_id in id_map:
+        return id_map[raw_id]
+
+    # If it fits and doesn't contain obvious garbage, pass through
+    if len(raw_id) <= MAX_CALL_ID_LENGTH and raw_id.isprintable() and "<" not in raw_id:
+        id_map[raw_id] = raw_id
+        return raw_id
+
+    # Generate a deterministic short replacement from the raw ID
+    # Using hashlib for determinism so the same raw_id always maps to the same sanitized ID
+    import hashlib
+    hash_hex = hashlib.sha256(raw_id.encode("utf-8", errors="replace")).hexdigest()[:24]
+    sanitized = f"call_{hash_hex}"  # 5 + 24 = 29 chars, well under 64
+
+    if raw_id and len(raw_id) > MAX_CALL_ID_LENGTH:
+        lib_logger.warning(
+            f"[Codex] Sanitized oversized call_id (len={len(raw_id)}): "
+            f"{raw_id[:50]!r}... -> {sanitized}"
+        )
+    elif raw_id:
+        lib_logger.warning(
+            f"[Codex] Sanitized malformed call_id: {raw_id[:50]!r} -> {sanitized}"
+        )
+
+    id_map[raw_id] = sanitized
+    return sanitized
+
+
 def _convert_messages_to_responses_input(
     messages: List[Dict[str, Any]],
     inject_identity_override: bool = False,
@@ -328,6 +375,8 @@ def _convert_messages_to_responses_input(
     """
     input_items = []
     system_messages = []
+    # Shared mapping for call_id sanitization across the entire request
+    call_id_map: Dict[str, str] = {}
 
     for msg in messages:
         role = msg.get("role", "user")
@@ -394,9 +443,10 @@ def _convert_messages_to_responses_input(
             for tc in tool_calls:
                 if isinstance(tc, dict) and tc.get("type") == "function":
                     func = tc.get("function", {})
+                    raw_id = tc.get("id", "") or str(uuid.uuid4())
                     input_items.append({
                         "type": "function_call",
-                        "call_id": tc.get("id", str(uuid.uuid4())),
+                        "call_id": _sanitize_call_id(raw_id, call_id_map),
                         "name": func.get("name", ""),
                         "arguments": func.get("arguments", "{}"),
                     })
@@ -404,9 +454,10 @@ def _convert_messages_to_responses_input(
 
         if role == "tool":
             # Tool result messages
+            raw_id = msg.get("tool_call_id", "")
             input_items.append({
                 "type": "function_call_output",
-                "call_id": msg.get("tool_call_id", ""),
+                "call_id": _sanitize_call_id(raw_id, call_id_map),
                 "output": content if isinstance(content, str) else json.dumps(content),
             })
             continue

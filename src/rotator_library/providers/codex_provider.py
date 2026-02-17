@@ -382,8 +382,9 @@ def _convert_messages_to_responses_input(
         role = msg.get("role", "user")
         content = msg.get("content")
 
-        if role == "system":
-            # Collect system messages to add after override
+        if role in ("system", "developer"):
+            # Collect system/developer messages to add after override
+            # Note: "developer" is the newer OpenAI convention for system prompts
             if isinstance(content, str) and content.strip():
                 system_messages.append(content)
             continue

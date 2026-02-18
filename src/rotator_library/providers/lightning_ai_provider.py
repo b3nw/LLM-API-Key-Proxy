@@ -50,6 +50,10 @@ LIGHTNING_AI_API_BASE = "https://lightning.ai/api/v1"
 # Concurrency limit for parallel balance fetches
 BALANCE_FETCH_CONCURRENCY = 5
 
+# Default monthly free credit grant per account (dollars).
+# Override with LIGHTNING_AI_MONTHLY_GRANT if your plan differs.
+DEFAULT_MONTHLY_GRANT_DOLLARS = 15
+
 
 class LightningAiProvider(LightningAiQuotaTracker, ProviderInterface):
     """
@@ -69,9 +73,10 @@ class LightningAiProvider(LightningAiQuotaTracker, ProviderInterface):
 
     provider_env_name = "lightning_ai"
 
-    # Single quota group: all models share the same monthly credit balance
+    # Single quota group: all models share the same monthly credit balance.
+    # Named 'credits($)' so the TUI shows a human-readable dollar label.
     model_quota_groups = {
-        "lightning_ai_balance": ["_balance"],
+        "credits($)": ["_balance"],
     }
 
     # Monthly rolling window — credits reload on the nextFreeCreditsGrant date
@@ -91,6 +96,11 @@ class LightningAiProvider(LightningAiQuotaTracker, ProviderInterface):
         self._balance_cache: Dict[str, Dict[str, Any]] = {}
         self._quota_refresh_interval: int = int(
             os.getenv("LIGHTNING_AI_QUOTA_REFRESH_INTERVAL", "300")
+        )
+        # Monthly grant amount in whole dollars — the fixed starting balance per account.
+        # Use LIGHTNING_AI_MONTHLY_GRANT to override if your plan differs from $15.
+        self._monthly_grant_dollars: int = int(
+            os.getenv("LIGHTNING_AI_MONTHLY_GRANT", str(DEFAULT_MONTHLY_GRANT_DOLLARS))
         )
 
     # =========================================================================
@@ -122,7 +132,7 @@ class LightningAiProvider(LightningAiQuotaTracker, ProviderInterface):
         Returns:
             Quota group name
         """
-        return "lightning_ai_balance"
+        return "credits($)"
 
     def get_models_in_quota_group(self, group: str) -> List[str]:
         """
@@ -134,13 +144,13 @@ class LightningAiProvider(LightningAiQuotaTracker, ProviderInterface):
         Returns:
             List of model names in the group
         """
-        if group == "lightning_ai_balance":
+        if group == "credits($)":
             return ["_balance"]
         return []
 
     def get_quota_groups(self) -> List[str]:
         """Return the list of quota groups for this provider."""
-        return ["lightning_ai_balance"]
+        return ["credits($)"]
 
     # =========================================================================
     # MODEL DISCOVERY
@@ -235,25 +245,29 @@ class LightningAiProvider(LightningAiQuotaTracker, ProviderInterface):
                     )
 
                     if balance_data.get("status") == "success":
-                        balance_cents = balance_data["balance_cents"]
-                        max_cents = balance_data.get("max_balance_cents", balance_cents)
+                        balance_dollars = balance_data["balance_dollars"]
+                        # Round to whole dollars for a clean TUI display ("14/15 93%")
+                        balance_int = int(round(balance_dollars))
+                        # Use the known fixed monthly grant as the max — this gives
+                        # accurate usage from day one without needing a high-water mark.
+                        max_int = self._monthly_grant_dollars
                         next_grant_ts = balance_data.get("next_grant_ts")
 
-                        # Compute how many cents have been "used" relative to max
-                        used_cents = max(0, max_cents - balance_cents)
+                        # Compute how many dollars have been "used" relative to grant
+                        used_int = max(0, max_int - balance_int)
 
                         await usage_manager.update_quota_baseline(
                             api_key,
                             "lightning_ai/_balance",
-                            quota_max_requests=max_cents if max_cents > 0 else None,
+                            quota_max_requests=max_int,
                             quota_reset_ts=next_grant_ts,
-                            quota_used=used_cents,
+                            quota_used=used_int,
                         )
 
                         lib_logger.debug(
                             f"Updated Lightning AI balance baseline: "
-                            f"${balance_data['balance_dollars']:.2f} remaining "
-                            f"({balance_cents}¢ / {max_cents}¢ max)"
+                            f"${balance_dollars:.2f} remaining "
+                            f"(${balance_int} / ${max_int} grant)"
                         )
 
                 except Exception as e:

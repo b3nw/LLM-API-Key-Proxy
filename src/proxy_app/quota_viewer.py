@@ -113,6 +113,23 @@ def _fmt_dollars(cents: Optional[int]) -> str:
     return f"${cents / 100:.2f}"
 
 
+def _fmt_compact(value: int) -> str:
+    """Format a large number compactly for quota display.
+
+    Examples: 59796630 → '59.8M', 60000000 → '60M', 5000 → '5000'
+    Only kicks in for values >= 100,000 to avoid changing small quotas.
+    """
+    if value >= 1_000_000_000:
+        s = f"{value / 1_000_000_000:.1f}B"
+        return s.replace(".0B", "B")
+    if value >= 1_000_000:
+        s = f"{value / 1_000_000:.1f}M"
+        return s.replace(".0M", "M")
+    if value >= 100_000:
+        return f"{value / 1_000:.0f}k"
+    return str(value)
+
+
 def format_time_ago(timestamp: Optional[float]) -> str:
     """Format timestamp as relative time (e.g., '5 min ago')."""
     if not timestamp:
@@ -985,7 +1002,7 @@ class QuotaViewer:
                             if _is_dollar_group(group_name):
                                 usage_str = f"{_fmt_dollars(total_remaining)}/{_fmt_dollars(total_max)}"
                             else:
-                                usage_str = f"{total_remaining}/{total_max}"
+                                usage_str = f"{_fmt_compact(total_remaining)}/{_fmt_compact(total_max)}"
                             bar = create_progress_bar(total_pct, QUOTA_BAR_WIDTH)
 
                             # Build the line with tier info and FC summary
@@ -1441,7 +1458,7 @@ class QuotaViewer:
                         if _is_dollar_group(group_name):
                             usage_str = f"{_fmt_dollars(remaining_val)}/{_fmt_dollars(limit)}"
                         else:
-                            usage_str = f"{remaining_val}/{limit}"
+                            usage_str = f"{_fmt_compact(remaining_val)}/{_fmt_compact(limit)}"
                         pct_str = f"{remaining_pct}%"
                     else:
                         usage_str = f"{request_count} req"

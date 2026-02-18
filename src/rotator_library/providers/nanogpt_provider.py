@@ -407,11 +407,7 @@ class NanoGptProvider(NanoGptQuotaTracker, ProviderInterface):
                         monthly_reset_ts = monthly_data.get("reset_at", 0)
 
                         # Store monthly request quota baseline (hard limit)
-                        monthly_used = (
-                            int((1.0 - monthly_remaining / monthly_limit) * monthly_limit)
-                            if monthly_limit > 0
-                            else 0
-                        )
+                        monthly_used = monthly_limit - monthly_remaining if monthly_limit > 0 else 0
                         await usage_manager.update_quota_baseline(
                             api_key,
                             "nanogpt/_monthly",
@@ -425,11 +421,7 @@ class NanoGptProvider(NanoGptQuotaTracker, ProviderInterface):
                             weekly_token_limit = limits.get("weekly_input_tokens", 0)
                             weekly_token_remaining = weekly_token_data.get("remaining", 0)
                             weekly_token_reset_ts = weekly_token_data.get("reset_at", 0)
-                            weekly_token_used = (
-                                int((1.0 - weekly_token_remaining / weekly_token_limit) * weekly_token_limit)
-                                if weekly_token_limit > 0
-                                else 0
-                            )
+                            weekly_token_used = weekly_token_limit - weekly_token_remaining if weekly_token_limit > 0 else 0
                             await usage_manager.update_quota_baseline(
                                 api_key,
                                 "nanogpt/_weekly_tokens",

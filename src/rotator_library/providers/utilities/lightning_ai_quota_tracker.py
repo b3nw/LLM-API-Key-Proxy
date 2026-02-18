@@ -126,19 +126,30 @@ class LightningAiQuotaTracker:
                     m.get("nextFreeCreditsGrant") if free_credits_enabled else None
                 )
 
-                # Parse ISO-8601 grant date → Unix timestamp
+                # Parse grant date → Unix timestamp.
+                # API returns "1 Mar 2026" (human-readable) or ISO-8601.
                 grant_ts: Optional[float] = None
                 if next_grant_raw:
-                    try:
-                        dt = datetime.fromisoformat(
-                            next_grant_raw.replace("Z", "+00:00")
-                        )
-                        grant_ts = dt.timestamp()
+                    for fmt in ("%d %b %Y", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S%z"):
+                        try:
+                            dt = datetime.strptime(next_grant_raw, fmt)
+                            if dt.tzinfo is None:
+                                dt = dt.replace(tzinfo=timezone.utc)
+                            grant_ts = dt.timestamp()
+                            break
+                        except (ValueError, AttributeError):
+                            continue
+                    if grant_ts is None:
+                        # Last resort: fromisoformat
+                        try:
+                            dt = datetime.fromisoformat(next_grant_raw.replace("Z", "+00:00"))
+                            grant_ts = dt.timestamp()
+                        except (ValueError, AttributeError):
+                            pass
+                    if grant_ts is not None:
                         # Keep the earliest upcoming grant date as the reset time
                         if next_grant_ts is None or grant_ts < next_grant_ts:
                             next_grant_ts = grant_ts
-                    except (ValueError, AttributeError):
-                        pass
 
                 memberships_parsed.append(
                     {

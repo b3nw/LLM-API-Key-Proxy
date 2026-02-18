@@ -252,7 +252,7 @@ class LightningAiProvider(LightningAiQuotaTracker, ProviderInterface):
                     if balance_data.get("status") == "success":
                         balance_dollars = balance_data["balance_dollars"]
                         # Round to whole dollars for a clean TUI display ("14/15 93%")
-                        balance_int = int(round(balance_dollars))
+                        balance_int = int(balance_dollars)  # floor: $14.85 → 14
                         # Use the known fixed monthly grant as the max — this gives
                         # accurate usage from day one without needing a high-water mark.
                         max_int = self._monthly_grant_dollars

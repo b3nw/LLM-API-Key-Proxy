@@ -105,9 +105,11 @@ def _is_dollar_group(group_name: str) -> bool:
 
 
 def _fmt_dollars(cents: Optional[int]) -> str:
-    """Format a cents value as a dollar string (e.g. 1485 → '$14.85')."""
+    """Format a cents value as a dollar string (e.g. 1485 → '$14.85', 1500 → '$15')."""
     if cents is None:
         return "?"
+    if cents % 100 == 0:
+        return f"${cents // 100}"
     return f"${cents / 100:.2f}"
 
 

@@ -50,13 +50,13 @@ LIGHTNING_AI_API_BASE = "https://lightning.ai/api/v1"
 # Concurrency limit for parallel balance fetches
 BALANCE_FETCH_CONCURRENCY = 5
 
-# Default monthly free credit grant per account, in tenths of a dollar (×10).
+# Default monthly free credit grant per account (dollars).
 # Lightning AI plan tiers:
-#   free:  $15/month  → 150
-#   pro:   $20/month  → 200
-#   teams: $50/month  → 500
+#   free:  $15/month
+#   pro:   $20/month
+#   teams: $50/month
 # Override with LIGHTNING_AI_MONTHLY_GRANT (in whole dollars) if on a paid plan.
-DEFAULT_MONTHLY_GRANT_DOLLARS = 15  # whole dollars; converted to tenths internally
+DEFAULT_MONTHLY_GRANT_DOLLARS = 15
 
 
 class LightningAiProvider(LightningAiQuotaTracker, ProviderInterface):
@@ -101,14 +101,15 @@ class LightningAiProvider(LightningAiQuotaTracker, ProviderInterface):
         self._quota_refresh_interval: int = int(
             os.getenv("LIGHTNING_AI_QUOTA_REFRESH_INTERVAL", "300")
         )
-        # Monthly grant in tenths of a dollar (×10 scale) for meaningful TUI display.
-        # e.g. $15 grant → 150, so $14.85 shows as 148/150 (not 14/15 which loses precision)
+        # Monthly grant in cents (×100 scale) for accurate TUI display.
+        # The TUI detects the ($) suffix in 'credits($)' and formats as dollars:
+        #   e.g. 1485/1500 → displays as $14.85/$15.00
         # Lightning AI tiers: free=$15, pro=$20, teams=$50
         # Set LIGHTNING_AI_MONTHLY_GRANT (whole dollars) to match your plan.
         grant_dollars = int(
             os.getenv("LIGHTNING_AI_MONTHLY_GRANT", str(DEFAULT_MONTHLY_GRANT_DOLLARS))
         )
-        self._monthly_grant_tenths: int = grant_dollars * 10  # e.g. 15 → 150
+        self._monthly_grant_cents: int = grant_dollars * 100  # e.g. 15 → 1500
 
     # =========================================================================
     # USAGE TRACKING CONFIGURATION
@@ -253,28 +254,28 @@ class LightningAiProvider(LightningAiQuotaTracker, ProviderInterface):
 
                     if balance_data.get("status") == "success":
                         balance_dollars = balance_data["balance_dollars"]
-                        # Use tenths-of-a-dollar scale for meaningful TUI display.
-                        # $14.85 → 148 (floor), $14.98 → 149, $15.00 → 150
-                        # This lets keys with tiny spending show differently from full ones.
-                        balance_tenths = int(balance_dollars * 10)  # floor in tenths
-                        max_tenths = self._monthly_grant_tenths
+                        # Use cents (×100 scale) for full precision.
+                        # The TUI detects 'credits($)' and formats as dollars:
+                        #   1485/1500 → $14.85/$15.00
+                        balance_cents = balance_data["balance_cents"]
+                        max_cents = self._monthly_grant_cents
                         next_grant_ts = balance_data.get("next_grant_ts")
 
-                        # Compute tenths used relative to grant
-                        used_tenths = max(0, max_tenths - balance_tenths)
+                        # Compute cents used relative to grant
+                        used_cents = max(0, max_cents - balance_cents)
 
                         await usage_manager.update_quota_baseline(
                             api_key,
                             "lightning_ai/_balance",
-                            quota_max_requests=max_tenths,
+                            quota_max_requests=max_cents,
                             quota_reset_ts=next_grant_ts,
-                            quota_used=used_tenths,
+                            quota_used=used_cents,
                         )
 
                         lib_logger.debug(
                             f"Updated Lightning AI balance baseline: "
                             f"${balance_dollars:.2f} remaining "
-                            f"({balance_tenths} / {max_tenths} tenths)"
+                            f"({balance_cents}¢ / {max_cents}¢)"
                         )
 
                 except Exception as e:

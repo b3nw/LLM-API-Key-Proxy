@@ -99,6 +99,18 @@ def format_cost(cost: Optional[float]) -> str:
     return f"${cost:.2f}"
 
 
+def _is_dollar_group(group_name: str) -> bool:
+    """Check if a quota group represents a dollar-based balance (e.g. 'credits($)')."""
+    return "($)" in group_name
+
+
+def _fmt_dollars(cents: Optional[int]) -> str:
+    """Format a cents value as a dollar string (e.g. 1485 → '$14.85')."""
+    if cents is None:
+        return "?"
+    return f"${cents / 100:.2f}"
+
+
 def format_time_ago(timestamp: Optional[float]) -> str:
     """Format timestamp as relative time (e.g., '5 min ago')."""
     if not timestamp:
@@ -968,7 +980,10 @@ class QuotaViewer:
                                 display_name = group_name
 
                             display_name_trunc = display_name[: QUOTA_NAME_WIDTH - 1]
-                            usage_str = f"{total_remaining}/{total_max}"
+                            if _is_dollar_group(group_name):
+                                usage_str = f"{_fmt_dollars(total_remaining)}/{_fmt_dollars(total_max)}"
+                            else:
+                                usage_str = f"{total_remaining}/{total_max}"
                             bar = create_progress_bar(total_pct, QUOTA_BAR_WIDTH)
 
                             # Build the line with tier info and FC summary
@@ -1421,7 +1436,10 @@ class QuotaViewer:
                             f"{remaining_pct}%" if remaining_pct is not None else ""
                         )
                     elif limit is not None:
-                        usage_str = f"{remaining_val}/{limit}"
+                        if _is_dollar_group(group_name):
+                            usage_str = f"{_fmt_dollars(remaining_val)}/{_fmt_dollars(limit)}"
+                        else:
+                            usage_str = f"{remaining_val}/{limit}"
                         pct_str = f"{remaining_pct}%"
                     else:
                         usage_str = f"{request_count} req"

@@ -107,7 +107,7 @@ class LightningAiProvider(LightningAiQuotaTracker, ProviderInterface):
         # Lightning AI tiers: free=$15, pro=$20, teams=$50
         # Set LIGHTNING_AI_MONTHLY_GRANT (whole dollars) to match your plan.
         grant_dollars = int(
-            os.getenv("LIGHTNING_AI_MONTHLY_GRANT", str(DEFAULT_MONTHLY_GRANT_DOLLARS))
+            os.getenv("LIGHTNING_AI_MONTHLY_GRANT") or DEFAULT_MONTHLY_GRANT_DOLLARS
         )
         self._monthly_grant_cents: int = grant_dollars * 100  # e.g. 15 → 1500
 

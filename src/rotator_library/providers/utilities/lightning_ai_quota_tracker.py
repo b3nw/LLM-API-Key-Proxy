@@ -20,6 +20,7 @@ Required from provider:
     - self._quota_refresh_interval: int = 300
 """
 
+import asyncio
 import logging
 import time
 from datetime import datetime, timezone
@@ -315,7 +316,6 @@ class LightningAiQuotaTracker:
                 "timestamp": float,
             }
         """
-        import asyncio
 
         results: Dict[str, Any] = {}
         total_balance = 0.0
@@ -333,8 +333,7 @@ class LightningAiQuotaTracker:
             tasks = [
                 fetch_with_semaphore(ident, key, client) for ident, key in api_keys
             ]
-            import asyncio as _asyncio
-            fetch_results = await _asyncio.gather(*tasks, return_exceptions=True)
+            fetch_results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for result in fetch_results:
             if isinstance(result, Exception):

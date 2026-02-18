@@ -95,8 +95,13 @@ class LightningAiQuotaTracker:
             }
         """
         try:
+            # Strip project/org path suffix if present.
+            # Keys can be "uuid/user/project" for billing routing, but the
+            # memberships API only accepts the bare UUID.
+            auth_key = api_key.split("/")[0] if "/" in api_key else api_key
+
             headers = {
-                "Authorization": f"Bearer {api_key}",
+                "Authorization": f"Bearer {auth_key}",
                 "Accept": "application/json",
             }
 

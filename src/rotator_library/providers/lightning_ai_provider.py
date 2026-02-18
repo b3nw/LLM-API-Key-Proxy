@@ -51,7 +51,11 @@ LIGHTNING_AI_API_BASE = "https://lightning.ai/api/v1"
 BALANCE_FETCH_CONCURRENCY = 5
 
 # Default monthly free credit grant per account (dollars).
-# Override with LIGHTNING_AI_MONTHLY_GRANT if your plan differs.
+# Lightning AI plan tiers:
+#   free:  $15/month
+#   pro:   $20/month
+#   teams: $50/month
+# Override with LIGHTNING_AI_MONTHLY_GRANT if your accounts are on a paid plan.
 DEFAULT_MONTHLY_GRANT_DOLLARS = 15
 
 
@@ -98,7 +102,8 @@ class LightningAiProvider(LightningAiQuotaTracker, ProviderInterface):
             os.getenv("LIGHTNING_AI_QUOTA_REFRESH_INTERVAL", "300")
         )
         # Monthly grant amount in whole dollars — the fixed starting balance per account.
-        # Use LIGHTNING_AI_MONTHLY_GRANT to override if your plan differs from $15.
+        # Lightning AI tiers: free=$15, pro=$20, teams=$50
+        # Set LIGHTNING_AI_MONTHLY_GRANT to match your plan if not on the free tier.
         self._monthly_grant_dollars: int = int(
             os.getenv("LIGHTNING_AI_MONTHLY_GRANT", str(DEFAULT_MONTHLY_GRANT_DOLLARS))
         )

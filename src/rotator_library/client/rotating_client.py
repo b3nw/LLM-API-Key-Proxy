@@ -537,6 +537,13 @@ class RotatingClient:
             if not has_requests and not has_quota_data:
                 continue
 
+            # Attach provider-specific quota display info (e.g., credit balances)
+            plugin = self._get_provider_instance(provider)
+            if plugin and hasattr(plugin, "get_quota_display_info"):
+                display_info = plugin.get_quota_display_info()
+                if display_info:
+                    stats["quota_display"] = display_info
+
             providers[provider] = stats
 
         summary = {

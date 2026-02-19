@@ -116,17 +116,15 @@ class FirmwareQuotaTracker:
             # remaining_fraction is 1.0 if credits available, 0.0 if exhausted
             remaining_fraction = 1.0 if credits_balance > 0.0 else 0.0
 
-            # No rolling window reset in credit-based system
-            reset_at = None
-            has_active_window = False
+            # Parse optional reset/reload date (ISO 8601 string)
+            reset_date = data.get("reset")  # e.g., "2023-04-01T00:00:00.000Z"
 
             return {
                 "status": "success",
                 "error": None,
                 "credits": credits_balance,
                 "remaining_fraction": remaining_fraction,
-                "reset_at": reset_at,
-                "has_active_window": has_active_window,
+                "reset_date": reset_date,  # ISO 8601 string or None
                 "fetched_at": time.time(),
             }
 

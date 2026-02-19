@@ -735,3 +735,29 @@ class ProviderInterface(ABC, metaclass=SingletonABCMeta):
             credentials: List of credential paths for this provider
         """
         pass
+
+    def get_quota_display_info(self) -> Optional[Dict[str, Any]]:
+        """
+        Return provider-specific quota display metadata for the TUI/API.
+
+        Providers with non-standard quota systems (e.g., credit balances instead
+        of request counts) can override this to provide custom display data.
+        This data is attached to the provider's stats output alongside the
+        standard request-count based quota groups.
+
+        Returns:
+            None if no custom display info, otherwise a dict with:
+            {
+                "display_mode": str,       # "credits" | "requests" (default)
+                "credits_balance": float,   # Current credit balance (for "credits" mode)
+                "credits_unit": str,        # e.g., "$" or "credits"
+                "reset_at": str | None,     # ISO 8601 reset/reload date
+                "credentials": {            # Per-credential credit info
+                    "cred_id": {
+                        "credits": float,
+                        "reset_at": str | None,
+                    }
+                }
+            }
+        """
+        return None

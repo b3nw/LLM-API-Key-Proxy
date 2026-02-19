@@ -81,7 +81,7 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
         Get all models in a quota group.
 
         For Firmware.ai, we use a virtual model "firmware/_quota" to track the
-        credential-level 5-hour rolling window quota.
+        credential-level credit-based quota.
 
         Args:
             group: Quota group name
@@ -225,3 +225,50 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
                 refresh_single_credential(api_key, client) for api_key in credentials
             ]
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    # =========================================================================
+    # QUOTA DISPLAY INFO
+    # =========================================================================
+
+    def get_quota_display_info(self) -> Optional[Dict[str, Any]]:
+        """
+        Return credit-based quota display info for the TUI/API.
+
+        Firmware.ai uses absolute credit balances rather than request counts,
+        so we surface the credit info for proper display in the TUI.
+
+        Returns:
+            Dict with display_mode="credits" and per-credential credit data
+        """
+        if not self._quota_cache:
+            return None
+
+        total_credits = 0.0
+        cred_info = {}
+        reset_date = None
+
+        for api_key, cache_data in self._quota_cache.items():
+            if cache_data.get("status") != "success":
+                continue
+
+            credits = cache_data.get("credits", 0.0)
+            total_credits += credits
+            cred_reset = cache_data.get("reset_date")
+            if cred_reset and not reset_date:
+                reset_date = cred_reset
+
+            # Mask the API key for display (show last 6 chars)
+            masked_key = f"...{api_key[-6:]}" if len(api_key) > 6 else api_key
+            cred_info[masked_key] = {
+                "credits": credits,
+                "reset_date": cred_reset,
+            }
+
+        return {
+            "display_mode": "credits",
+            "credits_balance": total_credits,
+            "credits_unit": "$",
+            "reset_date": reset_date,
+            "credentials": cred_info,
+        }
+

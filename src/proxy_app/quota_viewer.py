@@ -893,7 +893,37 @@ class QuotaViewer:
 
                 # Build quota status string (for providers with quota groups)
                 quota_groups = prov_stats.get("quota_groups", {})
-                if quota_groups:
+                quota_display = prov_stats.get("quota_display", {})
+
+                # Credit-based providers get a special display
+                if quota_display.get("display_mode") == "credits":
+                    credits_balance = quota_display.get("credits_balance", 0.0)
+                    credits_unit = quota_display.get("credits_unit", "$")
+                    reset_date = quota_display.get("reset_date")
+
+                    # Color based on balance
+                    if credits_balance <= 0:
+                        color = "red"
+                    elif credits_balance < 5:
+                        color = "yellow"
+                    else:
+                        color = "green"
+
+                    # Build the display string
+                    credit_str = f"{credits_unit}{credits_balance:.2f} credits"
+                    if reset_date:
+                        credit_str += f" (reloads: {reset_date})"
+
+                    first_quota = f"[{color}]{credit_str}[/{color}]"
+                    table.add_row(
+                        provider,
+                        str(cred_count),
+                        first_quota,
+                        str(total_requests),
+                        token_str,
+                        cost_str,
+                    )
+                elif quota_groups:
                     quota_lines = []
                     # Sort quota groups by minimum remaining % (lowest first)
                     sorted_groups = sorted(
@@ -1139,7 +1169,7 @@ class QuotaViewer:
                     )
                 else:
                     for idx, cred in enumerate(credentials, 1):
-                        self._render_credential_panel(idx, cred, provider)
+                        self._render_credential_panel(idx, cred, provider, prov_stats)
 
             # Menu
             self.console.print("━" * 78)
@@ -1256,7 +1286,7 @@ class QuotaViewer:
                                 self.console.print(f"[red]  Error: {err}[/red]")
                         Prompt.ask("Press Enter to continue", default="")
 
-    def _render_credential_panel(self, idx: int, cred: Dict[str, Any], provider: str):
+    def _render_credential_panel(self, idx: int, cred: Dict[str, Any], provider: str, prov_stats: Optional[Dict[str, Any]] = None):
         """Render a single credential as a panel."""
         identifier = cred.get("identifier", f"credential {idx}")
         email = cred.get("email")
@@ -1338,7 +1368,30 @@ class QuotaViewer:
 
         # Display group usage with per-window breakdown
         # Note: group_usage is pre-sorted by limit (lowest first) from the API
-        if group_usage:
+        quota_display = (prov_stats or {}).get("quota_display", {})
+        is_credits_mode = quota_display.get("display_mode") == "credits"
+
+        if is_credits_mode:
+            # Credit-based display: show balance and reload date
+            credits_balance = quota_display.get("credits_balance", 0.0)
+            credits_unit = quota_display.get("credits_unit", "$")
+            reset_date = quota_display.get("reset_date")
+
+            # Color based on balance
+            if credits_balance <= 0:
+                color = "red"
+            elif credits_balance < 5:
+                color = "yellow"
+            else:
+                color = "green"
+
+            content_lines.append("[bold]Credit Balance:[/bold]")
+            content_lines.append(
+                f"  [{color}]{credits_unit}{credits_balance:.2f} remaining[/{color}]"
+            )
+            if reset_date:
+                content_lines.append(f"  [dim]Reloads: {reset_date}[/dim]")
+        elif group_usage:
             content_lines.append("[bold]Quota Groups:[/bold]")
 
             for group_name, group_stats in group_usage.items():

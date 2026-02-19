@@ -1000,10 +1000,17 @@ class QuotaViewer:
 
                             display_name_trunc = display_name[: QUOTA_NAME_WIDTH - 1]
                             if _is_dollar_group(group_name):
-                                usage_str = f"{_fmt_dollars(total_remaining)}/{_fmt_dollars(total_max)}"
+                                if total_remaining == total_max:
+                                    # Pure balance (no fixed grant) — show just the amount
+                                    usage_str = f"{_fmt_dollars(total_remaining)}"
+                                    pct_str = ""
+                                    bar = ""
+                                else:
+                                    usage_str = f"{_fmt_dollars(total_remaining)}/{_fmt_dollars(total_max)}"
+                                    bar = create_progress_bar(total_pct, QUOTA_BAR_WIDTH)
                             else:
                                 usage_str = f"{_fmt_compact(total_remaining)}/{_fmt_compact(total_max)}"
-                            bar = create_progress_bar(total_pct, QUOTA_BAR_WIDTH)
+                                bar = create_progress_bar(total_pct, QUOTA_BAR_WIDTH)
 
                             # Build the line with tier info and FC summary
                             line_parts = [
@@ -1456,7 +1463,13 @@ class QuotaViewer:
                         )
                     elif limit is not None:
                         if _is_dollar_group(group_name):
-                            usage_str = f"{_fmt_dollars(remaining_val)}/{_fmt_dollars(limit)}"
+                            if remaining_val == limit:
+                                # Pure balance (no fixed grant) — show just the amount
+                                usage_str = f"{_fmt_dollars(remaining_val)}"
+                                pct_str = ""
+                                bar = create_progress_bar(100)  # Full bar
+                            else:
+                                usage_str = f"{_fmt_dollars(remaining_val)}/{_fmt_dollars(limit)}"
                         else:
                             usage_str = f"{_fmt_compact(remaining_val)}/{_fmt_compact(limit)}"
                         pct_str = f"{remaining_pct}%"

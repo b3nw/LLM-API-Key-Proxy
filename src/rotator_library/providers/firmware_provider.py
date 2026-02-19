@@ -178,12 +178,16 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
                         self._quota_cache[api_key] = usage_data
 
                         # Calculate values for usage manager
+                        credits_balance = usage_data.get("credits", 0.0)
                         remaining_fraction = usage_data.get("remaining_fraction", 0.0)
-                        reset_ts = usage_data.get("reset_at")
 
                         # Store baseline in usage manager
                         # Since Firmware.ai uses credential-level quota, we use a virtual model name
-                        if remaining_fraction <= 0.0 and reset_ts:
+                        # Express credits as synthetic request-count values (in cents)
+                        # so the quota group window gets a non-zero limit for visibility
+                        credits_as_cents = int(credits_balance * 100)
+
+                        if remaining_fraction <= 0.0:
                             stable_id = usage_manager.registry.get_stable_id(
                                 api_key, usage_manager.provider
                             )
@@ -192,19 +196,22 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
                                 await usage_manager.tracking.apply_cooldown(
                                     state=state,
                                     reason="quota_exhausted",
-                                    until=reset_ts,
+                                    duration=3600,  # 1 hour cooldown
                                     model_or_group="firmware/_quota",
                                     source="api_quota",
                                 )
                         await usage_manager.update_quota_baseline(
                             api_key,
                             "firmware/_quota",  # Virtual model for credential-level tracking
-                            quota_reset_ts=reset_ts,
+                            quota_max_requests=credits_as_cents,
+                            quota_used=0,
+                            quota_reset_ts=None,
+                            force=True,
                         )
 
                         lib_logger.debug(
                             f"Updated Firmware.ai quota baseline: "
-                            f"{usage_data.get('credits', 0.0):.2f} credits remaining"
+                            f"{credits_balance:.2f} credits remaining"
                         )
 
                 except Exception as e:

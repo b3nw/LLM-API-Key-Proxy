@@ -99,6 +99,20 @@ def format_cost(cost: Optional[float]) -> str:
     return f"${cost:.2f}"
 
 
+def _is_dollar_group(group_name: str) -> bool:
+    """Check if a quota group represents a dollar-based balance (e.g. 'credits($)')."""
+    return "($)" in group_name
+
+
+def _fmt_dollars(cents: Optional[int]) -> str:
+    """Format a cents value as a dollar string (e.g. 1485 → '$14.85', 1500 → '$15')."""
+    if cents is None:
+        return "?"
+    if cents % 100 == 0:
+        return f"${cents // 100}"
+    return f"${cents / 100:.2f}"
+
+
 def _fmt_compact(value: int) -> str:
     """Format a large number compactly for quota display.
 
@@ -893,37 +907,7 @@ class QuotaViewer:
 
                 # Build quota status string (for providers with quota groups)
                 quota_groups = prov_stats.get("quota_groups", {})
-                quota_display = prov_stats.get("quota_display", {})
-
-                # Credit-based providers get a special display
-                if quota_display.get("display_mode") == "credits":
-                    credits_balance = quota_display.get("credits_balance", 0.0)
-                    credits_unit = quota_display.get("credits_unit", "$")
-                    reset_date = quota_display.get("reset_date")
-
-                    # Color based on balance
-                    if credits_balance <= 0:
-                        color = "red"
-                    elif credits_balance < 5:
-                        color = "yellow"
-                    else:
-                        color = "green"
-
-                    # Build the display string
-                    credit_str = f"{credits_unit}{credits_balance:.2f} credits"
-                    if reset_date:
-                        credit_str += f" (reloads: {reset_date})"
-
-                    first_quota = f"[{color}]{credit_str}[/{color}]"
-                    table.add_row(
-                        provider,
-                        str(cred_count),
-                        first_quota,
-                        str(total_requests),
-                        token_str,
-                        cost_str,
-                    )
-                elif quota_groups:
+                if quota_groups:
                     quota_lines = []
                     # Sort quota groups by minimum remaining % (lowest first)
                     sorted_groups = sorted(
@@ -1015,7 +999,10 @@ class QuotaViewer:
                                 display_name = group_name
 
                             display_name_trunc = display_name[: QUOTA_NAME_WIDTH - 1]
-                            usage_str = f"{_fmt_compact(total_remaining)}/{_fmt_compact(total_max)}"
+                            if _is_dollar_group(group_name):
+                                usage_str = f"{_fmt_dollars(total_remaining)}/{_fmt_dollars(total_max)}"
+                            else:
+                                usage_str = f"{_fmt_compact(total_remaining)}/{_fmt_compact(total_max)}"
                             bar = create_progress_bar(total_pct, QUOTA_BAR_WIDTH)
 
                             # Build the line with tier info and FC summary
@@ -1169,7 +1156,7 @@ class QuotaViewer:
                     )
                 else:
                     for idx, cred in enumerate(credentials, 1):
-                        self._render_credential_panel(idx, cred, provider, prov_stats)
+                        self._render_credential_panel(idx, cred, provider)
 
             # Menu
             self.console.print("━" * 78)
@@ -1286,7 +1273,7 @@ class QuotaViewer:
                                 self.console.print(f"[red]  Error: {err}[/red]")
                         Prompt.ask("Press Enter to continue", default="")
 
-    def _render_credential_panel(self, idx: int, cred: Dict[str, Any], provider: str, prov_stats: Optional[Dict[str, Any]] = None):
+    def _render_credential_panel(self, idx: int, cred: Dict[str, Any], provider: str):
         """Render a single credential as a panel."""
         identifier = cred.get("identifier", f"credential {idx}")
         email = cred.get("email")
@@ -1368,30 +1355,7 @@ class QuotaViewer:
 
         # Display group usage with per-window breakdown
         # Note: group_usage is pre-sorted by limit (lowest first) from the API
-        quota_display = (prov_stats or {}).get("quota_display", {})
-        is_credits_mode = quota_display.get("display_mode") == "credits"
-
-        if is_credits_mode:
-            # Credit-based display: show balance and reload date
-            credits_balance = quota_display.get("credits_balance", 0.0)
-            credits_unit = quota_display.get("credits_unit", "$")
-            reset_date = quota_display.get("reset_date")
-
-            # Color based on balance
-            if credits_balance <= 0:
-                color = "red"
-            elif credits_balance < 5:
-                color = "yellow"
-            else:
-                color = "green"
-
-            content_lines.append("[bold]Credit Balance:[/bold]")
-            content_lines.append(
-                f"  [{color}]{credits_unit}{credits_balance:.2f} remaining[/{color}]"
-            )
-            if reset_date:
-                content_lines.append(f"  [dim]Reloads: {reset_date}[/dim]")
-        elif group_usage:
+        if group_usage:
             content_lines.append("[bold]Quota Groups:[/bold]")
 
             for group_name, group_stats in group_usage.items():
@@ -1491,7 +1455,10 @@ class QuotaViewer:
                             f"{remaining_pct}%" if remaining_pct is not None else ""
                         )
                     elif limit is not None:
-                        usage_str = f"{_fmt_compact(remaining_val)}/{_fmt_compact(limit)}"
+                        if _is_dollar_group(group_name):
+                            usage_str = f"{_fmt_dollars(remaining_val)}/{_fmt_dollars(limit)}"
+                        else:
+                            usage_str = f"{_fmt_compact(remaining_val)}/{_fmt_compact(limit)}"
                         pct_str = f"{remaining_pct}%"
                     else:
                         usage_str = f"{request_count} req"

@@ -36,8 +36,10 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
 
     # Quota groups for tracking credit-based limits
     # Uses a virtual model "firmware/_quota" for credential-level quota tracking
+    # Single quota group: all models share the same credential-level credit balance.
+    # Named 'credits($)' so the TUI auto-formats values as dollars.
     model_quota_groups = {
-        "firmware_global": ["firmware/_quota"],
+        "credits($)": ["firmware/_quota"],
     }
 
     def __init__(self, *args, **kwargs):
@@ -74,7 +76,7 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
         Returns:
             Quota group identifier for shared credential-level tracking
         """
-        return "firmware_global"
+        return "credits($)"
 
     def get_models_in_quota_group(self, group: str) -> List[str]:
         """
@@ -89,7 +91,7 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
         Returns:
             List of model names in the group
         """
-        if group == "firmware_global":
+        if group == "credits($)":
             return ["firmware/_quota"]
         return []
 
@@ -226,49 +228,5 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
             ]
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    # =========================================================================
-    # QUOTA DISPLAY INFO
-    # =========================================================================
 
-    def get_quota_display_info(self) -> Optional[Dict[str, Any]]:
-        """
-        Return credit-based quota display info for the TUI/API.
-
-        Firmware.ai uses absolute credit balances rather than request counts,
-        so we surface the credit info for proper display in the TUI.
-
-        Returns:
-            Dict with display_mode="credits" and per-credential credit data
-        """
-        if not self._quota_cache:
-            return None
-
-        total_credits = 0.0
-        cred_info = {}
-        reset_date = None
-
-        for api_key, cache_data in self._quota_cache.items():
-            if cache_data.get("status") != "success":
-                continue
-
-            credits = cache_data.get("credits", 0.0)
-            total_credits += credits
-            cred_reset = cache_data.get("reset_date")
-            if cred_reset and not reset_date:
-                reset_date = cred_reset
-
-            # Mask the API key for display (show last 6 chars)
-            masked_key = f"...{api_key[-6:]}" if len(api_key) > 6 else api_key
-            cred_info[masked_key] = {
-                "credits": credits,
-                "reset_date": cred_reset,
-            }
-
-        return {
-            "display_mode": "credits",
-            "credits_balance": total_credits,
-            "credits_unit": "$",
-            "reset_date": reset_date,
-            "credentials": cred_info,
-        }
 

@@ -1,8 +1,8 @@
 """
 Firmware.ai Provider with Quota Tracking
 
-Provider implementation for the Firmware.ai API with 5-hour rolling window quota tracking.
-Uses the FirmwareQuotaTracker mixin to fetch quota usage from their API.
+Provider implementation for the Firmware.ai API with credit-based quota tracking.
+Uses the FirmwareQuotaTracker mixin to fetch credit balance from their API.
 
 Environment variables:
     FIRMWARE_API_BASE: API base URL (default: https://app.firmware.ai/api/v1)
@@ -34,7 +34,7 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
     Provider implementation for the Firmware.ai API with quota tracking.
     """
 
-    # Quota groups for tracking 5-hour rolling window limits
+    # Quota groups for tracking credit-based limits
     # Uses a virtual model "firmware/_quota" for credential-level quota tracking
     model_quota_groups = {
         "firmware_global": ["firmware/_quota"],
@@ -98,17 +98,16 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
         Return usage reset configuration for Firmware.ai credentials.
 
         Firmware.ai uses per_model mode to track usage at the model level,
-        with 5-hour rolling window quotas managed via the background job.
+        with credit-based quota managed via the background job.
 
         Args:
             credential: The API key (unused, same config for all)
 
         Returns:
-            Configuration with per_model mode and 5-hour window
+            Configuration with per_model mode
         """
         return {
             "mode": "per_model",
-            "window_seconds": 18000,  # 5 hours (5-hour rolling window)
             "field_name": "models",
         }
 
@@ -205,8 +204,7 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
 
                         lib_logger.debug(
                             f"Updated Firmware.ai quota baseline: "
-                            f"{remaining_fraction * 100:.1f}% remaining, "
-                            f"active_window={usage_data.get('has_active_window', False)}"
+                            f"{usage_data.get('credits', 0.0):.2f} credits remaining"
                         )
 
                 except Exception as e:

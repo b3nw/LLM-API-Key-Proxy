@@ -323,10 +323,16 @@ class AnthropicProvider(AnthropicOAuthBase, AnthropicQuotaTracker, ProviderInter
         ),
     }
 
-    # Model quota groups - all Anthropic models share per-account rate limits
-    # "anthropic-rpm" tracks the requests-per-minute window from API headers
+    # Model quota groups - Anthropic subscription windows
+    # Mirrors Codex pattern: 5h-limit and weekly-limit windows
+    # Synthetic models (anthropic/_5h_window, anthropic/_weekly_window) are used
+    # for quota tracking via the /api/oauth/usage endpoint
+    # "anthropic-global" ensures sequential rotation shares one sticky credential
+    # across all models, maximizing prompt cache hits.
     model_quota_groups: QuotaGroupMap = {
-        "anthropic-rpm": list(OAUTH_MODELS),
+        "5h-limit": list(OAUTH_MODELS),
+        "weekly-limit": list(OAUTH_MODELS),
+        "anthropic-global": list(OAUTH_MODELS),
     }
 
     def __init__(self):
@@ -543,10 +549,6 @@ class AnthropicProvider(AnthropicOAuthBase, AnthropicQuotaTracker, ProviderInter
             json=payload,
             timeout=TimeoutConfig.streaming(),
         ) as response:
-            # Parse rate limit headers and push to UsageManager
-            if credential_path:
-                response_headers = {k.lower(): v for k, v in response.headers.items()}
-                self.update_quota_from_headers(credential_path, response_headers)
 
             if response.status_code >= 400:
                 error_body = await response.aread()
@@ -738,10 +740,6 @@ class AnthropicProvider(AnthropicOAuthBase, AnthropicQuotaTracker, ProviderInter
             timeout=TimeoutConfig.non_streaming(),
         )
 
-        # Parse rate limit headers and push to UsageManager
-        if credential_path:
-            response_headers = {k.lower(): v for k, v in response.headers.items()}
-            self.update_quota_from_headers(credential_path, response_headers)
 
         if response.status_code >= 400:
             error_text = response.text
@@ -828,13 +826,6 @@ class AnthropicProvider(AnthropicOAuthBase, AnthropicQuotaTracker, ProviderInter
 
         return response_obj
 
-    # =========================================================================
-    # RATE LIMIT PARSING (delegated to AnthropicQuotaTracker)
-    # =========================================================================
-
-    # Rate limit header parsing and quota updates are handled by
-    # the AnthropicQuotaTracker mixin's update_quota_from_headers() method.
-    # See: utilities/anthropic_quota_tracker.py
 
     @staticmethod
     def parse_quota_error(

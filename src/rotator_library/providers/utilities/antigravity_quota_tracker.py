@@ -32,6 +32,7 @@ from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 import httpx
 
 from .base_quota_tracker import BaseQuotaTracker, QUOTA_DISCOVERY_DELAY_SECONDS
+from .gemini_shared_utils import is_paid_tier, normalize_tier_name
 
 if TYPE_CHECKING:
     from ...usage import UsageManager
@@ -104,11 +105,41 @@ DEFAULT_MAX_REQUESTS: Dict[str, Dict[str, int]] = {
         # Gemini 2.5 Pro - UNVERIFIED/UNUSED (assumed 0.1% = 1000 requests)
         "gemini-2.5-pro": 1,
     },
+    # ULTRA tier - estimated ~5x PRO for premium models (seed values).
+    # These are provisional starting points that will be automatically
+    # overridden by dynamic learning from observed API fraction changes.
+    "ULTRA": {
+        # Claude/GPT-OSS group (~5x PRO: 750 requests)
+        "claude-sonnet-4-5": 750,
+        "claude-sonnet-4-5-thinking": 750,
+        "claude-opus-4-5": 750,
+        "claude-opus-4-5-thinking": 750,
+        "claude-opus-4-6": 750,
+        "claude-opus-4-6-thinking": 750,
+        "claude-sonnet-4.5": 750,
+        "claude-opus-4.5": 750,
+        "claude-opus-4.6": 750,
+        "gpt-oss-120b-medium": 750,
+        # Gemini 3 Pro group (~5x PRO: 1600 requests)
+        "gemini-3-pro-high": 1600,
+        "gemini-3-pro-low": 1600,
+        "gemini-3-pro-preview": 1600,
+        # Gemini 3 Flash (~5x PRO: 2000 requests)
+        "gemini-3-flash": 2000,
+        # Gemini 2.5 Flash group (same as PRO - already high limits)
+        "gemini-2.5-flash": 3000,
+        "gemini-2.5-flash-thinking": 3000,
+        # Gemini 2.5 Flash Lite (same as PRO - already high limits)
+        "gemini-2.5-flash-lite": 5000,
+        # Gemini 2.5 Pro - UNVERIFIED/UNUSED
+        "gemini-2.5-pro": 1,
+    },
 }
 
 # Legacy tier name aliases (backwards compatibility)
 DEFAULT_MAX_REQUESTS["standard-tier"] = DEFAULT_MAX_REQUESTS["PRO"]
 DEFAULT_MAX_REQUESTS["free-tier"] = DEFAULT_MAX_REQUESTS["FREE"]
+DEFAULT_MAX_REQUESTS["ultra-tier"] = DEFAULT_MAX_REQUESTS["ULTRA"]
 
 # Default max requests for unknown models (1% = 100 requests)
 DEFAULT_MAX_REQUESTS_UNKNOWN = 100
@@ -178,6 +209,7 @@ class AntigravityQuotaTracker(BaseQuotaTracker):
     _quota_refresh_interval: int
     project_tier_cache: Dict[str, str]
     project_id_cache: Dict[str, str]
+    _fraction_tracking: Dict[str, Dict[str, Any]]
 
     # =========================================================================
     # ANTIGRAVITY-SPECIFIC HELPERS
@@ -288,6 +320,9 @@ class AntigravityQuotaTracker(BaseQuotaTracker):
         # Ensure learned values are loaded
         self._load_learned_costs()
 
+        # Normalize tier to canonical name (e.g., "g1-ultra-tier" -> "ULTRA")
+        tier = normalize_tier_name(tier)
+
         # Strip provider prefix if present
         clean_model = model.split("/")[-1] if "/" in model else model
 
@@ -301,10 +336,21 @@ class AntigravityQuotaTracker(BaseQuotaTracker):
             if clean_model in DEFAULT_MAX_REQUESTS[tier]:
                 return DEFAULT_MAX_REQUESTS[tier][clean_model]
 
-        # Unknown model - use conservative default
-        lib_logger.debug(
+        # Unknown model/tier combo - try PRO fallback for paid tiers
+        if is_paid_tier(tier) and "PRO" in DEFAULT_MAX_REQUESTS:
+            if clean_model in DEFAULT_MAX_REQUESTS["PRO"]:
+                lib_logger.warning(
+                    f"No max requests for model={clean_model}, tier={tier}. "
+                    f"Falling back to PRO tier limits. Consider running "
+                    f"discover_quota_costs to learn actual limits."
+                )
+                return DEFAULT_MAX_REQUESTS["PRO"][clean_model]
+
+        # Truly unknown model/tier - use conservative default
+        lib_logger.warning(
             f"Unknown max requests for model={clean_model}, tier={tier}. "
-            f"Using default {DEFAULT_MAX_REQUESTS_UNKNOWN}"
+            f"Using default {DEFAULT_MAX_REQUESTS_UNKNOWN}. "
+            f"Consider running discover_quota_costs to learn actual limits."
         )
         return DEFAULT_MAX_REQUESTS_UNKNOWN
 
@@ -316,6 +362,137 @@ class AntigravityQuotaTracker(BaseQuotaTracker):
             if clean_model in models:
                 return group_name
         return None
+
+    # =========================================================================
+    # DYNAMIC QUOTA LEARNING
+    # =========================================================================
+
+    def _try_learn_max_requests_from_fraction(
+        self,
+        cred_path: str,
+        model: str,
+        tier: str,
+        new_remaining: float,
+        usage_manager: "UsageManager",
+        quota_group: Optional[str] = None,
+    ) -> Optional[int]:
+        """Try to derive max_requests from observed API fraction changes.
+
+        Compares the current remaining_fraction with a previously stored value.
+        If the fraction has decreased by at least 5% (one API step), uses the
+        actual request count from the usage_manager to estimate max_requests.
+
+        This enables automatic learning of quota limits for any tier, including
+        ULTRA and future tiers, without needing hardcoded values.
+
+        Args:
+            cred_path: Credential path identifier
+            model: User-facing model name (without provider prefix)
+            tier: Account tier (e.g., "ULTRA", "PRO")
+            new_remaining: Current remaining_fraction from API (0.0-1.0)
+            usage_manager: UsageManager instance for request count lookup
+            quota_group: Optional quota group name
+
+        Returns:
+            Learned max_requests if derivable, None otherwise.
+        """
+        if not hasattr(self, "_fraction_tracking"):
+            self._fraction_tracking = {}
+
+        # Normalize tier to canonical name for consistent storage
+        tier = normalize_tier_name(tier)
+
+        tracking_key = f"{cred_path}:{model}"
+        prev = self._fraction_tracking.get(tracking_key)
+
+        # Get current request count from usage_manager BEFORE baseline update
+        prefixed_model = f"antigravity/{model}"
+        current_count = usage_manager.get_window_request_count(
+            cred_path, prefixed_model, quota_group=quota_group
+        )
+
+        # Store current state for next observation
+        self._fraction_tracking[tracking_key] = {
+            "fraction": new_remaining,
+            "request_count": current_count or 0,
+            "timestamp": time.time(),
+        }
+
+        if prev is None:
+            return None  # First observation - nothing to compare
+
+        prev_fraction = prev["fraction"]
+        prev_count = prev["request_count"]
+
+        if current_count is None:
+            return None  # No request tracking available yet
+
+        # Calculate fraction consumed and requests made between observations
+        fraction_consumed = prev_fraction - new_remaining
+        requests_made = current_count - prev_count
+
+        # Guard: need meaningful consumption and actual requests
+        # API updates in ~20% increments, so 5% threshold avoids noise
+        if fraction_consumed < 0.05:
+            return None  # Too small a change, or quota reset (negative)
+
+        if requests_made < 1:
+            return None  # No requests between observations
+
+        # Derive max_requests: if N requests consumed F fraction of quota,
+        # then total capacity = N / F
+        derived_max = int(round(requests_made / fraction_consumed))
+
+        # Sanity bounds
+        if derived_max < 10:
+            lib_logger.warning(
+                f"Dynamic learning: derived unreasonably low max_requests="
+                f"{derived_max} for {model} tier={tier} "
+                f"(fraction_consumed={fraction_consumed:.4f}, "
+                f"requests={requests_made}). Ignoring."
+            )
+            return None
+
+        if derived_max > 100000:
+            lib_logger.warning(
+                f"Dynamic learning: derived unreasonably high max_requests="
+                f"{derived_max} for {model} tier={tier} "
+                f"(fraction_consumed={fraction_consumed:.4f}, "
+                f"requests={requests_made}). Ignoring."
+            )
+            return None
+
+        # Smooth with existing learned value if available
+        self._load_learned_costs()
+        existing = None
+        if tier in self._learned_costs:
+            existing = self._learned_costs[tier].get(model)
+
+        if existing is not None:
+            # Weighted average: 60% new observation, 40% existing
+            smoothed = int(round(0.6 * derived_max + 0.4 * existing))
+            lib_logger.info(
+                f"Dynamic learning: {model} tier={tier} derived "
+                f"max_requests={derived_max} (existing={existing}, "
+                f"smoothed={smoothed}, fraction_consumed="
+                f"{fraction_consumed:.4f}, requests={requests_made})"
+            )
+            derived_max = smoothed
+        else:
+            lib_logger.info(
+                f"Dynamic learning: {model} tier={tier} derived "
+                f"max_requests={derived_max} "
+                f"(fraction_consumed={fraction_consumed:.4f}, "
+                f"requests={requests_made})"
+            )
+
+        # Persist learned value (updates in-memory dict + saves to file)
+        if tier not in self._learned_costs:
+            self._learned_costs[tier] = {}
+        self._learned_costs[tier][model] = derived_max
+        self._save_learned_costs()
+
+        return derived_max
 
     # =========================================================================
     # BaseQuotaTracker ABSTRACT METHOD IMPLEMENTATIONS
@@ -1072,7 +1249,23 @@ class AntigravityQuotaTracker(BaseQuotaTracker):
                 if user_model in stored_for_cred:
                     continue
 
+                # Determine quota group (needed for dynamic learning and baseline storage)
+                quota_group = self.get_model_quota_group(user_model)
+
+                # Try dynamic learning from observed fraction changes.
+                # This may update _learned_costs, which get_max_requests_for_model
+                # checks first, enabling self-correcting limits for any tier.
+                self._try_learn_max_requests_from_fraction(
+                    cred_path,
+                    user_model,
+                    tier,
+                    remaining,
+                    usage_manager,
+                    quota_group=quota_group,
+                )
+
                 # Calculate max_requests for this model/tier
+                # (will use dynamically learned values if available)
                 max_requests = self.get_max_requests_for_model(user_model, tier)
 
                 # Extract reset_timestamp (already parsed to float in fetch_quota_from_api)
@@ -1087,7 +1280,6 @@ class AntigravityQuotaTracker(BaseQuotaTracker):
                 quota_used = None
                 if max_requests is not None:
                     quota_used = int((1.0 - remaining) * max_requests)
-                quota_group = self.get_model_quota_group(user_model)
 
                 # ANTIGRAVITY-SPECIFIC: Only apply exhaustion on initial fetch
                 # (API only updates in ~20% increments, so we rely on local tracking

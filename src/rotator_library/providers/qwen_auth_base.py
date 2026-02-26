@@ -342,11 +342,17 @@ class QwenAuthBase:
             if not force and cached_creds and not self._is_token_expired(cached_creds):
                 return cached_creds
 
-            # [ROTATING TOKEN FIX] Always read fresh from disk before refresh.
+            # [ROTATING TOKEN FIX] Read fresh credentials before refresh.
             # Qwen uses rotating refresh tokens - each refresh invalidates the previous token.
             # If we use a stale cached token, refresh will fail with HTTP 400.
-            # Reading fresh from disk ensures we have the latest token.
-            await self._read_creds_from_file(path)
+            if not path.startswith("env://"):
+                # For file paths, read fresh from disk to pick up tokens that may have
+                # been updated by another process or a previous refresh cycle.
+                await self._read_creds_from_file(path)
+            # For env:// paths, the in-memory cache is the single source of truth.
+            # _save_credentials updates the cache after each refresh, so the cache
+            # always holds the latest rotating tokens. Re-reading from static env vars
+            # would discard the rotated refresh_token and break subsequent refreshes.
             creds_from_file = self._credentials_cache[path]
 
             lib_logger.debug(f"Refreshing Qwen OAuth token for '{Path(path).name}'...")
@@ -524,15 +530,22 @@ class QwenAuthBase:
         """
         Returns the API base URL and access token.
 
-        Supports both credential types:
-        - OAuth: credential_identifier is a file path to JSON credentials
-        - API Key: credential_identifier is the API key string itself
+        Supports three credential types:
+        - OAuth file: credential_identifier is a file path to JSON credentials
+        - env:// virtual path: credential_identifier is "env://provider/index"
+        - Direct API key: credential_identifier is the API key string itself
         """
-        # Detect credential type
-        if os.path.isfile(credential_identifier):
-            # OAuth credential: file path to JSON
+        try:
+            is_oauth = credential_identifier.startswith("env://") or os.path.isfile(
+                credential_identifier
+            )
+        except (OSError, ValueError):
+            # os.path.isfile can raise on invalid path strings (e.g. very long API keys)
+            is_oauth = False
+
+        if is_oauth:
             lib_logger.debug(
-                f"Using OAuth credentials from file: {credential_identifier}"
+                f"Using OAuth credentials from: {credential_identifier}"
             )
             creds = await self._load_credentials(credential_identifier)
 

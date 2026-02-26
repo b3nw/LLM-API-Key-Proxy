@@ -1042,6 +1042,27 @@ def classify_error(e: Exception, provider: Optional[str] = None) -> ClassifiedEr
             retry_after=30,  # Default 30s cooldown for server errors
         )
 
+    # StreamedAPIError: errors received inside SSE streams (e.g. Codex response.failed)
+    # These are authoritative API rejections, not transient — don't rotate credentials.
+    from .core.errors import StreamedAPIError
+
+    if isinstance(e, StreamedAPIError):
+        error_msg = str(e).lower()
+        if any(
+            p in error_msg
+            for p in ["context window", "context_length", "too many tokens", "too long"]
+        ):
+            return ClassifiedError(
+                error_type="context_window_exceeded",
+                original_exception=e,
+                status_code=400,
+            )
+        return ClassifiedError(
+            error_type="invalid_request",
+            original_exception=e,
+            status_code=400,
+        )
+
     # Fallback for any other unclassified errors
     return ClassifiedError(
         error_type="unknown", original_exception=e, status_code=status_code

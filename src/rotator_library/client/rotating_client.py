@@ -524,8 +524,17 @@ class RotatingClient:
 
             stats = await manager.get_stats_for_endpoint()
 
-            # Skip providers with no activity (filters out invalid/unused providers)
-            if stats.get("total_requests", 0) == 0:
+            # Skip providers with no activity AND no quota data
+            # (filters out invalid/unused providers, but keeps quota-tracked providers visible)
+            has_requests = stats.get("total_requests", 0) > 0
+            has_quota_data = any(
+                any(
+                    ws.get("total_max", 0) > 0
+                    for ws in group_stats.get("windows", {}).values()
+                )
+                for group_stats in stats.get("quota_groups", {}).values()
+            )
+            if not has_requests and not has_quota_data:
                 continue
 
             providers[provider] = stats

@@ -295,7 +295,7 @@ class ChutesProvider(ChutesQuotaTracker, ProviderInterface):
                             quota_max_requests=four_hour_cap_cents,
                             quota_reset_ts=None,
                             quota_used=four_hour_used_cents,
-                            force=True,  # API values are authoritative
+                            force=False,  # Keep max(local, api) — API lags behind
                         )
 
                         # Push monthly window data (overall budget)
@@ -313,7 +313,7 @@ class ChutesProvider(ChutesQuotaTracker, ProviderInterface):
                             quota_reset_ts=None,
                             quota_used=monthly_used_cents,
                             quota_group="monthly($)",
-                            force=True,
+                            force=False,  # Keep max(local, api) — API lags behind
                         )
 
                         monthly = balance_data.get("monthly", {})

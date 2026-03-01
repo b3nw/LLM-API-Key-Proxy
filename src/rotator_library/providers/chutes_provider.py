@@ -72,15 +72,15 @@ class ChutesProvider(ChutesQuotaTracker, ProviderInterface):
     # Enable environment variable overrides (e.g., QUOTA_GROUPS_CHUTES_GLOBAL)
     provider_env_name = "chutes"
 
-    # Single quota group: all models share the same credit balance.
-    # Named 'credits($)' so the TUI shows a human-readable dollar label.
+    # Two quota groups so the TUI shows both enforcement windows:
+    #   4h-credits($)  — 4-hour rolling window (tighter, rate-limiter)
+    #   monthly($)     — monthly cap (overall budget)
     model_quota_groups = {
-        "credits($)": ["_balance"],
+        "4h-credits($)": ["_balance_4h"],
+        "monthly($)": ["_balance_monthly"],
     }
 
     # 4-hour rolling window — the tighter of the two enforced windows.
-    # Monthly usage is also tracked by the API but the 4-hour window is the
-    # one that actually constrains usage in practice.
     usage_reset_configs = {
         "default": UsageResetConfigDef(
             window_seconds=14400,  # 4 hours
@@ -128,8 +128,8 @@ class ChutesProvider(ChutesQuotaTracker, ProviderInterface):
         """
         Get the quota group for a model.
 
-        All Chutes models share the same credential-level credit balance pool,
-        so they all belong to the same quota group.
+        All Chutes models share the same credential-level credit balance pool.
+        The primary (tighter) group is 4h-credits($).
 
         Args:
             model: Model name (ignored — all models share one balance)
@@ -137,7 +137,7 @@ class ChutesProvider(ChutesQuotaTracker, ProviderInterface):
         Returns:
             Quota group name
         """
-        return "credits($)"
+        return "4h-credits($)"
 
     def get_models_in_quota_group(self, group: str) -> List[str]:
         """
@@ -149,13 +149,15 @@ class ChutesProvider(ChutesQuotaTracker, ProviderInterface):
         Returns:
             List of model names in the group
         """
-        if group == "credits($)":
-            return ["_balance"]
+        if group == "4h-credits($)":
+            return ["_balance_4h"]
+        if group == "monthly($)":
+            return ["_balance_monthly"]
         return []
 
     def get_quota_groups(self) -> List[str]:
         """Return the list of quota groups for this provider."""
-        return ["credits($)"]
+        return ["4h-credits($)", "monthly($)"]
 
     # =========================================================================
     # MODEL DISCOVERY
@@ -279,7 +281,7 @@ class ChutesProvider(ChutesQuotaTracker, ProviderInterface):
                     )
 
                     if balance_data.get("status") == "success":
-                        # Push 4-hour window data (the tighter constraint)
+                        # Push 4-hour window data (tighter constraint)
                         four_hour_cap_cents = balance_data.get(
                             "four_hour_cap_cents", 0
                         )
@@ -289,11 +291,29 @@ class ChutesProvider(ChutesQuotaTracker, ProviderInterface):
 
                         await usage_manager.update_quota_baseline(
                             api_key,
-                            "chutes/_balance",
+                            "chutes/_balance_4h",
                             quota_max_requests=four_hour_cap_cents,
                             quota_reset_ts=None,
                             quota_used=four_hour_used_cents,
                             force=True,  # API values are authoritative
+                        )
+
+                        # Push monthly window data (overall budget)
+                        monthly_cap_cents = balance_data.get(
+                            "monthly_cap_cents", 0
+                        )
+                        monthly_used_cents = balance_data.get(
+                            "monthly_used_cents", 0
+                        )
+
+                        await usage_manager.update_quota_baseline(
+                            api_key,
+                            "chutes/_balance_monthly",
+                            quota_max_requests=monthly_cap_cents,
+                            quota_reset_ts=None,
+                            quota_used=monthly_used_cents,
+                            quota_group="monthly($)",
+                            force=True,
                         )
 
                         monthly = balance_data.get("monthly", {})

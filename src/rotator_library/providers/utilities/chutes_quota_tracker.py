@@ -376,14 +376,22 @@ class ChutesQuotaTracker:
                 "monthly": monthly,
                 "four_hour": four_hour,
                 # Cents-based values for UsageManager compatibility
-                "monthly_cap_cents": int(monthly.get("cap", 0) * CENTS_PER_DOLLAR),
-                "monthly_used_cents": int(monthly.get("usage", 0) * CENTS_PER_DOLLAR),
-                "four_hour_cap_cents": int(
+                # Use round() to avoid truncating sub-cent usage to 0
+                "monthly_cap_cents": int(round(
+                    monthly.get("cap", 0) * CENTS_PER_DOLLAR
+                )),
+                "monthly_used_cents": int(round(
+                    monthly.get("usage", 0) * CENTS_PER_DOLLAR
+                )),
+                "four_hour_cap_cents": int(round(
                     four_hour.get("cap", 0) * CENTS_PER_DOLLAR
-                ),
-                "four_hour_used_cents": int(
+                )),
+                "four_hour_used_cents": int(round(
                     four_hour.get("usage", 0) * CENTS_PER_DOLLAR
-                ),
+                )),
+                # Raw dollar values for precise logging
+                "monthly_usage_dollars": monthly.get("usage", 0.0),
+                "four_hour_usage_dollars": four_hour.get("usage", 0.0),
                 "pricing_models_cached": len(self._pricing_cache),
                 "fetched_at": time.time(),
             }

@@ -593,6 +593,16 @@ class RequestExecutor:
                                     response
                                 )
 
+                                # Notify plugin of request cost (for local delta tracking)
+                                if (
+                                    approx_cost > 0
+                                    and plugin
+                                    and hasattr(plugin, "record_request_cost")
+                                ):
+                                    plugin.record_request_cost(
+                                        cred, model, approx_cost
+                                    )
+
                                 cred_context.mark_success(
                                     response=response,
                                     prompt_tokens=prompt_tokens,
@@ -803,6 +813,9 @@ class RequestExecutor:
 
                                     # Hand off to streaming handler with cred_context
                                     # The handler will call mark_success on completion
+                                    cost_recorder = None
+                                    if plugin and hasattr(plugin, "record_request_cost"):
+                                        cost_recorder = plugin.record_request_cost
                                     base_stream = self._streaming_handler.wrap_stream(
                                         stream,
                                         cred,
@@ -811,6 +824,7 @@ class RequestExecutor:
                                         cred_context,
                                         skip_cost_calculation=skip_cost_calculation,
                                         cost_calculator=cost_calculator,
+                                        cost_recorder=cost_recorder,
                                     )
 
                                     lib_logger.info(

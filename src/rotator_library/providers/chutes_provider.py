@@ -104,11 +104,6 @@ class ChutesProvider(ChutesQuotaTracker, ProviderInterface):
             os.environ.get("CHUTES_QUOTA_REFRESH_INTERVAL", "60")
         )
 
-        # Local cost delta tracking between API refreshes.
-        # Maps credential → dollars spent since last refresh.
-        # Reset to 0 on each successful API refresh.
-        self._cost_since_refresh: Dict[str, float] = {}
-
     # =========================================================================
     # USAGE TRACKING CONFIGURATION
     # =========================================================================
@@ -124,29 +119,6 @@ class ChutesProvider(ChutesQuotaTracker, ProviderInterface):
             "mode": "per_model",
             "window_seconds": 14400,  # 4 hours
         }
-
-    def record_request_cost(
-        self,
-        credential: str,
-        model: str,
-        cost_dollars: float,
-    ) -> None:
-        """
-        Record the cost of a completed request for local delta tracking.
-
-        Called by the executor after `calculate_cost()` returns a non-zero
-        value.  This accumulates local cost between API refreshes so the
-        display stays responsive even with the 60 s refresh interval.
-
-        Args:
-            credential: API key that was used
-            model: Model name (unused, all models share the balance)
-            cost_dollars: Cost of the request in USD
-        """
-        if cost_dollars > 0:
-            self._cost_since_refresh[credential] = (
-                self._cost_since_refresh.get(credential, 0.0) + cost_dollars
-            )
 
     # =========================================================================
     # QUOTA GROUPING
@@ -312,22 +284,14 @@ class ChutesProvider(ChutesQuotaTracker, ProviderInterface):
                         # API is authoritative for the sliding window.
                         # Usage can go DOWN as old spending ages out,
                         # so we must use force=True.
+                        # Between refreshes, UsageManager adds +1 per request
+                        # (slight overcounting) but next refresh corrects it.
 
-                        # Add local cost delta accumulated since last refresh
-                        local_delta_dollars = self._cost_since_refresh.get(
-                            api_key, 0.0
-                        )
-                        local_delta_cents = int(round(
-                            local_delta_dollars * CENTS_PER_DOLLAR
-                        ))
-
-                        # Push 4-hour window data (tighter constraint)
-                        four_hour_used_cents = (
-                            balance_data.get("four_hour_used_cents", 0)
-                            + local_delta_cents
-                        )
                         four_hour_cap_cents = balance_data.get(
                             "four_hour_cap_cents", 0
+                        )
+                        four_hour_used_cents = balance_data.get(
+                            "four_hour_used_cents", 0
                         )
 
                         await usage_manager.update_quota_baseline(
@@ -339,13 +303,11 @@ class ChutesProvider(ChutesQuotaTracker, ProviderInterface):
                             force=True,  # API is authoritative (sliding window)
                         )
 
-                        # Push monthly window data (overall budget)
-                        monthly_used_cents = (
-                            balance_data.get("monthly_used_cents", 0)
-                            + local_delta_cents
-                        )
                         monthly_cap_cents = balance_data.get(
                             "monthly_cap_cents", 0
+                        )
+                        monthly_used_cents = balance_data.get(
+                            "monthly_used_cents", 0
                         )
 
                         await usage_manager.update_quota_baseline(
@@ -358,16 +320,12 @@ class ChutesProvider(ChutesQuotaTracker, ProviderInterface):
                             force=True,  # API is authoritative
                         )
 
-                        # Reset local delta — the API now includes these costs
-                        self._cost_since_refresh[api_key] = 0.0
-
                         monthly = balance_data.get("monthly", {})
                         four_hour = balance_data.get("four_hour", {})
                         lib_logger.debug(
                             f"Updated Chutes balance baseline: "
                             f"4h=${four_hour.get('usage', 0):.4f}/"
-                            f"${four_hour.get('cap', 0):.2f}"
-                            f"(+${local_delta_dollars:.4f} local), "
+                            f"${four_hour.get('cap', 0):.2f}, "
                             f"monthly=${monthly.get('usage', 0):.4f}/"
                             f"${monthly.get('cap', 0):.2f}, "
                             f"models_priced={len(self._pricing_cache)}"

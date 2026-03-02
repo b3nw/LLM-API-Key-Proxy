@@ -49,7 +49,6 @@ class StreamingHandler:
         cred_context: Optional["CredentialContext"] = None,
         skip_cost_calculation: bool = False,
         cost_calculator: Optional[Callable[[str, int, int], float]] = None,
-        cost_recorder: Optional[Callable[[str, str, float], None]] = None,
     ) -> AsyncGenerator[str, None]:
         """
         Wrap a LiteLLM stream with error handling and usage tracking.
@@ -261,12 +260,6 @@ class StreamingHandler:
                         prompt_tokens_cache_write=prompt_tokens_cache_write,
                         approx_cost=approx_cost,
                     )
-                    # Notify plugin of request cost (for local delta tracking)
-                    if approx_cost > 0 and cost_recorder:
-                        try:
-                            cost_recorder(credential, model, approx_cost)
-                        except Exception:
-                            pass
 
                 # Yield [DONE] for completed streams
                 yield "data: [DONE]\n\n"

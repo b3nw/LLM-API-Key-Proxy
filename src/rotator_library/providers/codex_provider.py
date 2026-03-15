@@ -787,6 +787,23 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
         """This provider uses custom logic (Responses API instead of litellm)."""
         return True
 
+    def get_model_quota_group(self, model: str) -> Optional[str]:
+        """
+        Get the quota group for a model.
+
+        All Codex models share the same per-account rate limits,
+        so they all belong to the 'codex-global' quota group.
+        This ensures dynamically discovered models (from GitHub models.json)
+        are properly grouped without needing to be in the static AVAILABLE_MODELS list.
+
+        Args:
+            model: Model name (ignored - all models share quota)
+
+        Returns:
+            'codex-global' for any model
+        """
+        return "codex-global"
+
     async def get_models(self, api_key: str, client: httpx.AsyncClient) -> List[str]:
         """Return available Codex models (dynamically fetched from GitHub)."""
         models = get_available_models()

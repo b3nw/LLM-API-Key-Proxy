@@ -1060,7 +1060,9 @@ class AnthropicOAuthBase:
                 with open(cred_file, "r") as f:
                     creds = json.load(f)
 
-                metadata = creds.get("_proxy_metadata", {})
+                # Parse Claude-format credentials if needed
+                parsed = self._parse_claude_credentials_file(creds)
+                metadata = parsed.get("_proxy_metadata", {})
 
                 match = re.search(r"_oauth_(\d+)\.json$", cred_file)
                 number = int(match.group(1)) if match else 0
@@ -1076,6 +1078,98 @@ class AnthropicOAuthBase:
                 continue
 
         return credentials
+
+    def build_env_lines(self, creds: Dict[str, Any], cred_number: int) -> List[str]:
+        """
+        Generate .env file lines for an Anthropic OAuth credential.
+
+        Handles both the raw Claude CLI format (claudeAiOauth nested)
+        and the already-parsed flat format.
+
+        Args:
+            creds: Credential dictionary loaded from JSON
+            cred_number: Credential number (1, 2, 3, etc.)
+
+        Returns:
+            List of .env file lines
+        """
+        # Normalize to flat format if needed
+        try:
+            parsed = self._parse_claude_credentials_file(creds)
+        except Exception:
+            parsed = creds
+
+        email = parsed.get("_proxy_metadata", {}).get("email", "unknown")
+        prefix = f"{self.ENV_PREFIX}_{cred_number}"
+
+        lines = [
+            f"# {self.ENV_PREFIX} Credential #{cred_number} for: {email}",
+            f"# Exported from: {self._get_provider_file_prefix()}_oauth_{cred_number}.json",
+            f"# Generated at: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+            "#",
+            "# To combine multiple credentials into one .env file, copy these lines",
+            "# and ensure each credential has a unique number (1, 2, 3, etc.)",
+            "",
+            f"{prefix}_ACCESS_TOKEN={parsed.get('access_token', '')}",
+            f"{prefix}_REFRESH_TOKEN={parsed.get('refresh_token', '')}",
+            f"{prefix}_EXPIRY_DATE={parsed.get('expiry_date', 0)}",
+            f"{prefix}_EMAIL={email}",
+        ]
+
+        return lines
+
+    def export_credential_to_env(
+        self, credential_path: str, output_dir: Optional[Path] = None
+    ) -> Optional[str]:
+        """
+        Export a credential file to .env format.
+
+        Args:
+            credential_path: Path to the credential JSON file
+            output_dir: Directory for output .env file (defaults to same as credential)
+
+        Returns:
+            Path to the exported .env file, or None on error
+        """
+        try:
+            cred_path = Path(credential_path)
+
+            # Load credential
+            with open(cred_path, "r") as f:
+                creds = json.load(f)
+
+            # Parse to flat format for email extraction
+            try:
+                parsed = self._parse_claude_credentials_file(creds)
+            except Exception:
+                parsed = creds
+
+            email = parsed.get("_proxy_metadata", {}).get("email", "unknown")
+
+            # Get credential number from filename
+            match = re.search(r"_oauth_(\d+)\.json$", cred_path.name)
+            cred_number = int(match.group(1)) if match else 1
+
+            # Build output path
+            if output_dir is None:
+                output_dir = cred_path.parent
+
+            safe_email = email.replace("@", "_at_").replace(".", "_")
+            prefix = self._get_provider_file_prefix()
+            env_filename = f"{prefix}_{cred_number}_{safe_email}.env"
+            env_path = output_dir / env_filename
+
+            # Build and write content
+            env_lines = self.build_env_lines(creds, cred_number)
+            with open(env_path, "w") as f:
+                f.write("\n".join(env_lines))
+
+            lib_logger.info(f"Exported Anthropic credential to {env_path}")
+            return str(env_path)
+
+        except Exception as e:
+            lib_logger.error(f"Failed to export Anthropic credential: {e}")
+            return None
 
     def delete_credential(self, credential_path: str) -> bool:
         """Delete a credential file and remove it from cache."""

@@ -1133,3 +1133,132 @@ class OpenAIOAuthBase:
                 continue
 
         return credentials
+
+    def build_env_lines(self, creds: Dict[str, Any], cred_number: int) -> List[str]:
+        """
+        Generate .env file lines for an OpenAI OAuth credential.
+
+        Args:
+            creds: Credential dictionary loaded from JSON
+            cred_number: Credential number (1, 2, 3, etc.)
+
+        Returns:
+            List of .env file lines
+        """
+        email = creds.get("_proxy_metadata", {}).get("email", "unknown")
+        metadata = creds.get("_proxy_metadata", {})
+        prefix = f"{self.ENV_PREFIX}_{cred_number}"
+
+        lines = [
+            f"# {self.ENV_PREFIX} Credential #{cred_number} for: {email}",
+            f"# Exported from: {self._get_provider_file_prefix()}_oauth_{cred_number}.json",
+            f"# Generated at: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+            "#",
+            "# To combine multiple credentials into one .env file, copy these lines",
+            "# and ensure each credential has a unique number (1, 2, 3, etc.)",
+            "",
+            f"{prefix}_ACCESS_TOKEN={creds.get('access_token', '')}",
+            f"{prefix}_REFRESH_TOKEN={creds.get('refresh_token', '')}",
+            f"{prefix}_EXPIRY_DATE={creds.get('expiry_date', 0)}",
+            f"{prefix}_EMAIL={email}",
+        ]
+
+        # Include API key if present (from token exchange)
+        if creds.get("api_key"):
+            lines.append(f"{prefix}_API_KEY={creds['api_key']}")
+
+        # Include ID token if present
+        if creds.get("id_token"):
+            lines.append(f"{prefix}_ID_TOKEN={creds['id_token']}")
+
+        # Include account ID if present
+        account_id = creds.get("account_id") or metadata.get("account_id", "")
+        if account_id:
+            lines.append(f"{prefix}_ACCOUNT_ID={account_id}")
+
+        return lines
+
+    def export_credential_to_env(
+        self, credential_path: str, output_dir: Optional[Path] = None
+    ) -> Optional[str]:
+        """
+        Export a credential file to .env format.
+
+        Args:
+            credential_path: Path to the credential JSON file
+            output_dir: Directory for output .env file (defaults to same as credential)
+
+        Returns:
+            Path to the exported .env file, or None on error
+        """
+        try:
+            cred_path = Path(credential_path)
+
+            # Load credential
+            with open(cred_path, "r") as f:
+                creds = json.load(f)
+
+            # Extract metadata
+            email = creds.get("_proxy_metadata", {}).get("email", "unknown")
+
+            # Get credential number from filename
+            match = re.search(r"_oauth_(\d+)\.json$", cred_path.name)
+            cred_number = int(match.group(1)) if match else 1
+
+            # Build output path
+            if output_dir is None:
+                output_dir = cred_path.parent
+
+            safe_email = email.replace("@", "_at_").replace(".", "_")
+            prefix = self._get_provider_file_prefix()
+            env_filename = f"{prefix}_{cred_number}_{safe_email}.env"
+            env_path = output_dir / env_filename
+
+            # Build and write content
+            env_lines = self.build_env_lines(creds, cred_number)
+            with open(env_path, "w") as f:
+                f.write("\n".join(env_lines))
+
+            lib_logger.info(f"Exported credential to {env_path}")
+            return str(env_path)
+
+        except Exception as e:
+            lib_logger.error(f"Failed to export credential: {e}")
+            return None
+
+    def delete_credential(self, credential_path: str) -> bool:
+        """
+        Delete a credential file.
+
+        Args:
+            credential_path: Path to the credential file
+
+        Returns:
+            True if deleted successfully, False otherwise
+        """
+        try:
+            cred_path = Path(credential_path)
+
+            # Validate that it's one of our credential files
+            prefix = self._get_provider_file_prefix()
+            if not cred_path.name.startswith(f"{prefix}_oauth_"):
+                lib_logger.error(
+                    f"File {cred_path.name} does not appear to be a {self.ENV_PREFIX} credential"
+                )
+                return False
+
+            if not cred_path.exists():
+                lib_logger.warning(f"Credential file does not exist: {credential_path}")
+                return False
+
+            # Remove from cache if present
+            self._credentials_cache.pop(credential_path, None)
+
+            # Delete the file
+            cred_path.unlink()
+            lib_logger.info(f"Deleted credential file: {credential_path}")
+            return True
+
+        except Exception as e:
+            lib_logger.error(f"Failed to delete credential: {e}")
+            return False

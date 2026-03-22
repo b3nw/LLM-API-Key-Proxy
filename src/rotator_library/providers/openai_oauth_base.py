@@ -816,7 +816,23 @@ class OpenAIOAuthBase:
             project_id = id_token_claims.get("project_id")
 
             email = id_token_claims.get("email", "")
-            plan_type = access_token_claims.get("chatgpt_plan_type", "")
+            plan_type = (
+                auth_claims.get("chatgpt_plan_type")
+                or access_token_claims.get("chatgpt_plan_type", "")
+            )
+
+            # Extract workspace/organization title from the JWT organizations list
+            organizations = auth_claims.get("organizations", [])
+            workspace_title = ""
+            if organizations and isinstance(organizations, list):
+                # Use the default org, or the first one
+                for org in organizations:
+                    if isinstance(org, dict):
+                        if org.get("is_default"):
+                            workspace_title = org.get("title", "")
+                            break
+                if not workspace_title and isinstance(organizations[0], dict):
+                    workspace_title = organizations[0].get("title", "")
 
             new_creds["account_id"] = account_id
 
@@ -837,6 +853,7 @@ class OpenAIOAuthBase:
                 "org_id": org_id,
                 "project_id": project_id,
                 "plan_type": plan_type,
+                "workspace_title": workspace_title,
                 "last_check_timestamp": time.time(),
             }
 
@@ -1002,9 +1019,21 @@ class OpenAIOAuthBase:
         return Path.cwd() / "oauth_creds"
 
     def _find_existing_credential_by_email(
-        self, email: str, base_dir: Optional[Path] = None
+        self,
+        email: str,
+        base_dir: Optional[Path] = None,
+        account_id: Optional[str] = None,
     ) -> Optional[Path]:
-        """Find an existing credential file for the given email."""
+        """Find an existing credential file for the given email and account.
+
+        When ``account_id`` is provided the match requires **both** the email
+        and the account_id to be equal.  This prevents credentials for the same
+        email on different OpenAI workspaces / organisations from colliding.
+
+        Backward compatibility: if the on-disk credential has no account_id
+        (legacy file created before workspace tracking), it is treated as a
+        match on email alone to avoid creating duplicates.
+        """
         if base_dir is None:
             base_dir = self._get_oauth_base_dir()
 
@@ -1015,9 +1044,23 @@ class OpenAIOAuthBase:
             try:
                 with open(cred_file, "r") as f:
                     creds = json.load(f)
-                existing_email = creds.get("_proxy_metadata", {}).get("email")
-                if existing_email == email:
-                    return Path(cred_file)
+                metadata = creds.get("_proxy_metadata", {})
+                existing_email = metadata.get("email")
+                if existing_email != email:
+                    continue
+
+                # If an account_id was supplied, require it to match as well.
+                # Legacy credentials without an account_id are treated as a
+                # match on email alone (backward compatible).
+                if account_id is not None:
+                    existing_account_id = (
+                        creds.get("account_id")
+                        or metadata.get("account_id")
+                    )
+                    if existing_account_id is not None and existing_account_id != account_id:
+                        continue
+
+                return Path(cred_file)
             except Exception:
                 continue
 
@@ -1077,19 +1120,33 @@ class OpenAIOAuthBase:
                     success=False, error="Could not retrieve email from OAuth response"
                 )
 
-            existing_path = self._find_existing_credential_by_email(email, base_dir)
+            # Extract account_id so we can scope the duplicate check to the
+            # specific workspace / organisation.  Without this, the same email
+            # authenticating to two different workspaces would overwrite the
+            # first credential file.
+            account_id = new_creds.get("account_id") or new_creds.get(
+                "_proxy_metadata", {}
+            ).get("account_id")
+
+            existing_path = self._find_existing_credential_by_email(
+                email, base_dir, account_id=account_id
+            )
             is_update = existing_path is not None
 
             if is_update:
                 file_path = existing_path
+                lib_logger.info(
+                    f"Updating existing credential at '{Path(file_path).name}' "
+                    f"for {email} (account {account_id})"
+                )
             else:
                 file_path = self._build_credential_path(base_dir)
+                lib_logger.info(
+                    f"Creating new credential at '{Path(file_path).name}' "
+                    f"for {email} (account {account_id})"
+                )
 
             await self._save_credentials(str(file_path), new_creds)
-
-            account_id = new_creds.get("account_id") or new_creds.get(
-                "_proxy_metadata", {}
-            ).get("account_id")
 
             return CredentialSetupResult(
                 success=True,
@@ -1127,9 +1184,140 @@ class OpenAIOAuthBase:
                     "file_path": cred_file,
                     "email": metadata.get("email", "unknown"),
                     "account_id": creds.get("account_id") or metadata.get("account_id"),
+                    "plan_type": metadata.get("plan_type"),
+                    "workspace_title": metadata.get("workspace_title"),
                     "number": number,
                 })
             except Exception:
                 continue
 
         return credentials
+
+    def build_env_lines(self, creds: Dict[str, Any], cred_number: int) -> List[str]:
+        """
+        Generate .env file lines for an OpenAI OAuth credential.
+
+        Args:
+            creds: Credential dictionary loaded from JSON
+            cred_number: Credential number (1, 2, 3, etc.)
+
+        Returns:
+            List of .env file lines
+        """
+        email = creds.get("_proxy_metadata", {}).get("email", "unknown")
+        metadata = creds.get("_proxy_metadata", {})
+        prefix = f"{self.ENV_PREFIX}_{cred_number}"
+
+        lines = [
+            f"# {self.ENV_PREFIX} Credential #{cred_number} for: {email}",
+            f"# Exported from: {self._get_provider_file_prefix()}_oauth_{cred_number}.json",
+            f"# Generated at: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+            "#",
+            "# To combine multiple credentials into one .env file, copy these lines",
+            "# and ensure each credential has a unique number (1, 2, 3, etc.)",
+            "",
+            f"{prefix}_ACCESS_TOKEN={creds.get('access_token', '')}",
+            f"{prefix}_REFRESH_TOKEN={creds.get('refresh_token', '')}",
+            f"{prefix}_EXPIRY_DATE={creds.get('expiry_date', 0)}",
+            f"{prefix}_EMAIL={email}",
+        ]
+
+        # Include API key if present (from token exchange)
+        if creds.get("api_key"):
+            lines.append(f"{prefix}_API_KEY={creds['api_key']}")
+
+        # Include ID token if present
+        if creds.get("id_token"):
+            lines.append(f"{prefix}_ID_TOKEN={creds['id_token']}")
+
+        # Include account ID if present
+        account_id = creds.get("account_id") or metadata.get("account_id", "")
+        if account_id:
+            lines.append(f"{prefix}_ACCOUNT_ID={account_id}")
+
+        return lines
+
+    def export_credential_to_env(
+        self, credential_path: str, output_dir: Optional[Path] = None
+    ) -> Optional[str]:
+        """
+        Export a credential file to .env format.
+
+        Args:
+            credential_path: Path to the credential JSON file
+            output_dir: Directory for output .env file (defaults to same as credential)
+
+        Returns:
+            Path to the exported .env file, or None on error
+        """
+        try:
+            cred_path = Path(credential_path)
+
+            # Load credential
+            with open(cred_path, "r") as f:
+                creds = json.load(f)
+
+            # Extract metadata
+            email = creds.get("_proxy_metadata", {}).get("email", "unknown")
+
+            # Get credential number from filename
+            match = re.search(r"_oauth_(\d+)\.json$", cred_path.name)
+            cred_number = int(match.group(1)) if match else 1
+
+            # Build output path
+            if output_dir is None:
+                output_dir = cred_path.parent
+
+            safe_email = email.replace("@", "_at_").replace(".", "_")
+            prefix = self._get_provider_file_prefix()
+            env_filename = f"{prefix}_{cred_number}_{safe_email}.env"
+            env_path = output_dir / env_filename
+
+            # Build and write content
+            env_lines = self.build_env_lines(creds, cred_number)
+            with open(env_path, "w") as f:
+                f.write("\n".join(env_lines))
+
+            lib_logger.info(f"Exported credential to {env_path}")
+            return str(env_path)
+
+        except Exception as e:
+            lib_logger.error(f"Failed to export credential: {e}")
+            return None
+
+    def delete_credential(self, credential_path: str) -> bool:
+        """
+        Delete a credential file.
+
+        Args:
+            credential_path: Path to the credential file
+
+        Returns:
+            True if deleted successfully, False otherwise
+        """
+        try:
+            cred_path = Path(credential_path)
+
+            # Validate that it's one of our credential files
+            prefix = self._get_provider_file_prefix()
+            if not cred_path.name.startswith(f"{prefix}_oauth_"):
+                lib_logger.error(
+                    f"File {cred_path.name} does not appear to be a {self.ENV_PREFIX} credential"
+                )
+                return False
+
+            if not cred_path.exists():
+                lib_logger.warning(f"Credential file does not exist: {credential_path}")
+                return False
+
+            # Remove from cache if present
+            self._credentials_cache.pop(credential_path, None)
+
+            # Delete the file
+            cred_path.unlink()
+            lib_logger.info(f"Deleted credential file: {credential_path}")
+            return True
+
+        except Exception as e:
+            lib_logger.error(f"Failed to delete credential: {e}")
+            return False

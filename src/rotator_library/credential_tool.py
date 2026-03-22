@@ -538,6 +538,11 @@ def _display_provider_credentials(provider_name: str):
     if provider_name in ["gemini_cli", "antigravity"]:
         table.add_column("Tier", style="green")
         table.add_column("Project", style="dim")
+    # Add workspace/plan columns for OpenAI Codex
+    elif provider_name == "codex":
+        table.add_column("Workspace", style="green")
+        table.add_column("Plan", style="magenta")
+        table.add_column("Account ID", style="dim")
     # Add type column for iFlow (OAuth vs Cookie)
     elif provider_name == "iflow":
         table.add_column("Type", style="magenta")
@@ -552,6 +557,15 @@ def _display_provider_credentials(provider_name: str):
             if project and len(project) > 20:
                 project = project[:17] + "..."
             table.add_row(str(i), file_name, email, tier or "-", project or "-")
+        elif provider_name == "codex":
+            # Backward compatible: older credentials may lack workspace/plan fields
+            workspace = cred.get("workspace_title", "-") or "-"
+            plan = cred.get("plan_type", "-") or "-"
+            account_id = cred.get("account_id", "-") or "-"
+            # Truncate account_id for display
+            if account_id and len(account_id) > 12 and account_id != "-":
+                account_id = account_id[:8] + "..."
+            table.add_row(str(i), file_name, email, workspace, plan, account_id)
         elif provider_name == "iflow":
             cred_type = cred.get("type", "oauth").capitalize()
             table.add_row(str(i), file_name, email, cred_type)
@@ -785,6 +799,11 @@ async def _view_oauth_credentials_detail(provider_name: str):
     if provider_name in ["gemini_cli", "antigravity"]:
         table.add_column("Tier", style="green")
         table.add_column("Project", style="dim")
+    # Add workspace/plan columns for OpenAI Codex
+    elif provider_name == "codex":
+        table.add_column("Workspace", style="green")
+        table.add_column("Plan", style="magenta")
+        table.add_column("Account ID", style="dim")
     # Add type column for iFlow (OAuth vs Cookie)
     elif provider_name == "iflow":
         table.add_column("Type", style="magenta")
@@ -801,6 +820,14 @@ async def _view_oauth_credentials_detail(provider_name: str):
             if project and len(project) > 25:
                 project = project[:22] + "..."
             table.add_row(str(i), file_name, email, tier, project or "-")
+        elif provider_name == "codex":
+            # Backward compatible: older credentials may lack workspace/plan fields
+            workspace = cred.get("workspace_title", "-") or "-"
+            plan = cred.get("plan_type", "-") or "-"
+            account_id = cred.get("account_id", "-") or "-"
+            if account_id and len(account_id) > 12 and account_id != "-":
+                account_id = account_id[:8] + "..."
+            table.add_row(str(i), file_name, email, workspace, plan, account_id)
         elif provider_name == "iflow":
             cred_type = cred.get("type", "oauth").capitalize()
             table.add_row(str(i), file_name, email, cred_type)
@@ -1793,6 +1820,25 @@ async def setup_new_credential(provider_name: str):
                 f"Successfully created new credential at [bold yellow]'{Path(result.file_path).name}'[/bold yellow] "
                 f"for user [bold cyan]'{result.email}'[/bold cyan]."
             )
+
+        # Add workspace/account info if available (OpenAI Codex credentials)
+        if result.credentials and isinstance(result.credentials, dict):
+            metadata = result.credentials.get("_proxy_metadata", {})
+            workspace_title = metadata.get("workspace_title")
+            plan_type = metadata.get("plan_type")
+            if workspace_title or plan_type:
+                workspace_parts = []
+                if workspace_title:
+                    workspace_parts.append(workspace_title)
+                if plan_type:
+                    workspace_parts.append(f"({plan_type})")
+                success_text.append(
+                    f"\nWorkspace: {' '.join(workspace_parts)}"
+                )
+            if result.account_id:
+                success_text.append(
+                    f"\nAccount ID: {result.account_id}"
+                )
 
         # Add tier/project info if available (Google OAuth providers)
         if hasattr(result, "tier") and result.tier:

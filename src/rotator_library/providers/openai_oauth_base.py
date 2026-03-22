@@ -816,7 +816,23 @@ class OpenAIOAuthBase:
             project_id = id_token_claims.get("project_id")
 
             email = id_token_claims.get("email", "")
-            plan_type = access_token_claims.get("chatgpt_plan_type", "")
+            plan_type = (
+                auth_claims.get("chatgpt_plan_type")
+                or access_token_claims.get("chatgpt_plan_type", "")
+            )
+
+            # Extract workspace/organization title from the JWT organizations list
+            organizations = auth_claims.get("organizations", [])
+            workspace_title = ""
+            if organizations and isinstance(organizations, list):
+                # Use the default org, or the first one
+                for org in organizations:
+                    if isinstance(org, dict):
+                        if org.get("is_default"):
+                            workspace_title = org.get("title", "")
+                            break
+                if not workspace_title and isinstance(organizations[0], dict):
+                    workspace_title = organizations[0].get("title", "")
 
             new_creds["account_id"] = account_id
 
@@ -837,6 +853,7 @@ class OpenAIOAuthBase:
                 "org_id": org_id,
                 "project_id": project_id,
                 "plan_type": plan_type,
+                "workspace_title": workspace_title,
                 "last_check_timestamp": time.time(),
             }
 
@@ -1002,9 +1019,21 @@ class OpenAIOAuthBase:
         return Path.cwd() / "oauth_creds"
 
     def _find_existing_credential_by_email(
-        self, email: str, base_dir: Optional[Path] = None
+        self,
+        email: str,
+        base_dir: Optional[Path] = None,
+        account_id: Optional[str] = None,
     ) -> Optional[Path]:
-        """Find an existing credential file for the given email."""
+        """Find an existing credential file for the given email and account.
+
+        When ``account_id`` is provided the match requires **both** the email
+        and the account_id to be equal.  This prevents credentials for the same
+        email on different OpenAI workspaces / organisations from colliding.
+
+        Backward compatibility: if the on-disk credential has no account_id
+        (legacy file created before workspace tracking), it is treated as a
+        match on email alone to avoid creating duplicates.
+        """
         if base_dir is None:
             base_dir = self._get_oauth_base_dir()
 
@@ -1015,9 +1044,23 @@ class OpenAIOAuthBase:
             try:
                 with open(cred_file, "r") as f:
                     creds = json.load(f)
-                existing_email = creds.get("_proxy_metadata", {}).get("email")
-                if existing_email == email:
-                    return Path(cred_file)
+                metadata = creds.get("_proxy_metadata", {})
+                existing_email = metadata.get("email")
+                if existing_email != email:
+                    continue
+
+                # If an account_id was supplied, require it to match as well.
+                # Legacy credentials without an account_id are treated as a
+                # match on email alone (backward compatible).
+                if account_id is not None:
+                    existing_account_id = (
+                        creds.get("account_id")
+                        or metadata.get("account_id")
+                    )
+                    if existing_account_id is not None and existing_account_id != account_id:
+                        continue
+
+                return Path(cred_file)
             except Exception:
                 continue
 
@@ -1077,19 +1120,33 @@ class OpenAIOAuthBase:
                     success=False, error="Could not retrieve email from OAuth response"
                 )
 
-            existing_path = self._find_existing_credential_by_email(email, base_dir)
+            # Extract account_id so we can scope the duplicate check to the
+            # specific workspace / organisation.  Without this, the same email
+            # authenticating to two different workspaces would overwrite the
+            # first credential file.
+            account_id = new_creds.get("account_id") or new_creds.get(
+                "_proxy_metadata", {}
+            ).get("account_id")
+
+            existing_path = self._find_existing_credential_by_email(
+                email, base_dir, account_id=account_id
+            )
             is_update = existing_path is not None
 
             if is_update:
                 file_path = existing_path
+                lib_logger.info(
+                    f"Updating existing credential at '{Path(file_path).name}' "
+                    f"for {email} (account {account_id})"
+                )
             else:
                 file_path = self._build_credential_path(base_dir)
+                lib_logger.info(
+                    f"Creating new credential at '{Path(file_path).name}' "
+                    f"for {email} (account {account_id})"
+                )
 
             await self._save_credentials(str(file_path), new_creds)
-
-            account_id = new_creds.get("account_id") or new_creds.get(
-                "_proxy_metadata", {}
-            ).get("account_id")
 
             return CredentialSetupResult(
                 success=True,
@@ -1127,6 +1184,8 @@ class OpenAIOAuthBase:
                     "file_path": cred_file,
                     "email": metadata.get("email", "unknown"),
                     "account_id": creds.get("account_id") or metadata.get("account_id"),
+                    "plan_type": metadata.get("plan_type"),
+                    "workspace_title": metadata.get("workspace_title"),
                     "number": number,
                 })
             except Exception:

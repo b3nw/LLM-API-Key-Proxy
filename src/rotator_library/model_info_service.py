@@ -87,6 +87,7 @@ PROVIDER_ALIASES = {
     "moonshot": ["moonshotai"],
     "z-ai": ["zai", "zhipuai"],
     "qwen": ["alibaba"],
+    "opencode_go": ["opencode"],
 }
 
 

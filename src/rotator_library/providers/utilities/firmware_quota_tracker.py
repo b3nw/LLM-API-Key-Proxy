@@ -2,14 +2,13 @@
 Firmware.ai Quota Tracking Mixin
 
 Provides quota tracking for the Firmware.ai provider using their quota usage API.
-Firmware.ai uses a 5-hour rolling window quota system where:
-- `used` is already a ratio (0 to 1) indicating quota utilization
-- `reset` is an ISO 8601 UTC timestamp, or null when no active window
+Firmware.ai uses a credit-based quota system where:
+- `credits` is the remaining credit balance (absolute value, e.g. 31.95)
 
 API Details:
 - Endpoint: GET https://app.firmware.ai/api/v1/quota
 - Auth: Authorization: Bearer <api_key>
-- Response: { used: float, reset: string|null }
+- Response: { credits: float }
 
 Required from provider:
     - self.api_base: str (API base URL)
@@ -33,9 +32,8 @@ class FirmwareQuotaTracker:
     Mixin class providing quota tracking functionality for Firmware.ai provider.
 
     This mixin adds the following capabilities:
-    - Fetch quota usage from the Firmware.ai API
-    - Track 5-hour rolling window quota limits
-    - Parse ISO 8601 reset timestamps
+    - Fetch credit balance from the Firmware.ai API
+    - Track remaining credits
 
     Usage:
         class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
@@ -76,10 +74,10 @@ class FirmwareQuotaTracker:
             {
                 "status": "success" | "error",
                 "error": str | None,
-                "used": float,  # 0.0 to 1.0 (from API directly)
-                "remaining_fraction": float,  # 1.0 - used
-                "reset_at": float | None,  # Unix timestamp (seconds)
-                "has_active_window": bool,  # True if reset is not null
+                "credits": float,  # Remaining credit balance
+                "remaining_fraction": float,  # 1.0 if credits > 0, else 0.0
+                "reset_at": float | None,  # Always None (no rolling window)
+                "has_active_window": bool,  # Always False (credit-based)
                 "fetched_at": float,
             }
         """
@@ -103,35 +101,30 @@ class FirmwareQuotaTracker:
             response.raise_for_status()
             data = response.json()
 
-            # Parse response - API returns ratio directly
-            used_raw = data.get("used")
-            # Validate used is numeric
-            if not isinstance(used_raw, (int, float)):
+            # Parse response - API returns absolute credit balance
+            credits_raw = data.get("credits")
+            # Validate credits is numeric
+            if not isinstance(credits_raw, (int, float)):
                 lib_logger.warning(
-                    f"Firmware.ai quota API returned non-numeric 'used' value: {used_raw}"
+                    f"Firmware.ai quota API returned non-numeric 'credits' value: {credits_raw}"
                 )
-                used = 0.0
+                credits_balance = 0.0
             else:
-                used = float(used_raw)
-            reset_iso = data.get("reset")
+                credits_balance = float(credits_raw)
 
-            # Calculate remaining (inverse of used), clamped to 0.0-1.0
-            remaining_fraction = max(0.0, min(1.0, 1.0 - used))
+            # Credit-based system: available if credits > 0
+            # remaining_fraction is 1.0 if credits available, 0.0 if exhausted
+            remaining_fraction = 1.0 if credits_balance > 0.0 else 0.0
 
-            # Parse ISO 8601 reset timestamp
-            reset_at = None
-            if reset_iso is not None:
-                reset_at = self._parse_iso_timestamp(reset_iso)
-            # Only mark active window if we successfully parsed the timestamp
-            has_active_window = reset_at is not None
+            # Parse optional reset/reload date (ISO 8601 string)
+            reset_date = data.get("reset")  # e.g., "2023-04-01T00:00:00.000Z"
 
             return {
                 "status": "success",
                 "error": None,
-                "used": used,
+                "credits": credits_balance,
                 "remaining_fraction": remaining_fraction,
-                "reset_at": reset_at,
-                "has_active_window": has_active_window,
+                "reset_date": reset_date,  # ISO 8601 string or None
                 "fetched_at": time.time(),
             }
 
@@ -193,9 +186,21 @@ class FirmwareQuotaTracker:
             usage_data: Response from fetch_quota_usage()
 
         Returns:
-            Remaining fraction (0.0 to 1.0)
+            Remaining fraction (0.0 or 1.0 for credit-based system)
         """
         return usage_data.get("remaining_fraction", 0.0)
+
+    def get_credits_balance(self, usage_data: Dict[str, Any]) -> float:
+        """
+        Get the remaining credit balance from usage data.
+
+        Args:
+            usage_data: Response from fetch_quota_usage()
+
+        Returns:
+            Remaining credits (absolute value)
+        """
+        return usage_data.get("credits", 0.0)
 
     def get_reset_timestamp(self, usage_data: Dict[str, Any]) -> Optional[float]:
         """
@@ -235,8 +240,7 @@ class FirmwareQuotaTracker:
 
             lib_logger.debug(
                 f"Firmware.ai quota for {credential_identifier}: "
-                f"{usage_data['remaining_fraction'] * 100:.1f}% remaining, "
-                f"active_window={usage_data['has_active_window']}"
+                f"{usage_data.get('credits', 0.0):.2f} credits remaining"
             )
 
         return usage_data

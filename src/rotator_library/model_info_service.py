@@ -87,6 +87,7 @@ PROVIDER_ALIASES = {
     "gemini_cli": ["google"],
     "gemini": ["google"],
     "iflow": ["iflow", "iflowcn"],  # iflow may exist as either
+    "opencode_go": ["opencode"],
 }
 
 

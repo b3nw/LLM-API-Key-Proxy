@@ -13,6 +13,7 @@ This module handl- Known LiteLLM provider definitions (from scraped data)
 
 import os
 import logging
+import litellm
 from typing import Dict, Any, Set, Optional
 
 from .litellm_providers import (
@@ -723,20 +724,21 @@ class ProviderConfig:
         # Create a copy to avoid modifying the original
         kwargs = kwargs.copy()
 
-        if provider in KNOWN_PROVIDERS:
-            # Known provider - just add api_base override
+        if provider in KNOWN_PROVIDERS and provider in getattr(litellm, "provider_list", []):
+            # Known provider supported natively - just add api_base override
             kwargs["api_base"] = api_base
             lib_logger.debug(
                 f"Applying api_base override for known provider {provider}: {api_base}"
             )
         else:
-            # Custom provider - route through OpenAI-compatible endpoint
+            # Custom provider or newer litellm provider not supported by our version
+            # route through OpenAI-compatible endpoint
             model_name = model.split("/", 1)[1] if "/" in model else model
             kwargs["model"] = f"openai/{model_name}"
             kwargs["api_base"] = api_base
             kwargs["custom_llm_provider"] = "openai"
             lib_logger.debug(
-                f"Routing custom provider {provider} through openai: "
+                f"Routing {provider} through openai: "
                 f"model={kwargs['model']}, api_base={api_base}"
             )
 

@@ -4,6 +4,7 @@
 # Utilities for provider implementations
 from .base_quota_tracker import BaseQuotaTracker
 from .antigravity_quota_tracker import AntigravityQuotaTracker
+from .anthropic_quota_tracker import AnthropicQuotaTracker
 from .gemini_cli_quota_tracker import GeminiCliQuotaTracker
 
 # Shared utilities for Gemini-based providers
@@ -38,6 +39,7 @@ __all__ = [
     # Quota trackers
     "BaseQuotaTracker",
     "AntigravityQuotaTracker",
+    "AnthropicQuotaTracker",
     "GeminiCliQuotaTracker",
     # Shared utilities
     "env_bool",

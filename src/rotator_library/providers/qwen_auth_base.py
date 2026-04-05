@@ -13,6 +13,7 @@ import logging
 import webbrowser
 import os
 import re
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from glob import glob
@@ -342,11 +343,17 @@ class QwenAuthBase:
             if not force and cached_creds and not self._is_token_expired(cached_creds):
                 return cached_creds
 
-            # [ROTATING TOKEN FIX] Always read fresh from disk before refresh.
+            # [ROTATING TOKEN FIX] Read fresh credentials before refresh.
             # Qwen uses rotating refresh tokens - each refresh invalidates the previous token.
             # If we use a stale cached token, refresh will fail with HTTP 400.
-            # Reading fresh from disk ensures we have the latest token.
-            await self._read_creds_from_file(path)
+            if not path.startswith("env://"):
+                # For file paths, read fresh from disk to pick up tokens that may have
+                # been updated by another process or a previous refresh cycle.
+                await self._read_creds_from_file(path)
+            # For env:// paths, the in-memory cache is the single source of truth.
+            # _save_credentials updates the cache after each refresh, so the cache
+            # always holds the latest rotating tokens. Re-reading from static env vars
+            # would discard the rotated refresh_token and break subsequent refreshes.
             creds_from_file = self._credentials_cache[path]
 
             lib_logger.debug(f"Refreshing Qwen OAuth token for '{Path(path).name}'...")
@@ -363,7 +370,7 @@ class QwenAuthBase:
             headers = {
                 "Content-Type": "application/x-www-form-urlencoded",
                 "Accept": "application/json",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                "User-Agent": "QwenCode/1.0.0 (linux; x64)",
             }
 
             async with httpx.AsyncClient() as client:
@@ -380,6 +387,24 @@ class QwenAuthBase:
                             timeout=30.0,
                         )
                         response.raise_for_status()
+
+                        # [WAF DETECTION] Alibaba Cloud WAF may return HTTP 200
+                        # with HTML content instead of JSON. Detect and retry.
+                        content_type = response.headers.get("content-type", "")
+                        if "json" not in content_type.lower():
+                            lib_logger.warning(
+                                f"Token refresh for '{Path(path).name}' returned non-JSON "
+                                f"(content-type: {content_type}), likely WAF block. "
+                                f"Attempt {attempt + 1}/{max_retries}."
+                            )
+                            if attempt < max_retries - 1:
+                                await asyncio.sleep(2 ** attempt)
+                                continue
+                            raise ValueError(
+                                f"Token refresh blocked by WAF after {max_retries} attempts "
+                                f"(content-type: {content_type})"
+                            )
+
                         new_token_data = response.json()
                         break  # Success
 
@@ -524,32 +549,70 @@ class QwenAuthBase:
         """
         Returns the API base URL and access token.
 
-        Supports both credential types:
-        - OAuth: credential_identifier is a file path to JSON credentials
-        - API Key: credential_identifier is the API key string itself
+        Supports three credential types:
+        - OAuth file: credential_identifier is a file path to JSON credentials
+        - env:// virtual path: credential_identifier is "env://provider/index"
+        - Direct API key: credential_identifier is the API key string itself
+
+        URL normalization follows upstream qwen-code getCurrentEndpoint() logic:
+        - Adds https:// prefix if missing
+        - Ensures /v1 suffix is present
+        - Defaults to DashScope URL when resource_url is not set
         """
-        # Detect credential type
-        if os.path.isfile(credential_identifier):
-            # OAuth credential: file path to JSON
+        # Import here to avoid circular dependency
+        from .qwen_code_provider import DEFAULT_DASHSCOPE_BASE_URL
+
+        try:
+            is_oauth = credential_identifier.startswith("env://") or os.path.isfile(
+                credential_identifier
+            )
+        except (OSError, ValueError):
+            # os.path.isfile can raise on invalid path strings (e.g. very long API keys)
+            is_oauth = False
+
+        if is_oauth:
             lib_logger.debug(
-                f"Using OAuth credentials from file: {credential_identifier}"
+                f"Using OAuth credentials from: {credential_identifier}"
             )
             creds = await self._load_credentials(credential_identifier)
 
             if self._is_token_expired(creds):
                 creds = await self._refresh_token(credential_identifier)
 
-            base_url = creds.get("resource_url", "https://portal.qwen.ai/v1")
-            if not base_url.startswith("http"):
-                base_url = f"https://{base_url}"
+            resource_url = creds.get("resource_url")
+            base_url = self._normalize_api_base_url(resource_url, DEFAULT_DASHSCOPE_BASE_URL)
             access_token = creds["access_token"]
         else:
-            # Direct API key: use as-is
+            # Direct API key: use as-is with DashScope default
             lib_logger.debug("Using direct API key for Qwen Code")
-            base_url = "https://portal.qwen.ai/v1"
+            base_url = DEFAULT_DASHSCOPE_BASE_URL
             access_token = credential_identifier
 
         return base_url, access_token
+
+    @staticmethod
+    def _normalize_api_base_url(resource_url: Optional[str], default_url: str) -> str:
+        """
+        Normalize a resource_url from Qwen OAuth credentials into a full API base URL.
+
+        Mirrors upstream qwen-code getCurrentEndpoint() logic:
+        - If resource_url is None/empty, use the default DashScope URL
+        - Add https:// prefix if missing
+        - Ensure /v1 suffix is present
+
+        The returned URL should be used directly — callers append /chat/completions.
+        """
+        if not resource_url:
+            return default_url
+
+        # Add protocol if missing
+        url = resource_url if resource_url.startswith("http") else f"https://{resource_url}"
+
+        # Ensure /v1 suffix (upstream getCurrentEndpoint behavior)
+        if not url.endswith("/v1"):
+            url = f"{url.rstrip('/')}/v1"
+
+        return url
 
     async def proactively_refresh(self, credential_identifier: str):
         """
@@ -795,9 +858,10 @@ class QwenAuthBase:
         )
 
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+            "User-Agent": "QwenCode/1.0.0 (linux; x64)",
             "Content-Type": "application/x-www-form-urlencoded",
             "Accept": "application/json",
+            "x-request-id": str(uuid.uuid4()),
         }
         async with httpx.AsyncClient() as client:
             request_data = {

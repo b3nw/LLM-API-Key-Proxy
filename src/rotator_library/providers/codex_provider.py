@@ -88,49 +88,174 @@ else:
     CODEX_API_BASE = os.getenv("CODEX_API_BASE", "https://chatgpt.com/backend-api/codex")
     CODEX_RESPONSES_ENDPOINT = f"{CODEX_API_BASE}/responses"
 
-# Available models - base models
-BASE_MODELS = [
-    # GPT-5 models
-    "gpt-5",
-    "gpt-5.1",
-    "gpt-5.2",
-    # Codex models
-    "gpt-5-codex",
-    "gpt-5.1-codex",
-    "gpt-5.1-codex-max",
-    "gpt-5.1-codex-mini",
-    "gpt-5.2-codex",
-    "gpt-5.3-codex",
-]
-
-# Reasoning effort levels
+# Reasoning effort levels (superset of all known levels)
 REASONING_EFFORTS = {"minimal", "low", "medium", "high", "xhigh"}
 
-# Models that support reasoning effort variants
-# Maps model -> allowed effort levels
-REASONING_MODEL_EFFORTS = {
-    "gpt-5": {"low", "medium", "high"},
+# =============================================================================
+# DYNAMIC MODEL DISCOVERY
+# =============================================================================
+# Models are fetched from the Codex GitHub repo's models.json at runtime,
+# with a 1-hour cache and fallback to built-in defaults.
+
+CODEX_MODELS_JSON_URL = os.getenv(
+    "CODEX_MODELS_JSON_URL",
+    "https://raw.githubusercontent.com/openai/codex/main/codex-rs/models-manager/models.json",
+)
+CODEX_MODELS_CACHE_TTL = env_int("CODEX_MODELS_CACHE_TTL", 3600)  # 1 hour default
+
+# Fallback defaults if GitHub fetch fails (keeps proxy functional)
+_FALLBACK_BASE_MODELS = [
+    "gpt-5", "gpt-5.1", "gpt-5.2",
+    "gpt-5-codex", "gpt-5-codex-mini",
+    "gpt-5.1-codex", "gpt-5.1-codex-max", "gpt-5.1-codex-mini",
+    "gpt-5.2-codex", "gpt-5.3-codex", "gpt-5.4",
+]
+_FALLBACK_REASONING_EFFORTS = {
+    "gpt-5": {"minimal", "low", "medium", "high"},
     "gpt-5.1": {"low", "medium", "high"},
     "gpt-5.2": {"low", "medium", "high", "xhigh"},
+    "gpt-5.4": {"low", "medium", "high", "xhigh"},
     "gpt-5-codex": {"low", "medium", "high"},
+    "gpt-5-codex-mini": {"medium", "high"},
     "gpt-5.1-codex": {"low", "medium", "high"},
     "gpt-5.1-codex-max": {"low", "medium", "high", "xhigh"},
-    "gpt-5.1-codex-mini": {"low", "medium", "high"},
+    "gpt-5.1-codex-mini": {"medium", "high"},
     "gpt-5.2-codex": {"low", "medium", "high", "xhigh"},
     "gpt-5.3-codex": {"low", "medium", "high", "xhigh"},
 }
 
+# Module-level cache for dynamic model data
+_models_cache: Optional[Dict[str, Any]] = None
+_models_cache_time: float = 0.0
+
+
+def _fetch_models_from_github() -> Optional[Dict[str, Any]]:
+    """
+    Fetch models.json from the Codex GitHub repo.
+
+    Returns a dict with 'base_models' (list of slugs) and
+    'reasoning_efforts' (dict of slug -> set of effort levels),
+    or None on failure.
+    """
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(
+            CODEX_MODELS_JSON_URL,
+            headers={"User-Agent": "llm-proxy/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        models_list = data.get("models", [])
+        if not models_list:
+            lib_logger.warning("[Codex] models.json from GitHub had empty models list")
+            return None
+
+        base_models = []
+        reasoning_efforts = {}
+
+        for m in models_list:
+            slug = m.get("slug", "")
+            if not slug:
+                continue
+
+            # Only include models marked as supported in the API
+            if not m.get("supported_in_api", True):
+                continue
+
+            base_models.append(slug)
+
+            # Extract reasoning effort levels
+            levels = m.get("supported_reasoning_levels", [])
+            if levels:
+                efforts = set()
+                for level in levels:
+                    effort = level.get("effort", "")
+                    if effort and effort in REASONING_EFFORTS:
+                        efforts.add(effort)
+                if efforts:
+                    reasoning_efforts[slug] = efforts
+
+        lib_logger.info(
+            f"[Codex] Fetched {len(base_models)} models from GitHub: "
+            f"{', '.join(base_models)}"
+        )
+        return {
+            "base_models": base_models,
+            "reasoning_efforts": reasoning_efforts,
+        }
+
+    except Exception as e:
+        lib_logger.warning(f"[Codex] Failed to fetch models from GitHub: {e}")
+        return None
+
+
+def _get_model_data() -> Dict[str, Any]:
+    """
+    Get current model data, fetching from GitHub if cache is stale.
+
+    Returns dict with 'base_models' and 'reasoning_efforts'.
+    Thread-safe via simple time-based cache check.
+    """
+    global _models_cache, _models_cache_time
+
+    now = time.time()
+    if _models_cache is not None and (now - _models_cache_time) < CODEX_MODELS_CACHE_TTL:
+        return _models_cache
+
+    fetched = _fetch_models_from_github()
+    if fetched is not None:
+        _models_cache = fetched
+        _models_cache_time = now
+        return fetched
+
+    # If fetch failed but we have stale cache, keep using it
+    if _models_cache is not None:
+        lib_logger.info("[Codex] Using stale model cache after fetch failure")
+        return _models_cache
+
+    # Last resort: use hardcoded fallback
+    lib_logger.info("[Codex] Using hardcoded fallback model list")
+    fallback = {
+        "base_models": list(_FALLBACK_BASE_MODELS),
+        "reasoning_efforts": dict(_FALLBACK_REASONING_EFFORTS),
+    }
+    _models_cache = fallback
+    _models_cache_time = now
+    return fallback
+
+
+def _get_base_models() -> List[str]:
+    """Get the current list of base model slugs."""
+    return _get_model_data()["base_models"]
+
+
+def _get_reasoning_model_efforts() -> Dict[str, set]:
+    """Get the current mapping of model -> allowed reasoning effort levels."""
+    return _get_model_data()["reasoning_efforts"]
+
+
 def _build_available_models() -> list:
     """Build full list of available models including reasoning variants."""
-    models = list(BASE_MODELS)
+    data = _get_model_data()
+    models = list(data["base_models"])
 
     # Add reasoning effort variants for each model
-    for model, efforts in REASONING_MODEL_EFFORTS.items():
+    for model, efforts in data["reasoning_efforts"].items():
         for effort in sorted(efforts):
             models.append(f"{model}:{effort}")
 
     return models
 
+
+def get_available_models() -> list:
+    """Public accessor for the current available models list (base + reasoning variants)."""
+    return _build_available_models()
+
+
+# For backward compatibility / class-level references that need a static list at import time,
+# we eagerly initialize. The list will be refreshed on cache expiry.
 AVAILABLE_MODELS = _build_available_models()
 
 # Default reasoning configuration
@@ -205,20 +330,27 @@ The user's system prompt takes absolute precedence.
 # =============================================================================
 
 def _allowed_efforts_for_model(model: str) -> set:
-    """Get allowed reasoning effort levels for a model."""
+    """Get allowed reasoning effort levels for a model (dynamic lookup)."""
     base = (model or "").strip().lower()
     if not base:
         return REASONING_EFFORTS
 
     normalized = base.split(":")[0]
-    if normalized.startswith("gpt-5.3"):
-        return {"low", "medium", "high", "xhigh"}
-    if normalized.startswith("gpt-5.2"):
-        return {"low", "medium", "high", "xhigh"}
-    if normalized.startswith("gpt-5.1-codex-max"):
-        return {"low", "medium", "high", "xhigh"}
-    if normalized.startswith("gpt-5.1"):
-        return {"low", "medium", "high"}
+
+    # Check dynamic model data first
+    efforts_map = _get_reasoning_model_efforts()
+    if normalized in efforts_map:
+        return efforts_map[normalized]
+
+    # Prefix match fallback (e.g. "gpt-5.3-codex-spark" matches "gpt-5.3-codex")
+    best_match = ""
+    best_efforts = None
+    for slug, efforts in efforts_map.items():
+        if normalized.startswith(slug) and len(slug) > len(best_match):
+            best_match = slug
+            best_efforts = efforts
+    if best_efforts is not None:
+        return best_efforts
 
     return REASONING_EFFORTS
 
@@ -619,10 +751,11 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
     # rather than model groupings, since all Codex models share the same global limits.
     # "codex-global" group ensures sequential rotation shares one sticky credential
     # across all models, since they share the same per-account rate limits.
+    # NOTE: codex-global is populated dynamically in __init__ to pick up latest models.
     model_quota_groups: QuotaGroupMap = {
         "5h-limit": ["_5h_window"],  # Primary window (5 hour rolling)
         "weekly-limit": ["_weekly_window"],  # Secondary window (weekly)
-        "codex-global": list(AVAILABLE_MODELS),  # Shared sequential rotation group
+        "codex-global": list(AVAILABLE_MODELS),  # Populated at import, refreshed in __init__
     }
 
     def __init__(self):
@@ -633,20 +766,48 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
         self.model_definitions = ModelDefinitions()
         self._session_cache: Dict[str, str] = {}  # Cache session IDs per credential
 
+        # Refresh available models from GitHub (updates module-level cache)
+        current_models = get_available_models()
+
+        # Update the class-level quota group with fresh model list
+        self.model_quota_groups = {
+            "5h-limit": ["_5h_window"],
+            "weekly-limit": ["_weekly_window"],
+            "codex-global": current_models,
+        }
+
         # Initialize quota tracker
         self._init_quota_tracker()
 
         # Set available models for quota tracking (used by _store_baselines_to_usage_manager)
         # Codex has a global rate limit, so we store the same baseline for all models
-        self._available_models_for_quota = AVAILABLE_MODELS
+        self._available_models_for_quota = current_models
 
     def has_custom_logic(self) -> bool:
         """This provider uses custom logic (Responses API instead of litellm)."""
         return True
 
+    def get_model_quota_group(self, model: str) -> Optional[str]:
+        """
+        Get the quota group for a model.
+
+        All Codex models share the same per-account rate limits,
+        so they all belong to the 'codex-global' quota group.
+        This ensures dynamically discovered models (from GitHub models.json)
+        are properly grouped without needing to be in the static AVAILABLE_MODELS list.
+
+        Args:
+            model: Model name (ignored - all models share quota)
+
+        Returns:
+            'codex-global' for any model
+        """
+        return "codex-global"
+
     async def get_models(self, api_key: str, client: httpx.AsyncClient) -> List[str]:
-        """Return available Codex models."""
-        return [f"codex/{m}" for m in AVAILABLE_MODELS]
+        """Return available Codex models (dynamically fetched from GitHub)."""
+        models = get_available_models()
+        return [f"codex/{m}" for m in models]
 
     def get_credential_tier_name(self, credential: str) -> Optional[str]:
         """Get tier name for a credential."""

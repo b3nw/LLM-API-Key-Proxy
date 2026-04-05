@@ -65,7 +65,7 @@ NATIVE_PROVIDER_PRIORITY = [
     "fireworks-ai",
     "groq",
     "sap-ai-core",
-    "zenmux",
+    "opencode_zen",
 ]
 
 # ============================================================================
@@ -432,7 +432,12 @@ class DataSourceAdapter:
         """Execute HTTP GET with standard headers."""
         req = Request(url, headers={"User-Agent": "ModelRegistry/1.0"})
         with urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            body = resp.read().decode("utf-8")
+        try:
+            return json.loads(body)
+        except json.JSONDecodeError:
+            logger.warning("Invalid JSON response from %s", url)
+            raise
 
 
 class OpenRouterAdapter(DataSourceAdapter):

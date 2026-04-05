@@ -568,6 +568,11 @@ class GoogleOAuthBase:
             if "scopes" not in creds:
                 creds["scopes"] = self.OAUTH_SCOPES
 
+            # [FIX 4b] Add type field for google-auth-library compatibility
+            # Required by the A2A sidecar server's credential loading
+            if "type" not in creds:
+                creds["type"] = "authorized_user"
+
             # [FIX 5] Ensure _proxy_metadata exists and update timestamp
             if "_proxy_metadata" not in creds:
                 creds["_proxy_metadata"] = {}

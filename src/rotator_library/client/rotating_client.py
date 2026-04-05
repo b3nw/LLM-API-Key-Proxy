@@ -43,6 +43,7 @@ from .transforms import ProviderTransforms
 from .executor import RequestExecutor
 from .anthropic import AnthropicHandler
 from ..session_tracking import SessionTracker
+from .cross_provider_executor import CrossProviderExecutor
 
 
 # Import providers and other dependencies
@@ -57,6 +58,8 @@ from ..utils.paths import get_default_root, get_logs_dir, get_oauth_dir
 from ..utils.suppress_litellm_warnings import suppress_litellm_serialization_warnings
 
 from ..model_latest_registry import ModelLatestRegistry
+from ..model_alias_registry import ModelAliasRegistry
+from ..model_fallback_registry import ModelFallbackRegistry
 from ..failure_logger import configure_failure_logger
 
 # Import new usage package
@@ -322,6 +325,16 @@ class RotatingClient:
         if self._latest_registry.has_rules():
             self._latest_registry.set_pricing_resolver(self._pricing_resolver_callback)
 
+        # Initialize cross-provider model alias registry
+        self._alias_registry = ModelAliasRegistry()
+        self._cross_provider_executor = CrossProviderExecutor(
+            client=self,
+            alias_registry=self._alias_registry,
+        )
+
+        # Initialize model fallback registry for per-model provider spillover
+        self._fallback_registry = ModelFallbackRegistry()
+
         # Initialize Anthropic compatibility handler
         self._anthropic_handler = AnthropicHandler(self)
 
@@ -390,6 +403,16 @@ class RotatingClient:
         if hasattr(self, "http_client") and self.http_client:
             await self.http_client.aclose()
 
+    # Error types that indicate a request-level problem (not a provider problem).
+    # These should NOT trigger provider fallback — the same error would occur
+    # on any provider.
+    _NON_FALLBACK_ERROR_CODES = frozenset({
+        "context_window_exceeded",
+        "invalid_request",
+        "authentication",
+        "forbidden",
+    })
+
     async def acompletion(
         self,
         request: Optional[Any] = None,
@@ -401,18 +424,69 @@ class RotatingClient:
 
         Routes to the provider specified in the provider/model format.
 
+        Supports three routing modes:
+        1. provider/model format: routed directly to the specified provider,
+           with optional MODEL_FALLBACK spillover on exhaustion
+        2. unprefixed model name: if it matches a registered alias, routed
+           across multiple providers via CrossProviderExecutor
+        3. unprefixed model name without alias: raises ValueError
+
         Returns:
             Response object or async generator for streaming
         """
         model = kwargs.get("model", "")
         provider = model.split("/")[0] if "/" in model else ""
 
+        # Check if this is an unprefixed alias model
         if not provider or provider not in self.all_credentials:
+            # Try cross-provider alias resolution
+            alias_targets = self._alias_registry.resolve(model)
+            if alias_targets:
+                lib_logger.info(
+                    f"Model '{model}' matched alias → routing across "
+                    f"{len(alias_targets)} providers"
+                )
+                return await self._cross_provider_executor.execute(
+                    canonical_model=model,
+                    targets=alias_targets,
+                    request=request,
+                    pre_request_callback=pre_request_callback,
+                    **kwargs,
+                )
+
             raise ValueError(
                 f"Invalid model format or no credentials for provider: {model}"
             )
 
-        # Standard single-provider path (unchanged)
+        # Standard single-provider path
+        return await self._execute_with_fallback(
+            model, provider, request, pre_request_callback, **kwargs,
+        )
+
+    async def _execute_with_fallback(
+        self,
+        model: str,
+        provider: str,
+        request: Optional[Any],
+        pre_request_callback: Optional[callable],
+        **kwargs,
+    ) -> Union[Any, AsyncGenerator[str, None]]:
+        """
+        Execute a single-provider request, falling back to alternative
+        providers on exhaustion if MODEL_FALLBACK is configured.
+
+        Args:
+            model: Full model string (e.g., "chutes/gemma-4-31b-it")
+            provider: Primary provider name
+            request: FastAPI Request object
+            pre_request_callback: Optional callback
+            **kwargs: Request parameters
+
+        Returns:
+            Response object or async generator for streaming
+        """
+        from ..core.errors import ProxyExhaustionError
+
         # Extract internal logging parameters (not passed to API)
         parent_log_dir = kwargs.pop("_parent_log_dir", None)
 
@@ -447,7 +521,44 @@ class RotatingClient:
             transaction_logger=transaction_logger,
         )
 
-        return await self._executor.execute(context)
+        try:
+            return await self._executor.execute(context)
+        except ProxyExhaustionError as primary_error:
+            # Check if fallback should be attempted.
+            # Terminal errors (invalid_request, auth, etc.) are request-level
+            # problems — the same error would occur on any provider.
+            if primary_error.dominant_code in self._NON_FALLBACK_ERROR_CODES:
+                raise
+
+            # Extract model name without provider prefix
+            model_name = model.split("/", 1)[1] if "/" in model else model
+
+            # Check for fallback configuration
+            fallback_targets = self._fallback_registry.resolve(model_name)
+            if not fallback_targets:
+                raise  # No fallback configured
+
+            # Filter out the provider that just failed
+            fallback_targets = [
+                t for t in fallback_targets if t.provider != provider
+            ]
+            if not fallback_targets:
+                raise  # All fallback targets are the same provider
+
+            lib_logger.info(
+                f"Primary provider '{provider}' exhausted for '{model_name}' "
+                f"({primary_error.dominant_code}). Falling back to "
+                f"{len(fallback_targets)} alternative provider(s): "
+                f"{', '.join(t.provider for t in fallback_targets)}"
+            )
+
+            return await self._cross_provider_executor.execute(
+                canonical_model=model_name,
+                targets=fallback_targets,
+                request=request,
+                pre_request_callback=pre_request_callback,
+                **kwargs,
+            )
 
     def aembedding(
         self,
@@ -604,6 +715,7 @@ class RotatingClient:
 
             stats = await manager.get_stats_for_endpoint()
 
+
             # Filter out stale quota groups that no longer exist in the provider's
             # current model_quota_groups (e.g. after a group rename like
             # firmware_global → credits($))
@@ -622,6 +734,7 @@ class RotatingClient:
                     for cred_data in stats.get("credentials", {}).values():
                         for g in stale_groups:
                             cred_data.get("group_usage", {}).pop(g, None)
+
 
             # Skip providers with no activity AND no quota data
             # (filters out invalid/unused providers, but keeps quota-tracked providers visible)
@@ -776,8 +889,6 @@ class RotatingClient:
         """Get all new usage managers."""
         return self._usage_managers
 
-
-
     @property
     def latest_registry(self) -> "ModelLatestRegistry":
         """Get the smart 'latest' model alias registry."""
@@ -851,6 +962,16 @@ class RotatingClient:
             pass
 
         return None
+
+    @property
+    def alias_registry(self) -> "ModelAliasRegistry":
+        """Get the model alias registry for cross-provider routing."""
+        return self._alias_registry
+
+    @property
+    def fallback_registry(self) -> "ModelFallbackRegistry":
+        """Get the model fallback registry for provider spillover."""
+        return self._fallback_registry
 
     def _apply_usage_reset_config(
         self,

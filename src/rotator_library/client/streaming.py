@@ -302,6 +302,12 @@ class StreamingHandler:
             choice = chunk_dict["choices"][0]
             delta = choice.get("delta", {})
 
+            # Normalize non-standard thinking/reasoning field names to
+            # the OpenAI-standard "reasoning_content".
+            # NanoGPT uses "reasoning" instead of "reasoning_content".
+            if "reasoning" in delta and "reasoning_content" not in delta:
+                delta["reasoning_content"] = delta.pop("reasoning")
+
             # Check for tool_calls
             if delta.get("tool_calls"):
                 chunk_has_tool_calls = True

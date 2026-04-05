@@ -626,6 +626,7 @@ class RequestExecutor:
                                     self._apply_litellm_logger(kwargs)
                                     # Remove internal context before litellm call
                                     kwargs.pop("transaction_context", None)
+                                    kwargs.pop("_anthropic_payload", None)
                                     call_fn = litellm.aembedding if is_embedding else litellm.acompletion
                                     response = await call_fn(**kwargs)
 
@@ -874,6 +875,7 @@ class RequestExecutor:
                                         self._apply_litellm_logger(kwargs)
                                         # Remove internal context before litellm call
                                         kwargs.pop("transaction_context", None)
+                                        kwargs.pop("_anthropic_payload", None)
                                         stream = await litellm.acompletion(**kwargs)
 
                                     # Hand off to streaming handler with cred_context

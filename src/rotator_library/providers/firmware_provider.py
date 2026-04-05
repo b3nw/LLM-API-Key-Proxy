@@ -1,8 +1,8 @@
 """
 Firmware.ai Provider with Quota Tracking
 
-Provider implementation for the Firmware.ai API with 5-hour rolling window quota tracking.
-Uses the FirmwareQuotaTracker mixin to fetch quota usage from their API.
+Provider implementation for the Firmware.ai API with credit-based quota tracking.
+Uses the FirmwareQuotaTracker mixin to fetch credit balance from their API.
 
 Environment variables:
     FIRMWARE_API_BASE: API base URL (default: https://app.firmware.ai/api/v1)
@@ -34,10 +34,12 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
     Provider implementation for the Firmware.ai API with quota tracking.
     """
 
-    # Quota groups for tracking 5-hour rolling window limits
+    # Quota groups for tracking credit-based limits
     # Uses a virtual model "firmware/_quota" for credential-level quota tracking
+    # Single quota group: all models share the same credential-level credit balance.
+    # Named 'credits($)' so the TUI auto-formats values as dollars.
     model_quota_groups = {
-        "firmware_global": ["firmware/_quota"],
+        "credits($)": ["firmware/_quota"],
     }
 
     def __init__(self, *args, **kwargs):
@@ -74,14 +76,14 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
         Returns:
             Quota group identifier for shared credential-level tracking
         """
-        return "firmware_global"
+        return "credits($)"
 
     def get_models_in_quota_group(self, group: str) -> List[str]:
         """
         Get all models in a quota group.
 
         For Firmware.ai, we use a virtual model "firmware/_quota" to track the
-        credential-level 5-hour rolling window quota.
+        credential-level credit-based quota.
 
         Args:
             group: Quota group name
@@ -89,7 +91,7 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
         Returns:
             List of model names in the group
         """
-        if group == "firmware_global":
+        if group == "credits($)":
             return ["firmware/_quota"]
         return []
 
@@ -98,17 +100,16 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
         Return usage reset configuration for Firmware.ai credentials.
 
         Firmware.ai uses per_model mode to track usage at the model level,
-        with 5-hour rolling window quotas managed via the background job.
+        with credit-based quota managed via the background job.
 
         Args:
             credential: The API key (unused, same config for all)
 
         Returns:
-            Configuration with per_model mode and 5-hour window
+            Configuration with per_model mode
         """
         return {
             "mode": "per_model",
-            "window_seconds": 18000,  # 5 hours (5-hour rolling window)
             "field_name": "models",
         }
 
@@ -179,12 +180,16 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
                         self._quota_cache[api_key] = usage_data
 
                         # Calculate values for usage manager
+                        credits_balance = usage_data.get("credits", 0.0)
                         remaining_fraction = usage_data.get("remaining_fraction", 0.0)
-                        reset_ts = usage_data.get("reset_at")
 
                         # Store baseline in usage manager
                         # Since Firmware.ai uses credential-level quota, we use a virtual model name
-                        if remaining_fraction <= 0.0 and reset_ts:
+                        # Express credits as synthetic request-count values (in cents)
+                        # so the quota group window gets a non-zero limit for visibility
+                        credits_as_cents = int(credits_balance * 100)
+
+                        if remaining_fraction <= 0.0:
                             stable_id = usage_manager.registry.get_stable_id(
                                 api_key, usage_manager.provider
                             )
@@ -193,20 +198,22 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
                                 await usage_manager.tracking.apply_cooldown(
                                     state=state,
                                     reason="quota_exhausted",
-                                    until=reset_ts,
+                                    duration=3600,  # 1 hour cooldown
                                     model_or_group="firmware/_quota",
                                     source="api_quota",
                                 )
                         await usage_manager.update_quota_baseline(
                             api_key,
                             "firmware/_quota",  # Virtual model for credential-level tracking
-                            quota_reset_ts=reset_ts,
+                            quota_max_requests=credits_as_cents,
+                            quota_used=0,
+                            quota_reset_ts=None,
+                            force=True,
                         )
 
                         lib_logger.debug(
                             f"Updated Firmware.ai quota baseline: "
-                            f"{remaining_fraction * 100:.1f}% remaining, "
-                            f"active_window={usage_data.get('has_active_window', False)}"
+                            f"{credits_balance:.2f} credits remaining"
                         )
 
                 except Exception as e:
@@ -220,3 +227,6 @@ class FirmwareProvider(FirmwareQuotaTracker, ProviderInterface):
                 refresh_single_credential(api_key, client) for api_key in credentials
             ]
             await asyncio.gather(*tasks, return_exceptions=True)
+
+
+

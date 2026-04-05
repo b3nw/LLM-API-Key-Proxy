@@ -70,6 +70,7 @@ AVAILABLE_MODELS = [
     "gemini-3-flash-preview",
 ]
 
+
 # Gemini 3 tool fix system instruction (prevents hallucination)
 DEFAULT_GEMINI3_SYSTEM_INSTRUCTION = """<CRITICAL_TOOL_USAGE_INSTRUCTIONS>
 You are operating in a CUSTOM ENVIRONMENT where tool definitions COMPLETELY DIFFER from your training data.
@@ -174,7 +175,7 @@ class GeminiCliProvider(
     # Can be overridden via env: QUOTA_GROUPS_GEMINI_CLI_{GROUP}="model1,model2"
     model_quota_groups: QuotaGroupMap = {
         # Pro models share a quota pool (verified: gemini-2.5-pro and gemini-3-pro-preview)
-        "pro": ["gemini-2.5-pro", "gemini-3-pro-preview"],
+        "pro": ["gemini-2.5-pro", "gemini-3-pro-preview", "gemini-3.1-pro-preview"],
         # All 2.x Flash models share a quota pool (verified: 2.0 shares with 2.5)
         # Note: contrary to PR #62 which claimed 2.0-flash was standalone
         "25-flash": ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite"],

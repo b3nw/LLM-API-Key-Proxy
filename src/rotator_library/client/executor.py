@@ -45,6 +45,7 @@ from ..core.errors import (
     NoAvailableKeysError,
     PreRequestCallbackError,
     StreamedAPIError,
+    TerminalRequestError,
     ClassifiedError,
     RequestErrorAccumulator,
     classify_error,
@@ -652,9 +653,15 @@ class RequestExecutor:
                                 elif action == ErrorAction.ROTATE:
                                     break  # Try next credential
                                 else:  # FAIL
-                                    raise
+                                    # Raise as TerminalRequestError so it escapes
+                                    # the `except Exception: pass` cleanup block below.
+                                    raise TerminalRequestError(e)
 
                     except PreRequestCallbackError:
+                        raise
+                    except TerminalRequestError:
+                        # Non-rotatable error (e.g. 404 model not found) - propagate immediately.
+                        # Must be caught before the bare `except Exception: pass` below.
                         raise
                     except Exception:
                         # Let context manager handle cleanup
@@ -662,6 +669,22 @@ class RequestExecutor:
 
             except NoAvailableKeysError:
                 break
+            except TerminalRequestError as terminal:
+                # Non-rotatable error (e.g. 404 model not found) — stop immediately.
+                # Record in accumulator for a clean error response, then bail out.
+                original = terminal.original
+                classified = classify_error(original, provider)
+                lib_logger.error(
+                    f"Non-rotatable error for {model} ({classified.error_type}, "
+                    f"HTTP {classified.status_code}): {str(original)[:200]} — skipping rotation"
+                )
+                # Build an immediate error response
+                from ..error_handler import RequestErrorAccumulator as _RqErrAcc
+                acc = _RqErrAcc()
+                acc.model = model
+                acc.provider = provider
+                acc.record_error("(terminal)", classified, str(original)[:200])
+                return acc.build_client_error_response()
 
         # All credentials exhausted
         error_accumulator.timeout_occurred = time.time() >= deadline
@@ -1000,12 +1023,17 @@ class RequestExecutor:
 
                                     if not should_rotate_on_error(classified):
                                         cred_context.mark_failure(classified)
-                                        raise
+                                        # Raise as TerminalRequestError so it escapes
+                                        # the `except Exception: pass` cleanup block.
+                                        raise TerminalRequestError(e)
 
                                     cred_context.mark_failure(classified)
                                     break  # Rotate
 
                         except PreRequestCallbackError:
+                            raise
+                        except TerminalRequestError:
+                            # Non-rotatable error — propagate immediately.
                             raise
                         except Exception:
                             # Let context manager handle cleanup
@@ -1023,6 +1051,28 @@ class RequestExecutor:
         except NoAvailableKeysError as e:
             lib_logger.error(f"No keys available: {e}")
             error_data = {"error": {"message": str(e), "type": "proxy_busy"}}
+            yield f"data: {json.dumps(error_data)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        except TerminalRequestError as terminal:
+            # Non-rotatable error (e.g. 404 model not found) — stop immediately.
+            original = terminal.original
+            classified = classify_error(original, provider)
+            lib_logger.error(
+                f"Non-rotatable error for {model} ({classified.error_type}, "
+                f"HTTP {classified.status_code}): {str(original)[:200]} — skipping rotation"
+            )
+            error_data = {
+                "error": {
+                    "message": (
+                        f"Model not available: {str(original)[:300]}"
+                        if classified.status_code == 404
+                        else f"Request error ({classified.error_type}): {str(original)[:300]}"
+                    ),
+                    "type": "model_not_available" if classified.status_code == 404 else classified.error_type,
+                    "details": {"model": model, "status_code": classified.status_code},
+                }
+            }
             yield f"data: {json.dumps(error_data)}\n\n"
             yield "data: [DONE]\n\n"
 

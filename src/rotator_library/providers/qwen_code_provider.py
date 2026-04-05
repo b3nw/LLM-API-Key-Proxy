@@ -46,7 +46,11 @@ SUPPORTED_PARAMS = {
     "stop",
     "seed",
     "response_format",
+    "metadata",
 }
+
+# Default DashScope base URL (used by upstream qwen-code when resource_url is not set)
+DEFAULT_DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 
 class QwenCodeProvider(QwenAuthBase, ProviderInterface):
@@ -118,7 +122,7 @@ class QwenCodeProvider(QwenAuthBase, ProviderInterface):
                 await self.initialize_token(credential)
 
             api_base, access_token = await self.get_api_details(credential)
-            models_url = f"{api_base.rstrip('/')}/v1/models"
+            models_url = f"{api_base.rstrip('/')}/models"
 
             response = await client.get(
                 models_url, headers={"Authorization": f"Bearer {access_token}"}
@@ -606,12 +610,13 @@ class QwenCodeProvider(QwenAuthBase, ProviderInterface):
                 "Authorization": f"Bearer {access_token}",
                 "Content-Type": "application/json",
                 "Accept": "text/event-stream",
-                "User-Agent": "google-api-nodejs-client/9.15.1",
-                "X-Goog-Api-Client": "gl-node/22.17.0",
-                "Client-Metadata": "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI",
+                "User-Agent": "QwenCode/1.0.0 (linux; x64)",
+                "X-DashScope-CacheControl": "enable",
+                "X-DashScope-UserAgent": "QwenCode/1.0.0 (linux; x64)",
+                "X-DashScope-AuthType": "qwen-oauth",
             }
 
-            url = f"{api_base.rstrip('/')}/v1/chat/completions"
+            url = f"{api_base.rstrip('/')}/chat/completions"
 
             # Log request to dedicated file
             file_logger.log_request(payload)

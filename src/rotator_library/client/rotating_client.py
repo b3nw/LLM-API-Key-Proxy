@@ -42,6 +42,7 @@ from .models import ModelResolver
 from .transforms import ProviderTransforms
 from .executor import RequestExecutor
 from .anthropic import AnthropicHandler
+from .cross_provider_executor import CrossProviderExecutor
 
 
 # Import providers and other dependencies
@@ -56,6 +57,7 @@ from ..utils.paths import get_default_root, get_logs_dir, get_oauth_dir
 from ..utils.suppress_litellm_warnings import suppress_litellm_serialization_warnings
 
 from ..model_latest_registry import ModelLatestRegistry
+from ..model_alias_registry import ModelAliasRegistry
 from ..failure_logger import configure_failure_logger
 
 # Import new usage package
@@ -314,6 +316,13 @@ class RotatingClient:
         if self._latest_registry.has_rules():
             self._latest_registry.set_pricing_resolver(self._pricing_resolver_callback)
 
+        # Initialize cross-provider model alias registry
+        self._alias_registry = ModelAliasRegistry()
+        self._cross_provider_executor = CrossProviderExecutor(
+            client=self,
+            alias_registry=self._alias_registry,
+        )
+
         # Initialize Anthropic compatibility handler
         self._anthropic_handler = AnthropicHandler(self)
 
@@ -393,13 +402,34 @@ class RotatingClient:
 
         Routes to the provider specified in the provider/model format.
 
+        Supports two routing modes:
+        1. provider/model format: routed directly to the specified provider
+        2. unprefixed model name: if it matches a registered alias, routed
+           across multiple providers via CrossProviderExecutor
+
         Returns:
             Response object or async generator for streaming
         """
         model = kwargs.get("model", "")
         provider = model.split("/")[0] if "/" in model else ""
 
+        # Check if this is an unprefixed alias model
         if not provider or provider not in self.all_credentials:
+            # Try cross-provider alias resolution
+            alias_targets = self._alias_registry.resolve(model)
+            if alias_targets:
+                lib_logger.info(
+                    f"Model '{model}' matched alias → routing across "
+                    f"{len(alias_targets)} providers"
+                )
+                return await self._cross_provider_executor.execute(
+                    canonical_model=model,
+                    targets=alias_targets,
+                    request=request,
+                    pre_request_callback=pre_request_callback,
+                    **kwargs,
+                )
+
             raise ValueError(
                 f"Invalid model format or no credentials for provider: {model}"
             )
@@ -582,6 +612,7 @@ class RotatingClient:
 
             stats = await manager.get_stats_for_endpoint()
 
+
             # Filter out stale quota groups that no longer exist in the provider's
             # current model_quota_groups (e.g. after a group rename like
             # firmware_global → credits($))
@@ -600,6 +631,7 @@ class RotatingClient:
                     for cred_data in stats.get("credentials", {}).values():
                         for g in stale_groups:
                             cred_data.get("group_usage", {}).pop(g, None)
+
 
             # Skip providers with no activity AND no quota data
             # (filters out invalid/unused providers, but keeps quota-tracked providers visible)
@@ -754,8 +786,6 @@ class RotatingClient:
         """Get all new usage managers."""
         return self._usage_managers
 
-
-
     @property
     def latest_registry(self) -> "ModelLatestRegistry":
         """Get the smart 'latest' model alias registry."""
@@ -829,6 +859,11 @@ class RotatingClient:
             pass
 
         return None
+
+    @property
+    def alias_registry(self) -> "ModelAliasRegistry":
+        """Get the model alias registry for cross-provider routing."""
+        return self._alias_registry
 
     def _apply_usage_reset_config(
         self,

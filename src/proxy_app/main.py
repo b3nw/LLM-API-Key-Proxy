@@ -1277,7 +1277,24 @@ async def list_models(
     Query Parameters:
         enriched: If True (default), returns detailed model info with pricing and capabilities.
                   If False, returns minimal OpenAI-compatible response.
+
+    Codex CLI sends ``client_version`` as a query parameter and deserializes
+    the response as ``{"models": [...]}``.  When we detect that parameter we
+    return the upstream models.json catalog verbatim so the CLI's model
+    picker/refresh works without warnings.
     """
+    # Codex CLI compat: return upstream {"models": [...]} catalog when
+    # the request carries a client_version query param (Codex-specific).
+    client_version = request.query_params.get("client_version")
+    if client_version is not None:
+        try:
+            from rotator_library.providers.codex_provider import get_raw_models_catalog
+            raw_catalog = get_raw_models_catalog()
+            if raw_catalog is not None:
+                return {"models": raw_catalog}
+        except ImportError:
+            pass
+
     model_ids = await client.get_all_available_models(grouped=False)
 
     if enriched and hasattr(request.app.state, "model_info_service"):

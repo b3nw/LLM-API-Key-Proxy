@@ -13,7 +13,7 @@ import re
 import sys
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import httpx
 from rich.console import Console
@@ -113,7 +113,7 @@ def _fmt_dollars(cents: Optional[int]) -> str:
     return f"${cents / 100:.2f}"
 
 
-def _fmt_compact(value: Optional[int]) -> str:
+def _fmt_compact(value: Optional[Union[int, float]]) -> str:
     """Format a large number compactly for quota display.
 
     Examples: 59796630 → '59.8M', 60000000 → '60M', 5000 → '5000'
@@ -129,7 +129,9 @@ def _fmt_compact(value: Optional[int]) -> str:
         return s.replace(".0M", "M")
     if value >= 100_000:
         return f"{value / 1_000:.0f}k"
-    return str(value)
+    
+    # For small values, round to nearest integer to handle 0.0001 hack gracefully
+    return str(int(round(value)))
 
 
 def format_time_ago(timestamp: Optional[float]) -> str:
@@ -343,7 +345,7 @@ def get_credential_stats(
     cache_pct = round(input_cached / input_total * 100, 1) if input_total > 0 else 0
 
     return {
-        "requests": stats_source.get("request_count", 0),
+        "requests": int(round(stats_source.get("request_count", 0))),
         "last_used_ts": stats_source.get("last_used_at"),
         "approx_cost": stats_source.get("approx_cost"),
         "tokens": {

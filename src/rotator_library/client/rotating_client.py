@@ -45,6 +45,7 @@ from .usage_managers import UsageManagerRegistry
 from .request_builder import RequestContextBuilder
 from .quota import QuotaService
 from ..session_tracking import SessionTracker
+from .cross_provider_executor import CrossProviderExecutor
 
 
 # Import providers and other dependencies
@@ -58,6 +59,8 @@ from ..utils.paths import get_default_root, get_logs_dir, get_oauth_dir
 from ..utils.suppress_litellm_warnings import suppress_litellm_serialization_warnings
 
 from ..model_latest_registry import ModelLatestRegistry
+from ..model_alias_registry import ModelAliasRegistry
+from ..model_fallback_registry import ModelFallbackRegistry
 from ..failure_logger import configure_failure_logger
 
 # Import new usage package
@@ -334,6 +337,16 @@ class RotatingClient:
         if self._latest_registry.has_rules():
             self._latest_registry.set_pricing_resolver(self._pricing_resolver_callback)
 
+        # Initialize cross-provider model alias registry
+        self._alias_registry = ModelAliasRegistry()
+        self._cross_provider_executor = CrossProviderExecutor(
+            client=self,
+            alias_registry=self._alias_registry,
+        )
+
+        # Initialize model fallback registry for per-model provider spillover
+        self._fallback_registry = ModelFallbackRegistry()
+
         # Initialize Anthropic compatibility handler
         self._anthropic_handler = AnthropicHandler(self)
 
@@ -549,16 +562,92 @@ class RotatingClient:
             classifier, provider=provider, include_secrets=include_secrets
         )
 
+    _NON_FALLBACK_ERROR_CODES = frozenset({
+        "context_window_exceeded",
+        "invalid_request",
+        "authentication",
+        "forbidden",
+    })
+
     async def acompletion(
         self,
         request: Optional[Any] = None,
         pre_request_callback: Optional[callable] = None,
         **kwargs,
     ) -> Union[Any, AsyncGenerator[str, None]]:
+        model = kwargs.pop("model", "")
+        provider = model.split("/")[0] if "/" in model else ""
+
+        if not provider:
+            alias_targets = self._alias_registry.resolve(model)
+            if alias_targets:
+                lib_logger.info(
+                    f"Model '{model}' matched alias → routing across "
+                    f"{len(alias_targets)} providers"
+                )
+                return await self._cross_provider_executor.execute(
+                    canonical_model=model,
+                    targets=alias_targets,
+                    request=request,
+                    pre_request_callback=pre_request_callback,
+                    **kwargs,
+                )
+
+            raise ValueError(
+                f"Invalid model format or no credentials for provider: {model}"
+            )
+
+        return await self._execute_with_fallback(
+            model, provider, request, pre_request_callback, **kwargs,
+        )
+
+    async def _execute_with_fallback(
+        self,
+        model: str,
+        provider: str,
+        request: Optional[Any],
+        pre_request_callback: Optional[callable],
+        **kwargs,
+    ) -> Union[Any, AsyncGenerator[str, None]]:
+        from ..core.errors import ProxyExhaustionError
+
+        kwargs["model"] = model
         context = await self._request_builder.build_completion_context(
             request, pre_request_callback, kwargs
         )
-        return await self._executor.execute(context)
+
+        try:
+            return await self._executor.execute(context)
+        except ProxyExhaustionError as primary_error:
+            if primary_error.dominant_code in self._NON_FALLBACK_ERROR_CODES:
+                raise
+
+            model_name = model.split("/", 1)[1] if "/" in model else model
+
+            fallback_targets = self._fallback_registry.resolve(model_name)
+            if not fallback_targets:
+                raise
+
+            fallback_targets = [
+                t for t in fallback_targets if t.provider != provider
+            ]
+            if not fallback_targets:
+                raise
+
+            lib_logger.info(
+                f"Primary provider '{provider}' exhausted for '{model_name}' "
+                f"({primary_error.dominant_code}). Falling back to "
+                f"{len(fallback_targets)} alternative provider(s): "
+                f"{', '.join(t.provider for t in fallback_targets)}"
+            )
+
+            return await self._cross_provider_executor.execute(
+                canonical_model=model_name,
+                targets=fallback_targets,
+                request=request,
+                pre_request_callback=pre_request_callback,
+                **kwargs,
+            )
 
     async def aembedding(
         self,
@@ -727,8 +816,6 @@ class RotatingClient:
         """Get all new usage managers."""
         return self._usage_registry.managers
 
-
-
     @property
     def latest_registry(self) -> "ModelLatestRegistry":
         """Get the smart 'latest' model alias registry."""
@@ -802,6 +889,16 @@ class RotatingClient:
             pass
 
         return None
+
+    @property
+    def alias_registry(self) -> "ModelAliasRegistry":
+        """Get the model alias registry for cross-provider routing."""
+        return self._alias_registry
+
+    @property
+    def fallback_registry(self) -> "ModelFallbackRegistry":
+        """Get the model fallback registry for provider spillover."""
+        return self._fallback_registry
 
     def _apply_usage_reset_config(
         self,

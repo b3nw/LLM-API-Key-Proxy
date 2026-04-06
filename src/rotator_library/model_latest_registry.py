@@ -129,6 +129,13 @@ class ModelLatestRegistry:
             try:
                 rule = self._parse_rule(alias_name, value)
                 if rule:
+                    # Auto-strip redundant provider prefix from alias name
+                    # e.g., MODEL_LATEST_CHUTES_GLM_LATEST with provider=chutes
+                    # produces alias "chutes-glm-latest" → strip to "glm-latest"
+                    # so virtual model is "chutes/glm-latest" not "chutes/chutes-glm-latest"
+                    provider_prefix = f"{rule.provider}-"
+                    if rule.alias_name.startswith(provider_prefix):
+                        rule.alias_name = rule.alias_name[len(provider_prefix):]
                     lookup_key = rule.virtual_model
                     self._rules[lookup_key] = rule
                     lib_logger.info(

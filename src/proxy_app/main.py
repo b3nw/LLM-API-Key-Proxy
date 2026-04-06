@@ -969,6 +969,15 @@ async def chat_completions(
 
         # Apply model alias rewriting (transparent redirect for unavailable models)
         if "model" in request_data:
+            # First: resolve smart "latest" aliases (dynamic, uses live model cache)
+            resolved = client.resolve_latest(request_data["model"])
+            if resolved:
+                logging.info(
+                    f"Latest alias: {request_data['model']} → {resolved}"
+                )
+                request_data["model"] = resolved
+
+            # Then: apply static model alias rewriting
             request_data["model"] = apply_model_alias(request_data["model"])
 
         # Extract and log specific reasoning parameters for monitoring.
@@ -1083,6 +1092,13 @@ async def anthropic_messages(
     try:
         # Apply model alias rewriting (transparent redirect for unavailable models)
         if body.model:
+            # First: resolve smart "latest" aliases (dynamic, uses live model cache)
+            resolved = client.resolve_latest(body.model)
+            if resolved:
+                logging.info(f"Latest alias: {body.model} → {resolved}")
+                body.model = resolved
+
+            # Then: apply static model alias rewriting
             rewritten = apply_model_alias(body.model)
             if rewritten != body.model:
                 body.model = rewritten
@@ -1334,6 +1350,11 @@ async def list_models(
     if alias_models:
         model_ids = list(model_ids) + alias_models
 
+    # Append smart "latest" virtual model names
+    latest_models = client.latest_registry.get_virtual_models()
+    if latest_models:
+        model_ids = list(model_ids) + latest_models
+
     if enriched and hasattr(request.app.state, "model_info_service"):
         model_info_service = request.app.state.model_info_service
         if model_info_service.is_ready:
@@ -1401,6 +1422,18 @@ async def list_providers(_=Depends(verify_api_key)):
     Returns a list of all available providers.
     """
     return list(PROVIDER_PLUGINS.keys())
+
+
+@app.get("/v1/admin/latest-aliases")
+async def get_latest_aliases(
+    client: RotatingClient = Depends(get_rotating_client),
+    _=Depends(verify_api_key),
+):
+    """
+    Debug endpoint showing all configured 'latest' model alias rules,
+    their current resolutions, and matched candidates.
+    """
+    return client.latest_registry.get_diagnostics(client._model_list_cache)
 
 
 @app.get("/v1/quota-stats")

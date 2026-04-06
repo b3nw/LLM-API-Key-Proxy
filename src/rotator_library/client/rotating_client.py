@@ -55,6 +55,7 @@ from ..provider_config import ProviderConfig as LiteLLMProviderConfig
 from ..utils.paths import get_default_root, get_logs_dir, get_oauth_dir
 from ..utils.suppress_litellm_warnings import suppress_litellm_serialization_warnings
 from ..model_alias_registry import ModelAliasRegistry
+from ..model_latest_registry import ModelLatestRegistry
 from ..failure_logger import configure_failure_logger
 
 # Import new usage package
@@ -266,6 +267,11 @@ class RotatingClient:
             client=self,
             alias_registry=self._alias_registry,
         )
+
+        # Initialize smart "latest" model alias registry
+        self._latest_registry = ModelLatestRegistry()
+        if self._latest_registry.has_rules():
+            self._latest_registry.set_pricing_resolver(self._pricing_resolver_callback)
 
         # Initialize Anthropic compatibility handler
         self._anthropic_handler = AnthropicHandler(self)
@@ -703,6 +709,51 @@ class RotatingClient:
     def alias_registry(self) -> "ModelAliasRegistry":
         """Get the model alias registry for cross-provider routing."""
         return self._alias_registry
+
+    @property
+    def latest_registry(self) -> "ModelLatestRegistry":
+        """Get the smart 'latest' model alias registry."""
+        return self._latest_registry
+
+    def resolve_latest(self, model: str) -> Optional[str]:
+        """Try to resolve a 'latest' model alias using cached model lists."""
+        if not self._latest_registry.has_rules():
+            return None
+        return self._latest_registry.resolve(model, self._model_list_cache)
+
+    def _pricing_resolver_callback(
+        self, provider: str, model_id: str
+    ) -> Optional[float]:
+        """
+        Pricing resolver callback for cost-based tiebreaking in latest aliases.
+
+        Checks provider-specific pricing cache first, then falls back to the
+        global ModelRegistry (ModelInfoService).
+        """
+        # 1. Try provider-specific pricing cache (e.g., ChutesProvider._pricing_cache)
+        plugin = self._provider_instances.get(provider)
+        if plugin and hasattr(plugin, "_pricing_cache"):
+            # Strip org prefix for cache lookup
+            bare_name = model_id.rsplit("/", 1)[-1] if "/" in model_id else model_id
+            pricing = plugin._pricing_cache.get(bare_name) or plugin._pricing_cache.get(
+                model_id
+            )
+            if pricing:
+                return pricing.get("input", 0.0)
+
+        # 2. Fall back to global ModelRegistry (ModelInfoService)
+        try:
+            from ..model_info_service import get_model_info_service
+
+            registry = get_model_info_service()
+            if registry.is_ready:
+                pricing = registry.get_pricing(f"{provider}/{model_id}")
+                if pricing:
+                    return pricing.get("input_cost_per_token")
+        except Exception:
+            pass
+
+        return None
 
     def _apply_usage_reset_config(
         self,

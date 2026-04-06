@@ -535,18 +535,7 @@ class CodexQuotaTracker:
                         force=True,
                         apply_exhaustion=snapshot.primary.is_exhausted,
                     )
-                    # Also push to codex-global so the executor's quota display
-                    # can find the limit when looking up the model's quota group
-                    await self._usage_manager.update_quota_baseline(
-                        accessor=credential_path,
-                        model=f"{provider_prefix}/_global_quota",
-                        quota_max_requests=100,
-                        quota_reset_ts=snapshot.primary.reset_at,
-                        quota_used=quota_used,
-                        quota_group="codex-global",
-                        force=True,
-                        apply_exhaustion=False,  # Exhaustion handled by 5h-limit
-                    )
+
 
                 if snapshot.secondary:
                     used_pct = snapshot.secondary.used_percent
@@ -871,18 +860,7 @@ class CodexQuotaTracker:
                         force=force,
                         apply_exhaustion=is_exhausted and is_initial_fetch,
                     )
-                    # Also store in codex-global so the executor's quota display
-                    # can find the limit when looking up the model's quota group
-                    await usage_manager.update_quota_baseline(
-                        accessor=cred_path,
-                        model=f"{provider_prefix}/_global_quota",
-                        quota_max_requests=100,
-                        quota_reset_ts=primary_reset,
-                        quota_used=int(primary_used_pct),
-                        quota_group="codex-global",
-                        force=force,
-                        apply_exhaustion=False,  # Exhaustion handled by 5h-limit
-                    )
+
                     stored_count += 1
                     lib_logger.debug(
                         f"Stored Codex 5h baseline for {short_cred}: "

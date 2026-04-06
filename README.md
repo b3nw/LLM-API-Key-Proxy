@@ -14,7 +14,7 @@ A personal fork of [Mirrowel/LLM-API-Key-Proxy](https://github.com/Mirrowel/LLM-
 |----------|-------------|
 | **Anthropic** | Full Anthropic API provider with OAuth support, streaming null handling, and dedicated quota tracking |
 | **Codex** | OpenAI Codex/Responses API with dynamic model discovery, OAuth exports, and quota tracking |
-| **Cursor** | Cursor IDE API with quota monitoring integration and dedicated sidecar proxy |
+
 | **Lightning AI** | Dollar-based credit quota tracking with date-aware billing cycle parsing |
 | **NanoGPT** | Model source configuration, reasoning normalization, request tracking, and native Anthropic endpoint routing for Claude models |
 | **ZenMux** | OpenAI-compatible provider with custom header support for free models |
@@ -52,7 +52,7 @@ A personal fork of [Mirrowel/LLM-API-Key-Proxy](https://github.com/Mirrowel/LLM-
 ### Tooling
 
 - **Transaction Log Viewer TUI** — Browse and inspect API request/response logs with compact displays and detail views
-- **Cursor Sidecar** — Standalone OpenAI-compatible proxy for Cursor API (`cursor-sidecar/`)
+
 - **Embedding Support** — Dispatch embeddings to appropriate providers
 - **Settings Tool** — TUI-based interactive settings management
 
@@ -79,8 +79,6 @@ See upstream documentation for base configuration. Fork-specific variables:
 # Codex (OAuth — use credential_tool for setup)
 # Credentials stored in oauth_creds/codex_oauth_1.json
 
-# Cursor
-CURSOR_API_KEY_1=your-cursor-key
 
 # Lightning AI
 LIGHTNING_AI_API_KEY_1=your-lightning-key

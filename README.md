@@ -19,7 +19,6 @@ A personal fork of [Mirrowel/LLM-API-Key-Proxy](https://github.com/Mirrowel/LLM-
 | **NanoGPT** | Model source configuration, reasoning normalization, request tracking, and native Anthropic endpoint routing for Claude models |
 | **ZenMux** | OpenAI-compatible provider with custom header support for free models |
 | **Firmware** | Credit balance tracking with dollar-amount quota displays |
-| **Gemini A2A** | Experimental Gemini Agent-to-Agent protocol provider with sidecar architecture |
 
 ### Model Routing & Aliases
 
@@ -103,8 +102,6 @@ FIRMWARE_API_KEY_1=your-firmware-key
 DEDALUSLABS_API_BASE=https://api.dedaluslabs.ai/v1
 DEDALUSLABS_API_KEY_1=dsk-live-xxxxx
 
-# Gemini A2A (experimental — requires sidecar)
-# See gemini_a2a_provider.py for sidecar configuration
 
 # === Model Routing ===
 

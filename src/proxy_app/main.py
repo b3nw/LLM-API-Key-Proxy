@@ -1360,6 +1360,31 @@ async def list_models(
         if model_info_service.is_ready:
             # Return enriched model data
             enriched_data = model_info_service.enrich_model_list(model_ids)
+
+            # For "latest" virtual models, inherit metadata from the
+            # model they currently resolve to (pricing, context window, etc.)
+            if latest_models:
+                # Build a lookup from enriched data for resolved targets
+                enriched_by_id = {e["id"]: e for e in enriched_data}
+
+                for entry in enriched_data:
+                    if entry["id"] in latest_models:
+                        resolved = client.resolve_latest(entry["id"])
+                        if resolved and resolved in enriched_by_id:
+                            target = enriched_by_id[resolved]
+                            # Copy metadata fields, keep our virtual ID
+                            for key in (
+                                "context_window",
+                                "pricing",
+                                "capabilities",
+                                "top_provider",
+                                "architecture",
+                            ):
+                                if key in target:
+                                    entry[key] = target[key]
+                            # Tag as a latest-alias so clients know
+                            entry["latest_alias_for"] = resolved
+
             return {"object": "list", "data": enriched_data}
 
     # Fallback to basic model cards

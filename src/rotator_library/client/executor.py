@@ -55,6 +55,7 @@ from ..core.errors import (
 from ..core.constants import (
     DEFAULT_MAX_RETRIES,
     DEFAULT_SMALL_COOLDOWN_RETRY_THRESHOLD,
+    ENV_PREFIX_MAX_RETRIES,
 )
 from ..request_sanitizer import sanitize_request_payload
 from ..transaction_logger import TransactionLogger
@@ -130,8 +131,56 @@ class RequestExecutor:
         self._abort_on_callback_error = abort_on_callback_error
         self._litellm_provider_params = litellm_provider_params or {}
         self._litellm_logger_fn = litellm_logger_fn
+        # Per-provider retry overrides (cached on first lookup)
+        self._provider_max_retries: Dict[str, int] = {}
+        self._provider_retries_loaded = False
         # StreamingHandler no longer needs usage_manager - we pass cred_context directly
         self._streaming_handler = StreamingHandler()
+
+    def _get_max_retries(self, provider: str) -> int:
+        """Get max retries for a provider.
+
+        Resolution order:
+        1. MAX_RETRIES_{PROVIDER} env var (e.g. MAX_RETRIES_CHUTES=5)
+        2. Global self._max_retries (from constructor / DEFAULT_MAX_RETRIES)
+
+        Results are cached after first lookup.
+
+        Args:
+            provider: Provider name
+
+        Returns:
+            Max retry count for this provider
+        """
+        if provider in self._provider_max_retries:
+            return self._provider_max_retries[provider]
+
+        provider_upper = provider.upper()
+        env_key = f"{ENV_PREFIX_MAX_RETRIES}{provider_upper}"
+        env_val = os.environ.get(env_key)
+
+        if env_val is not None:
+            try:
+                retries = int(env_val)
+                if retries < 1:
+                    lib_logger.warning(
+                        f"Invalid {env_key}='{env_val}'. Must be >= 1. Using default ({self._max_retries})."
+                    )
+                    retries = self._max_retries
+                else:
+                    lib_logger.info(
+                        f"Per-provider max retries: {provider} = {retries} (from {env_key})"
+                    )
+            except ValueError:
+                lib_logger.warning(
+                    f"Invalid {env_key}='{env_val}'. Must be integer. Using default ({self._max_retries})."
+                )
+                retries = self._max_retries
+        else:
+            retries = self._max_retries
+
+        self._provider_max_retries[provider] = retries
+        return retries
 
     def _get_plugin_instance(self, provider: str) -> Optional[Any]:
         """Get or create a plugin instance for a provider."""
@@ -505,6 +554,7 @@ class RequestExecutor:
         error_accumulator.provider = provider
 
         retry_state = RetryState()
+        max_retries = self._get_max_retries(provider)
         last_exception: Optional[Exception] = None
 
         while time.time() < deadline:
@@ -554,11 +604,11 @@ class RequestExecutor:
                         plugin = self._get_plugin_instance(provider)
 
                         # Execute request with retries
-                        for attempt in range(self._max_retries):
+                        for attempt in range(max_retries):
                             try:
                                 lib_logger.info(
                                     f"Attempting call with credential {mask_credential(cred)} "
-                                    f"(Attempt {attempt + 1}/{self._max_retries})"
+                                    f"(Attempt {attempt + 1}/{max_retries})"
                                 )
                                 # Pre-request callback
                                 await self._run_pre_request_callback(context, kwargs)
@@ -634,6 +684,7 @@ class RequestExecutor:
                                     model,
                                     provider,
                                     attempt,
+                                    max_retries,
                                     error_accumulator,
                                     retry_state,
                                     request_headers,
@@ -728,6 +779,7 @@ class RequestExecutor:
         error_accumulator.provider = provider
 
         retry_state = RetryState()
+        max_retries = self._get_max_retries(provider)
         last_exception: Optional[Exception] = None
 
         try:
@@ -794,11 +846,11 @@ class RequestExecutor:
                             )
 
                             # Execute request with retries
-                            for attempt in range(self._max_retries):
+                            for attempt in range(max_retries):
                                 try:
                                     lib_logger.info(
                                         f"Attempting stream with credential {mask_credential(cred)} "
-                                        f"(Attempt {attempt + 1}/{self._max_retries})"
+                                        f"(Attempt {attempt + 1}/{max_retries})"
                                     )
                                     # Pre-request callback
                                     await self._run_pre_request_callback(
@@ -945,7 +997,7 @@ class RequestExecutor:
                                         and 0
                                         < classified.retry_after
                                         < small_cooldown_threshold
-                                        and attempt < self._max_retries - 1
+                                        and attempt < max_retries - 1
                                     ):
                                         remaining = deadline - time.time()
                                         if classified.retry_after <= remaining:
@@ -954,6 +1006,24 @@ class RequestExecutor:
                                                 f"(small cooldown {classified.retry_after}s < {small_cooldown_threshold}s threshold)"
                                             )
                                             await asyncio.sleep(classified.retry_after)
+                                            continue  # Retry same key
+
+                                    # For rate_limit (429) without retry_after, retry with
+                                    # exponential backoff instead of rotating — transient
+                                    # capacity errors are better handled by backoff,
+                                    # especially with few credentials.
+                                    if (
+                                        classified.error_type == "rate_limit"
+                                        and attempt < max_retries - 1
+                                    ):
+                                        wait_time = (2 ** attempt) + random.uniform(0, 1)
+                                        remaining = deadline - time.time()
+                                        if wait_time <= remaining:
+                                            lib_logger.info(
+                                                f"Retrying {mask_credential(cred)} in {wait_time:.1f}s "
+                                                f"(rate_limit backoff, attempt {attempt + 1}/{max_retries})"
+                                            )
+                                            await asyncio.sleep(wait_time)
                                             continue  # Retry same key
 
                                     cred_context.mark_failure(classified)
@@ -974,7 +1044,7 @@ class RequestExecutor:
                                         request_headers=request_headers,
                                     )
 
-                                    if attempt >= self._max_retries - 1:
+                                    if attempt >= max_retries - 1:
                                         error_accumulator.record_error(
                                             cred, classified, str(e)[:150]
                                         )
@@ -1128,6 +1198,7 @@ class RequestExecutor:
         model: str,
         provider: str,
         attempt: int,
+        max_retries: int,
         error_accumulator: RequestErrorAccumulator,
         retry_state: RetryState,
         request_headers: Dict[str, Any],
@@ -1192,7 +1263,7 @@ class RequestExecutor:
 
         if (
             should_retry_same_key(classified, small_cooldown_threshold)
-            and attempt < self._max_retries - 1
+            and attempt < max_retries - 1
         ):
             wait_time = classified.retry_after or (2**attempt) + random.uniform(0, 1)
             retry_reason = (

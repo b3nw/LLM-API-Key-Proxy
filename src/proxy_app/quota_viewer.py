@@ -113,12 +113,14 @@ def _fmt_dollars(cents: Optional[int]) -> str:
     return f"${cents / 100:.2f}"
 
 
-def _fmt_compact(value: int) -> str:
+def _fmt_compact(value: Optional[int]) -> str:
     """Format a large number compactly for quota display.
 
     Examples: 59796630 → '59.8M', 60000000 → '60M', 5000 → '5000'
     Only kicks in for values >= 100,000 to avoid changing small quotas.
     """
+    if value is None:
+        return "?"
     if value >= 1_000_000_000:
         s = f"{value / 1_000_000_000:.1f}B"
         return s.replace(".0B", "B")

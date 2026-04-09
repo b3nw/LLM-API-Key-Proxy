@@ -50,6 +50,11 @@ def get_provider_endpoint(provider: str, model_name: str, incoming_path: str) ->
     # Determine the specific action from the incoming path (e.g., 'chat/completions')
     action = incoming_path.split('/v1/', 1)[-1] if '/v1/' in incoming_path else incoming_path
 
+    # Anthropic-format requests (/v1/messages) routed to non-Anthropic providers
+    # are translated to OpenAI format, so the actual call targets /chat/completions
+    if action == "messages" and provider != "anthropic":
+        action = "chat/completions"
+
     # --- Provider-specific endpoint structures ---
     if provider == "gemini":
         if action == "chat/completions":

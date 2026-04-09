@@ -2727,11 +2727,14 @@ class AntigravityProvider(
                     f"Added reasoning_content with cached signature ({len(reasoning_content)} chars)"
                 )
             else:
-                # No cached signature - skip the thinking block
-                # This can happen if context was compressed and signature was lost
-                lib_logger.warning(
-                    f"Skipping reasoning_content - no valid signature found. "
-                    f"This may cause issues if thinking is enabled."
+                # No cached signature - convert thinking to text block instead
+                # The Antigravity API requires signatures on thinking blocks, so we
+                # preserve the content as text rather than losing it entirely.
+                # This handles cases where clients (e.g. OpenClaw) didn't preserve signatures.
+                parts.append({"text": f"[Previous reasoning]: {reasoning_content}"})
+                lib_logger.debug(
+                    f"Converted reasoning_content to text ({len(reasoning_content)} chars) - "
+                    f"no cached signature available"
                 )
         elif (
             self._is_claude(model)

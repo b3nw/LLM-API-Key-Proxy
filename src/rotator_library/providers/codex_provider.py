@@ -749,13 +749,14 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
 
     # Model quota groups - for Codex, these represent time-based rate limit windows
     # rather than model groupings, since all Codex models share the same global limits.
-    # "codex-global" group ensures sequential rotation shares one sticky credential
-    # across all models, since they share the same per-account rate limits.
+    # "codex-global" is ROTATION-ONLY — it groups all models so the executor shares
+    # one sticky credential across all Codex models. No quota data is pushed to it;
+    # actual quota tracking lives in 5h-limit and weekly-limit.
     # NOTE: codex-global is populated dynamically in __init__ to pick up latest models.
     model_quota_groups: QuotaGroupMap = {
         "5h-limit": ["_5h_window"],  # Primary window (5 hour rolling)
         "weekly-limit": ["_weekly_window"],  # Secondary window (weekly)
-        "codex-global": list(AVAILABLE_MODELS),  # Populated at import, refreshed in __init__
+        "codex-global": list(AVAILABLE_MODELS),  # Rotation grouping only (no quota data)
     }
 
     def __init__(self):
@@ -773,7 +774,7 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
         self.model_quota_groups = {
             "5h-limit": ["_5h_window"],
             "weekly-limit": ["_weekly_window"],
-            "codex-global": current_models,
+            "codex-global": current_models,  # Rotation grouping only
         }
 
         # Initialize quota tracker

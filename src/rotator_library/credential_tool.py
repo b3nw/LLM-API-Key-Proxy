@@ -66,6 +66,8 @@ OAUTH_FRIENDLY_NAMES = {
     "qwen_code": "Qwen Code",
     "iflow": "iFlow",
     "antigravity": "Antigravity",
+    "codex": "OpenAI Codex",
+    "anthropic": "Claude / Claude Code (Pro & Max)",
 }
 
 
@@ -269,7 +271,7 @@ def _get_oauth_credentials_summary() -> dict:
         Example: {"gemini_cli": [{"email": "user@example.com", "tier": "free-tier", ...}, ...]}
     """
     provider_factory, _ = _ensure_providers_loaded()
-    oauth_providers = ["gemini_cli", "qwen_code", "iflow", "antigravity"]
+    oauth_providers = provider_factory.get_available_providers()
     oauth_summary = {}
 
     for provider_name in oauth_providers:
@@ -1727,13 +1729,7 @@ async def setup_new_credential(provider_name: str):
         auth_instance = auth_class()
 
         # Build display name for better user experience
-        oauth_friendly_names = {
-            "gemini_cli": "Gemini CLI (OAuth)",
-            "qwen_code": "Qwen Code (OAuth - also supports API keys)",
-            "iflow": "iFlow",
-            "antigravity": "Antigravity (OAuth)",
-        }
-        display_name = oauth_friendly_names.get(
+        display_name = OAUTH_FRIENDLY_NAMES.get(
             provider_name, provider_name.replace("_", " ").title()
         )
 

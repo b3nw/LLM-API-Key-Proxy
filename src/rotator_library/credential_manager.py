@@ -20,6 +20,7 @@ DEFAULT_OAUTH_DIRS = {
     "antigravity": Path.home() / ".antigravity",
     "codex": Path.home() / ".codex",
     "anthropic": Path.home() / ".claude",
+    "copilot": Path.home() / ".copilot",
 }
 
 # OAuth providers that support environment variable-based credentials
@@ -31,6 +32,7 @@ ENV_OAUTH_PROVIDERS = {
     "iflow": "IFLOW",
     "codex": "CODEX",
     "anthropic": "ANTHROPIC_OAUTH",
+    "copilot": "COPILOT",
 }
 
 
@@ -106,6 +108,21 @@ class CredentialManager:
                         if index not in found_indices and self.env_vars[key]:
                             found_indices.add(index)
 
+            # For Copilot provider, check for GITHUB_TOKEN-only credentials
+            # Copilot uses Device Flow: the GitHub OAuth token is the "refresh token",
+            # and the short-lived Copilot API token is derived from it on demand.
+            # Pattern: COPILOT_1_GITHUB_TOKEN, COPILOT_2_GITHUB_TOKEN, etc.
+            if provider == "copilot":
+                github_token_pattern = re.compile(
+                    rf"^{env_prefix}_(\d+)_GITHUB_TOKEN$"
+                )
+                for key in self.env_vars.keys():
+                    match = github_token_pattern.match(key)
+                    if match:
+                        index = match.group(1)
+                        if self.env_vars[key]:
+                            found_indices.add(index)
+
             # Check for legacy single credential (PROVIDER_ACCESS_TOKEN pattern)
             # Only use this if no numbered credentials exist
             if not found_indices:
@@ -124,6 +141,12 @@ class CredentialManager:
                 if not found_indices and provider == "codex":
                     api_key = f"{env_prefix}_API_KEY"
                     if api_key in self.env_vars and self.env_vars[api_key]:
+                        found_indices.add("0")
+
+                # For Copilot, accept legacy single GITHUB_TOKEN format
+                if not found_indices and provider == "copilot":
+                    github_token = f"{env_prefix}_GITHUB_TOKEN"
+                    if github_token in self.env_vars and self.env_vars[github_token]:
                         found_indices.add("0")
 
             if found_indices:

@@ -1000,7 +1000,7 @@ class QuotaViewer:
 
                             display_name_trunc = display_name[: QUOTA_NAME_WIDTH - 1]
                             if _is_dollar_group(group_name):
-                                if total_max == 0:
+                                if total_remaining == total_max:
                                     # Pure balance (no fixed grant) — show just the amount
                                     usage_str = f"{_fmt_dollars(total_remaining)}"
                                     pct_str = ""
@@ -1463,7 +1463,7 @@ class QuotaViewer:
                         )
                     elif limit is not None:
                         if _is_dollar_group(group_name):
-                            if limit == 0:
+                            if remaining_val == limit:
                                 # Pure balance (no fixed grant) — show just the amount
                                 usage_str = f"{_fmt_dollars(remaining_val)}"
                                 pct_str = ""

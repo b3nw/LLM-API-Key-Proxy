@@ -555,6 +555,7 @@ class RotatingClient:
 
             stats = await manager.get_stats_for_endpoint()
 
+
             # Filter out stale quota groups that no longer exist in the provider's
             # current model_quota_groups (e.g. after a group rename like
             # firmware_global → credits($))
@@ -588,6 +589,7 @@ class RotatingClient:
                 continue
 
             providers[provider] = stats
+
 
         summary = {
             "total_providers": len(providers),

@@ -834,6 +834,10 @@ class UsageManager:
         Returns:
             Dict with comprehensive statistics
         """
+        # Determine primary window name for current_period calculations
+        primary_def = self._window_manager.get_primary_definition()
+        primary_window_name = primary_def.name if primary_def else None
+
         stats = {
             "provider": self.provider,
             "credential_count": len(self._active_stable_ids),
@@ -841,19 +845,28 @@ class UsageManager:
             "credentials": {},
         }
 
+        _empty_token_block = lambda: {
+            "input_cached": 0,
+            "input_uncached": 0,
+            "input_cache_pct": 0,
+            "output": 0,
+        }
+
         stats.update(
             {
                 "active_count": 0,
                 "exhausted_count": 0,
                 "total_requests": 0,
-                "tokens": {
-                    "input_cached": 0,
-                    "input_uncached": 0,
-                    "input_cache_pct": 0,
-                    "output": 0,
-                },
+                "tokens": _empty_token_block(),
                 "approx_cost": None,
                 "quota_groups": {},
+                # Current period stats (from primary window)
+                "current_period": {
+                    "total_requests": 0,
+                    "tokens": _empty_token_block(),
+                    "approx_cost": None,
+                    "window_name": primary_window_name,
+                },
             }
         )
 
@@ -928,6 +941,69 @@ class UsageManager:
                 "fair_cycle": {},
             }
 
+            # --- Compute current_period from primary window across all groups ---
+            cp_requests = 0
+            cp_prompt_tokens = 0
+            cp_cache_read = 0
+            cp_output_tokens = 0
+            cp_cost = 0.0
+            cp_last_used_at = None
+            cp_first_used_at = None
+
+            if primary_window_name:
+                # Aggregate primary window data from group_usage (preferred)
+                # or model_usage as fallback
+                seen_groups = set()
+                for group_key, group_stats in state.group_usage.items():
+                    window = self._window_manager.get_active_window(
+                        group_stats.windows, primary_window_name
+                    )
+                    if window:
+                        seen_groups.add(group_key)
+                        cp_requests += window.request_count
+                        cp_prompt_tokens += window.prompt_tokens
+                        cp_cache_read += window.prompt_tokens_cache_read
+                        cp_output_tokens += window.output_tokens
+                        cp_cost += window.approx_cost
+                        if window.last_used_at:
+                            if cp_last_used_at is None or window.last_used_at > cp_last_used_at:
+                                cp_last_used_at = window.last_used_at
+                        if window.first_used_at:
+                            if cp_first_used_at is None or window.first_used_at < cp_first_used_at:
+                                cp_first_used_at = window.first_used_at
+
+                # Also include ungrouped models
+                for model_key, model_stats in state.model_usage.items():
+                    model_group = self._get_model_quota_group(model_key)
+                    if model_group and model_group in seen_groups:
+                        continue  # Already counted via group
+                    window = self._window_manager.get_active_window(
+                        model_stats.windows, primary_window_name
+                    )
+                    if window:
+                        cp_requests += window.request_count
+                        cp_prompt_tokens += window.prompt_tokens
+                        cp_cache_read += window.prompt_tokens_cache_read
+                        cp_output_tokens += window.output_tokens
+                        cp_cost += window.approx_cost
+                        if window.last_used_at:
+                            if cp_last_used_at is None or window.last_used_at > cp_last_used_at:
+                                cp_last_used_at = window.last_used_at
+                        if window.first_used_at:
+                            if cp_first_used_at is None or window.first_used_at < cp_first_used_at:
+                                cp_first_used_at = window.first_used_at
+
+            cred_stats["current_period"] = {
+                "request_count": cp_requests,
+                "prompt_tokens": cp_prompt_tokens,
+                "prompt_tokens_cache_read": cp_cache_read,
+                "output_tokens": cp_output_tokens,
+                "approx_cost": cp_cost,
+                "first_used_at": cp_first_used_at,
+                "last_used_at": cp_last_used_at,
+            }
+
+            # --- Accumulate provider-level totals (global/lifetime) ---
             stats["total_requests"] += state.totals.request_count
             stats["tokens"]["output"] += state.totals.output_tokens
             stats["tokens"]["input_cached"] += state.totals.prompt_tokens_cache_read
@@ -938,6 +1014,15 @@ class UsageManager:
                 stats["approx_cost"] = (
                     stats["approx_cost"] or 0.0
                 ) + state.totals.approx_cost
+
+            # --- Accumulate provider-level current_period ---
+            cp_block = stats["current_period"]
+            cp_block["total_requests"] += cp_requests
+            cp_block["tokens"]["output"] += cp_output_tokens
+            cp_block["tokens"]["input_cached"] += cp_cache_read
+            cp_block["tokens"]["input_uncached"] += cp_prompt_tokens
+            if cp_cost:
+                cp_block["approx_cost"] = (cp_block["approx_cost"] or 0.0) + cp_cost
 
             if status == "active":
                 stats["active_count"] += 1
@@ -1218,6 +1303,15 @@ class UsageManager:
             else 0
         )
 
+        # Compute current_period cache_pct
+        cp_tokens = stats["current_period"]["tokens"]
+        cp_total_input = cp_tokens["input_cached"] + cp_tokens["input_uncached"]
+        cp_tokens["input_cache_pct"] = (
+            round(cp_tokens["input_cached"] / cp_total_input * 100, 1)
+            if cp_total_input > 0
+            else 0
+        )
+
         return stats
 
     def _get_provider_plugin_instance(self) -> Optional[Any]:
@@ -1317,6 +1411,30 @@ class UsageManager:
             return [f"{self.provider}/{m}" for m in models]
 
         return []
+
+    def _get_group_models_from_data(
+        self, state: "CredentialState", group: str
+    ) -> List[str]:
+        """
+        Get models from actual usage data that belong to a quota group.
+
+        Unlike _get_grouped_models which returns a static list from the provider,
+        this method finds models dynamically from actual usage data. This is
+        necessary for providers like Firmware where all models share a quota pool
+        but the provider can't enumerate all possible models upfront.
+
+        Args:
+            state: Credential state containing model usage data
+            group: Group name (e.g., "firmware_global")
+
+        Returns:
+            List of model names from model_usage that belong to the group
+        """
+        return [
+            model
+            for model in state.model_usage
+            if self._get_model_quota_group(model) == group
+        ]
 
     async def save(self, force: bool = False) -> bool:
         """
@@ -1518,6 +1636,47 @@ class UsageManager:
         await self._save_if_needed()
 
         return None
+
+    def get_window_request_count(
+        self,
+        accessor: str,
+        model: str,
+        quota_group: Optional[str] = None,
+    ) -> Optional[int]:
+        """Get the current request count from the primary usage window.
+
+        Used by quota trackers to support dynamic limit learning from
+        observed fraction changes. Returns the raw request_count from
+        the usage window without modifying any state.
+
+        Args:
+            accessor: Credential path/accessor string
+            model: Model name (with provider prefix, e.g., "antigravity/claude-sonnet-4-5")
+            quota_group: Optional quota group name (if quota is tracked at group level)
+
+        Returns:
+            Current request_count from the primary window, or None if not found.
+        """
+        stable_id = self._registry.get_stable_id(accessor, self.provider)
+        state = self._states.get(stable_id)
+        if not state:
+            return None
+
+        normalized_model = self._normalize_model(model)
+        group_key = quota_group or self._get_model_quota_group(normalized_model)
+
+        primary_def = self._window_manager.get_primary_definition()
+        if not primary_def:
+            return None
+
+        if group_key:
+            group_stats = state.get_group_stats(group_key)
+            window = group_stats.windows.get(primary_def.name)
+        else:
+            model_stats = state.get_model_stats(normalized_model)
+            window = model_stats.windows.get(primary_def.name)
+
+        return window.request_count if window else None
 
     # =========================================================================
     # WINDOW CLEANUP
@@ -1806,13 +1965,19 @@ class UsageManager:
         consistent started_at, reset_at, and limit values. All models
         in a quota group share the same timing since they share API quota.
 
+        Uses dynamic model discovery from actual usage data, which is necessary
+        for providers like Firmware where all models share a quota pool but
+        the provider can't enumerate all possible models upfront.
+
         Args:
             state: Credential state containing model stats
             group_key: Quota group name
             group_window: The authoritative group window
             window_name: Name of the window to sync (e.g., "5h")
         """
-        models_in_group = self._get_grouped_models(group_key)
+        # Use dynamic model discovery from actual usage data
+        # This handles providers like Firmware where models can't be enumerated upfront
+        models_in_group = self._get_group_models_from_data(state, group_key)
         for model_name in models_in_group:
             model_stats = state.get_model_stats(model_name, create=False)
             if model_stats:

@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 b3nw
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "unit: Pure logic tests, no I/O, no network (<1s each)",
+    "integration: Component interaction with mocked HTTP",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:litellm",
+    "ignore::UserWarning",
+]

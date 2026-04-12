@@ -972,7 +972,15 @@ async def chat_completions(
 
         # Apply model alias rewriting (transparent redirect for unavailable models)
         if "model" in request_data:
-            request_data["model"] = apply_model_alias(request_data["model"])
+            # First: resolve smart "latest" aliases (dynamic, uses live model cache)
+            resolved = await client.resolve_latest_async(request_data["model"])
+            if resolved:
+                logging.info(
+                    f"Latest alias: {request_data['model']} \u2192 {resolved}"
+                )
+                request_data["model"] = resolved
+            else:
+                request_data["model"] = apply_model_alias(request_data["model"])
 
         # Extract and log specific reasoning parameters for monitoring.
         model = request_data.get("model")
@@ -1086,9 +1094,15 @@ async def anthropic_messages(
     try:
         # Apply model alias rewriting (transparent redirect for unavailable models)
         if body.model:
-            rewritten = apply_model_alias(body.model)
-            if rewritten != body.model:
-                body.model = rewritten
+            # First: resolve smart "latest" aliases (dynamic, uses live model cache)
+            resolved = await client.resolve_latest_async(body.model)
+            if resolved:
+                logging.info(f"Latest alias: {body.model} \u2192 {resolved}")
+                body.model = resolved
+            else:
+                rewritten = apply_model_alias(body.model)
+                if rewritten != body.model:
+                    body.model = rewritten
 
         # Log the request to console
         log_request_to_console(

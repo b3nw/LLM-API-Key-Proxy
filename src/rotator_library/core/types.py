@@ -66,6 +66,7 @@ class RequestContext:
     request: Optional[Any] = None  # FastAPI Request object
     pre_request_callback: Optional[Callable] = None
     transaction_logger: Optional[Any] = None
+    request_type: Optional[str] = None  # "embedding" or None for completions
 
 
 @dataclass

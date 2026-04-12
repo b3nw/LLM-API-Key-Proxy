@@ -25,3 +25,5 @@ customtkinter
 
 # For building the executable
 pyinstaller
+pytest-mock
+pytest-asyncio

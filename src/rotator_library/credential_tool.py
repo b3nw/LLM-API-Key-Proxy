@@ -1836,7 +1836,7 @@ async def setup_new_credential(provider_name: str):
                 success_text.append(
                     f"\nWorkspace: {' '.join(workspace_parts)}"
                 )
-            if result.account_id:
+            if hasattr(result, "account_id") and result.account_id:
                 success_text.append(
                     f"\nAccount ID: {result.account_id}"
                 )

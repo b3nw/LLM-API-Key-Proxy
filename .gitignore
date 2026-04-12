@@ -142,6 +142,10 @@ tests/*
 !tests/test_classifier_scoped_routing.py
 !tests/test_session_tracking.py
 !tests/test_selection_engine.py
+!tests/test_usage_reconciliation.py
+!tests/test_suppress_litellm_warnings.py
+!tests/test_umans_quota_tracker.py
+!tests/test_usage_manager_provider_instance.py
 docs/ignored/
 .env
 .agent/
@@ -154,3 +158,7 @@ webui/dist/
 # Command Code session files
 command_code_cookies.json
 
+!tests/test_responses_compat.py
+!tests/test_fair_cycle.py
+!tests/test_anthropic_models_dev.py
+!tests/test_anthropic_oauth_headers.py

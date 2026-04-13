@@ -14,9 +14,7 @@ from typing import (
     Callable,
     Dict,
     List,
-    Literal,
     Optional,
-    Set,
     Tuple,
     Union,
 )
@@ -80,6 +78,7 @@ class ProcessedChunk:
     usage: Optional[Dict[str, Any]] = None
     finish_reason: Optional[str] = None
     has_tool_calls: bool = False
+    in_thought_block: bool = False
 
 
 # =============================================================================

@@ -12,7 +12,8 @@ scattered throughout client.py, including:
 - NVIDIA thinking parameter
 - iflow stream_options removal
 - dedaluslabs tool_choice=auto removal
-- chutes allowed_openai_params injection for tool calling support
+- kimi-k2.5 mandatory top_p
+- GLM-5 max_tokens floor for thinking models
 
 Transforms are applied in a defined order with logging of modifications.
 """
@@ -60,11 +61,15 @@ class ProviderTransforms:
             "gemma": [self._transform_gemma_system_messages],
             "qwen_code": [self._transform_qwen_code_provider],
             "gemini": [self._transform_gemini_safety, self._transform_gemini_thinking],
+            "google": [self._transform_gemini_safety, self._transform_gemini_thinking],
             "nvidia_nim": [self._transform_nvidia_thinking],
             "iflow": [self._transform_iflow_stream_options],
             "dedaluslabs": [self._transform_dedaluslabs_tool_choice],
             "mistral": [self._transform_mistral_thinking],
             "chutes": [self._transform_chutes_allowed_params],
+            "kimi-k2.5": [self._transform_kimi_parameters],
+            "glm-5": [self._transform_glm5_max_tokens],
+            "glm-4": [self._transform_glm5_max_tokens],
         }
 
     def _get_plugin_instance(self, provider: str) -> Optional[Any]:
@@ -255,8 +260,9 @@ class ProviderTransforms:
         Handle thinking parameter for Gemini.
 
         Delegates to provider plugin's handle_thinking_parameter method.
+        The "google" provider shares the GeminiProvider plugin.
         """
-        if provider != "gemini":
+        if provider not in ("gemini", "google"):
             return None
 
         plugin = self._get_plugin_instance(provider)
@@ -285,6 +291,30 @@ class ProviderTransforms:
             return "nvidia_nim: handled thinking parameter"
         return None
 
+    # Fields set on assistant messages by the proxy's response processing
+    # (streaming.py / executor.py) that upstream APIs do not accept on input.
+    _RESPONSE_ONLY_MESSAGE_FIELDS = ("reasoning_content", "thinking_signature")
+
+    def _strip_response_only_fields(
+        self,
+        kwargs: Dict[str, Any],
+    ) -> bool:
+        """Strip proxy-added response fields from request messages.
+
+        Returns True if any fields were removed.
+        """
+        messages = kwargs.get("messages")
+        if not messages:
+            return False
+
+        stripped = False
+        for msg in messages:
+            for field in self._RESPONSE_ONLY_MESSAGE_FIELDS:
+                if field in msg:
+                    del msg[field]
+                    stripped = True
+        return stripped
+
     def _transform_mistral_thinking(
         self,
         kwargs: Dict[str, Any],
@@ -292,17 +322,28 @@ class ProviderTransforms:
         provider: str,
     ) -> Optional[str]:
         """
-        Handle thinking parameter for Mistral.
+        Handle thinking parameter and message sanitization for Mistral.
 
-        Delegates to provider plugin's handle_thinking_parameter method.
+        Strips reasoning_content / thinking_signature from messages (these are
+        set by the proxy on responses but cause 422 errors when sent back to
+        Mistral's strict input validation) and delegates reasoning_effort
+        configuration to the provider plugin.
         """
         if provider != "mistral":
             return None
 
+        modifications = []
+
+        if self._strip_response_only_fields(kwargs):
+            modifications.append("stripped response-only message fields")
+
         plugin = self._get_plugin_instance(provider)
         if plugin and hasattr(plugin, "handle_thinking_parameter"):
             plugin.handle_thinking_parameter(kwargs, model)
-            return "mistral: handled thinking parameter"
+            modifications.append("handled thinking parameter")
+
+        if modifications:
+            return "mistral: " + ", ".join(modifications)
         return None
 
     def _transform_iflow_stream_options(
@@ -382,6 +423,66 @@ class ProviderTransforms:
         merged = list(set(existing) | set(self._CHUTES_ALLOWED_OPENAI_PARAMS))
         kwargs["allowed_openai_params"] = merged
         return "chutes: injected allowed_openai_params for tool calling"
+
+    def _transform_kimi_parameters(
+        self,
+        kwargs: Dict[str, Any],
+        model: str,
+        provider: str,
+    ) -> Optional[str]:
+        """
+        Set top_p=0.95 for Kimi K2.5 models.
+
+        The Kimi K2.5 API (via various providers) strictly requires top_p to be 0.95.
+        Other values or missing top_p results in a 400 error.
+        """
+        if "kimi-k2.5" not in model.lower():
+            return None
+
+        if kwargs.get("top_p") != 0.95:
+            kwargs["top_p"] = 0.95
+            return "kimi-k2.5: set top_p=0.95 (mandatory)"
+        return None
+
+    # GLM-5 / GLM-4 thinking model minimum token floor
+    GLM_MIN_MAX_TOKENS = 4096
+
+    def _transform_glm5_max_tokens(
+        self,
+        kwargs: Dict[str, Any],
+        model: str,
+        provider: str,
+    ) -> Optional[str]:
+        """
+        Enforce a minimum max_tokens floor for GLM-5/GLM-4 thinking models.
+
+        GLM-5 (and GLM-4.x) thinking variants share a single max_tokens budget
+        between reasoning tokens and content tokens. When max_tokens is too low,
+        the model exhausts the entire budget on chain-of-thought reasoning and
+        returns content: null/"". This affects all providers hosting these models
+        (Modal, NanoGPT, Kilo, Zenmux, etc.).
+
+        This transform enforces a minimum floor so the model always has enough
+        headroom to produce actual response content after reasoning.
+        """
+        model_lower = model.lower()
+        # Only apply to GLM thinking/reasoning model variants
+        if not any(prefix in model_lower for prefix in ("glm-5", "glm-4")):
+            return None
+
+        current = kwargs.get("max_tokens")
+        if current is None or current < self.GLM_MIN_MAX_TOKENS:
+            kwargs["max_tokens"] = self.GLM_MIN_MAX_TOKENS
+            if current is not None:
+                return (
+                    f"glm: raised max_tokens from {current} to "
+                    f"{self.GLM_MIN_MAX_TOKENS} (thinking budget floor)"
+                )
+            return (
+                f"glm: set max_tokens to {self.GLM_MIN_MAX_TOKENS} "
+                f"(thinking budget floor)"
+            )
+        return None
 
     # =========================================================================
     # SAFETY SETTINGS CONVERSION (REMOVED)

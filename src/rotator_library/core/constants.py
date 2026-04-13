@@ -40,6 +40,10 @@ from ..config import (
     COOLDOWN_RATE_LIMIT_DEFAULT,
     # Small Cooldown Auto-Retry
     DEFAULT_SMALL_COOLDOWN_RETRY_THRESHOLD,
+    # Rate Limit Max Retry After
+    DEFAULT_RATE_LIMIT_MAX_RETRY_AFTER,
+    # Quota Failure Threshold
+    DEFAULT_QUOTA_FAILURE_THRESHOLD,
 )
 
 # =============================================================================
@@ -57,6 +61,8 @@ ENV_PREFIX_CONCURRENCY_MULTIPLIER = "CONCURRENCY_MULTIPLIER_"
 ENV_PREFIX_CUSTOM_CAP = "CUSTOM_CAP_"
 ENV_PREFIX_CUSTOM_CAP_COOLDOWN = "CUSTOM_CAP_COOLDOWN_"
 ENV_PREFIX_QUOTA_GROUPS = "QUOTA_GROUPS_"
+ENV_PREFIX_MAX_RETRIES = "MAX_RETRIES_"
+ENV_PREFIX_QUOTA_FAILURE_THRESHOLD = "QUOTA_FAILURE_THRESHOLD_"
 
 # Provider-specific providers that use request_count instead of success_count
 # for credential selection (because failed requests also consume quota)
@@ -99,6 +105,10 @@ __all__ = [
     "COOLDOWN_RATE_LIMIT_DEFAULT",
     # Small Cooldown Auto-Retry
     "DEFAULT_SMALL_COOLDOWN_RETRY_THRESHOLD",
+    # Rate Limit Max Retry After
+    "DEFAULT_RATE_LIMIT_MAX_RETRY_AFTER",
+    # Quota Failure Threshold
+    "DEFAULT_QUOTA_FAILURE_THRESHOLD",
     # Environment variable prefixes
     "ENV_PREFIX_ROTATION_MODE",
     "ENV_PREFIX_FAIR_CYCLE",
@@ -110,6 +120,8 @@ __all__ = [
     "ENV_PREFIX_CUSTOM_CAP",
     "ENV_PREFIX_CUSTOM_CAP_COOLDOWN",
     "ENV_PREFIX_QUOTA_GROUPS",
+    "ENV_PREFIX_MAX_RETRIES",
+    "ENV_PREFIX_QUOTA_FAILURE_THRESHOLD",
     # Provider sets
     "REQUEST_COUNT_PROVIDERS",
     # Storage

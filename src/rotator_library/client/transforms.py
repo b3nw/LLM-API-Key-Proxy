@@ -2,17 +2,28 @@
 # Copyright (c) 2026 Mirrowel
 
 """
-Provider-specific request transformations.
+Request transformations — global guards and provider-specific mutations.
 
-This module isolates all provider-specific request mutations that were
-scattered throughout client.py, including:
+This module centralises all request mutations applied before litellm /
+provider plugin ``acompletion``:
+
+Global (run for every request):
+- thinking-mode tool-call guard (disable thinking when reasoning_content
+  was dropped from a tool-call turn — prevents 400 errors across all
+  thinking-capable APIs)
+
+Provider-specific (keyed by provider name or model substring):
 - gemma-3 system message conversion
 - qwen_code provider remapping
 - Gemini safety settings and thinking parameter
 - NVIDIA thinking parameter
 - iflow stream_options removal
 - dedaluslabs tool_choice=auto removal
-- chutes allowed_openai_params injection for tool calling support
+- Mistral reasoning_content / thinking_signature stripping
+- chutes allowed_openai_params injection
+- kimi-k2.5 mandatory top_p
+- GLM-5 / GLM-4 max_tokens floor for thinking models
+- Gitlawb / Xiaomi-Mimo compression workaround
 
 Transforms are applied in a defined order with logging of modifications.
 """
@@ -25,12 +36,14 @@ lib_logger = logging.getLogger("rotator_library")
 
 class ProviderTransforms:
     """
-    Centralized provider-specific request transformations.
+    Centralized request transformations.
 
     Transforms are applied in order:
-    1. Built-in transforms (gemma-3, qwen_code, etc.)
+    0. Global pre-transforms (thinking-mode guard, etc.)
+    1. Built-in keyed transforms (gemma-3, qwen_code, mistral, etc.)
     2. Provider hook transforms (from provider plugins)
-    3. Safety settings conversions
+    3. Model-specific options from provider plugins
+    4. LiteLLM conversion
     """
 
     def __init__(
@@ -65,6 +78,11 @@ class ProviderTransforms:
             "dedaluslabs": [self._transform_dedaluslabs_tool_choice],
             "mistral": [self._transform_mistral_thinking],
             "chutes": [self._transform_chutes_allowed_params],
+            "kimi-k2.5": [self._transform_kimi_parameters],
+            "glm-5": [self._transform_glm5_max_tokens],
+            "glm-4": [self._transform_glm5_max_tokens],
+            "xiaomi_mimo": [self._transform_opengateway_compression],
+            "gitlawb": [self._transform_opengateway_compression],
         }
 
     def _get_plugin_instance(self, provider: str) -> Optional[Any]:
@@ -101,7 +119,12 @@ class ProviderTransforms:
         """
         modifications: List[str] = []
 
-        # 1. Apply built-in transforms
+        # 0. Global pre-transforms (run for every provider)
+        guard_result = self._guard_thinking_tool_calls(kwargs, model, provider)
+        if guard_result:
+            modifications.append(guard_result)
+
+        # 1. Apply built-in transforms (keyed by provider / model substring)
         for transform_provider, transforms in self._transforms.items():
             # Check if transform applies (provider match or model contains pattern)
             if transform_provider == provider or transform_provider in model.lower():
@@ -163,6 +186,11 @@ class ProviderTransforms:
         """
         modifications: List[str] = []
 
+        # 0. Global pre-transforms
+        guard_result = self._guard_thinking_tool_calls(kwargs, model, provider)
+        if guard_result:
+            modifications.append(guard_result)
+
         for transform_provider, transforms in self._transforms.items():
             if transform_provider == provider or transform_provider in model.lower():
                 for transform in transforms:
@@ -178,7 +206,55 @@ class ProviderTransforms:
         return kwargs
 
     # =========================================================================
-    # BUILT-IN TRANSFORMS
+    # GLOBAL PRE-TRANSFORMS (run for every provider before keyed transforms)
+    # =========================================================================
+
+    def _guard_thinking_tool_calls(
+        self,
+        kwargs: Dict[str, Any],
+        model: str,
+        provider: str,
+    ) -> Optional[str]:
+        """
+        Prevent 400 errors from thinking-mode APIs when the client dropped
+        ``reasoning_content`` from an assistant turn that had tool_calls.
+
+        Many reasoning APIs (DeepSeek, Moonshot/Kimi, etc.) require the
+        original ``reasoning_content`` to be passed back on assistant messages
+        that contain ``tool_calls``.  Clients often strip this field because
+        the standard OpenAI SDK doesn't persist it.
+
+        When we detect an assistant message with tool_calls but no
+        reasoning_content, the proxy cannot reconstruct the missing text.
+        Rather than send a placeholder that the API will reject, we
+        proactively disable thinking mode so the request can still succeed
+        (without chain-of-thought on this turn).
+
+        Providers that check ``if "thinking" not in extra_body`` before
+        enabling thinking will automatically defer to the guard's decision.
+        """
+        messages = kwargs.get("messages")
+        if not messages:
+            return None
+
+        for msg in messages:
+            if msg.get("role") != "assistant":
+                continue
+            if msg.get("tool_calls") and not msg.get("reasoning_content"):
+                extra_body = kwargs.get("extra_body")
+                if not isinstance(extra_body, dict):
+                    extra_body = {}
+                extra_body = {**extra_body, "thinking": {"type": "disabled"}}
+                kwargs["extra_body"] = extra_body
+                return (
+                    "disabled thinking — assistant tool-call turn "
+                    "missing reasoning_content"
+                )
+
+        return None
+
+    # =========================================================================
+    # BUILT-IN TRANSFORMS (keyed by provider / model substring)
     # =========================================================================
 
     def _transform_gemma_system_messages(
@@ -285,6 +361,30 @@ class ProviderTransforms:
             return "nvidia_nim: handled thinking parameter"
         return None
 
+    # Fields set on assistant messages by the proxy's response processing
+    # (streaming.py / executor.py) that upstream APIs do not accept on input.
+    _RESPONSE_ONLY_MESSAGE_FIELDS = ("reasoning_content", "thinking_signature")
+
+    def _strip_response_only_fields(
+        self,
+        kwargs: Dict[str, Any],
+    ) -> bool:
+        """Strip proxy-added response fields from request messages.
+
+        Returns True if any fields were removed.
+        """
+        messages = kwargs.get("messages")
+        if not messages:
+            return False
+
+        stripped = False
+        for msg in messages:
+            for field in self._RESPONSE_ONLY_MESSAGE_FIELDS:
+                if field in msg:
+                    del msg[field]
+                    stripped = True
+        return stripped
+
     def _transform_mistral_thinking(
         self,
         kwargs: Dict[str, Any],
@@ -292,17 +392,28 @@ class ProviderTransforms:
         provider: str,
     ) -> Optional[str]:
         """
-        Handle thinking parameter for Mistral.
+        Handle thinking parameter and message sanitization for Mistral.
 
-        Delegates to provider plugin's handle_thinking_parameter method.
+        Strips reasoning_content / thinking_signature from messages (these are
+        set by the proxy on responses but cause 422 errors when sent back to
+        Mistral's strict input validation) and delegates reasoning_effort
+        configuration to the provider plugin.
         """
         if provider != "mistral":
             return None
 
+        modifications = []
+
+        if self._strip_response_only_fields(kwargs):
+            modifications.append("stripped response-only message fields")
+
         plugin = self._get_plugin_instance(provider)
         if plugin and hasattr(plugin, "handle_thinking_parameter"):
             plugin.handle_thinking_parameter(kwargs, model)
-            return "mistral: handled thinking parameter"
+            modifications.append("handled thinking parameter")
+
+        if modifications:
+            return "mistral: " + ", ".join(modifications)
         return None
 
     def _transform_iflow_stream_options(
@@ -382,6 +493,88 @@ class ProviderTransforms:
         merged = list(set(existing) | set(self._CHUTES_ALLOWED_OPENAI_PARAMS))
         kwargs["allowed_openai_params"] = merged
         return "chutes: injected allowed_openai_params for tool calling"
+
+    def _transform_kimi_parameters(
+        self,
+        kwargs: Dict[str, Any],
+        model: str,
+        provider: str,
+    ) -> Optional[str]:
+        """
+        Set top_p=0.95 for Kimi K2.5 models.
+
+        The Kimi K2.5 API (via various providers) strictly requires top_p to be 0.95.
+        Other values or missing top_p results in a 400 error.
+        """
+        if "kimi-k2.5" not in model.lower():
+            return None
+
+        if kwargs.get("top_p") != 0.95:
+            kwargs["top_p"] = 0.95
+            return "kimi-k2.5: set top_p=0.95 (mandatory)"
+        return None
+
+    # GLM-5 / GLM-4 thinking model minimum token floor
+    GLM_MIN_MAX_TOKENS = 4096
+
+    def _transform_glm5_max_tokens(
+        self,
+        kwargs: Dict[str, Any],
+        model: str,
+        provider: str,
+    ) -> Optional[str]:
+        """
+        Enforce a minimum max_tokens floor for GLM-5/GLM-4 thinking models.
+
+        GLM-5 (and GLM-4.x) thinking variants share a single max_tokens budget
+        between reasoning tokens and content tokens. When max_tokens is too low,
+        the model exhausts the entire budget on chain-of-thought reasoning and
+        returns content: null/"". This affects all providers hosting these models
+        (Modal, NanoGPT, Kilo, Zenmux, etc.).
+
+        This transform enforces a minimum floor so the model always has enough
+        headroom to produce actual response content after reasoning.
+        """
+        model_lower = model.lower()
+        # Only apply to GLM thinking/reasoning model variants
+        if not any(prefix in model_lower for prefix in ("glm-5", "glm-4")):
+            return None
+
+        current = kwargs.get("max_tokens")
+        if current is None or current < self.GLM_MIN_MAX_TOKENS:
+            kwargs["max_tokens"] = self.GLM_MIN_MAX_TOKENS
+            if current is not None:
+                return (
+                    f"glm: raised max_tokens from {current} to "
+                    f"{self.GLM_MIN_MAX_TOKENS} (thinking budget floor)"
+                )
+            return (
+                f"glm: set max_tokens to {self.GLM_MIN_MAX_TOKENS} "
+                f"(thinking budget floor)"
+            )
+        return None
+
+    def _transform_opengateway_compression(
+        self,
+        kwargs: Dict[str, Any],
+        model: str,
+        provider: str,
+    ) -> Optional[str]:
+        """
+        Disable compression for Gitlawb Opengateway / Xiaomi-Mimo.
+        The server sends 'content-encoding: gzip' but the body is actually plain
+        text, which causes 'incorrect header check' decoding errors in httpx.
+        """
+        # Apply to xiaomi_mimo known provider or any provider name containing gitlawb
+        is_gitlawb = "gitlawb" in provider.lower() or provider == "xiaomi_mimo"
+        if not is_gitlawb:
+            return None
+
+        headers = kwargs.get("headers", {})
+        # Force identity encoding to prevent httpx from attempting decompression
+        headers["Accept-Encoding"] = "identity"
+        kwargs["headers"] = headers
+        return f"{provider}: disabled compression (identity)"
 
     # =========================================================================
     # SAFETY SETTINGS CONVERSION (REMOVED)

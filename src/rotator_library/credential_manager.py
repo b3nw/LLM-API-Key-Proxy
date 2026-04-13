@@ -28,6 +28,14 @@ ENV_OAUTH_PROVIDERS = {
     "copilot": "COPILOT",
 }
 
+# Precompiled credential patterns (avoid recompiling on every method call)
+_NUMBERED_ACCESS_TOKEN_PATTERNS = {
+    prefix: re.compile(rf"^{prefix}_(\d+)_ACCESS_TOKEN$")
+    for prefix in ENV_OAUTH_PROVIDERS.values()
+}
+_CODEX_API_KEY_PATTERN = re.compile(r"^CODEX_(\d+)_API_KEY$")
+_COPILOT_GITHUB_TOKEN_PATTERN = re.compile(r"^COPILOT_(\d+)_GITHUB_TOKEN$")
+
 
 class CredentialManager:
     """
@@ -78,7 +86,7 @@ class CredentialManager:
 
             # Check for numbered credentials (PROVIDER_N_ACCESS_TOKEN pattern)
             # Pattern: GEMINI_CLI_1_ACCESS_TOKEN, GEMINI_CLI_2_ACCESS_TOKEN, etc.
-            numbered_pattern = re.compile(rf"^{env_prefix}_(\d+)_ACCESS_TOKEN$")
+            numbered_pattern = _NUMBERED_ACCESS_TOKEN_PATTERNS[env_prefix]
 
             for key in self.env_vars.keys():
                 match = numbered_pattern.match(key)
@@ -93,7 +101,7 @@ class CredentialManager:
             # Codex can exchange OAuth tokens for persistent API keys, so
             # CODEX_N_API_KEY alone (without a refresh token) is valid
             if provider == "codex":
-                api_key_pattern = re.compile(rf"^{env_prefix}_(\d+)_API_KEY$")
+                api_key_pattern = _CODEX_API_KEY_PATTERN
                 for key in self.env_vars.keys():
                     match = api_key_pattern.match(key)
                     if match:
@@ -106,9 +114,7 @@ class CredentialManager:
             # and the short-lived Copilot API token is derived from it on demand.
             # Pattern: COPILOT_1_GITHUB_TOKEN, COPILOT_2_GITHUB_TOKEN, etc.
             if provider == "copilot":
-                github_token_pattern = re.compile(
-                    rf"^{env_prefix}_(\d+)_GITHUB_TOKEN$"
-                )
+                github_token_pattern = _COPILOT_GITHUB_TOKEN_PATTERN
                 for key in self.env_vars.keys():
                     match = github_token_pattern.match(key)
                     if match:

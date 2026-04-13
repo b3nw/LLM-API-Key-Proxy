@@ -4,7 +4,7 @@
 import os
 import httpx
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from .provider_interface import ProviderInterface
 from ..model_definitions import ModelDefinitions
 
@@ -72,10 +72,24 @@ class OpenAICompatibleProvider(ProviderInterface):
             )
             response.raise_for_status()
 
+            # Build the set of upstream IDs already covered by static
+            # definitions.  Includes both the display-key suffix (for simple
+            # single-segment keys) and the explicit "id" field (for
+            # multi-segment display keys that map to a different upstream name).
+            static_ids: set = set()
+            for m in static_models:
+                suffix = m.split("/", 1)[1] if "/" in m else m
+                static_ids.add(suffix)
+                upstream_id = self.model_definitions.get_model_id(
+                    self.provider_name, suffix
+                )
+                if upstream_id and upstream_id != suffix:
+                    static_ids.add(upstream_id)
+
             dynamic_models = [
                 f"{self.provider_name}/{model['id']}"
                 for model in response.json().get("data", [])
-                if model["id"] not in [m.split("/")[-1] for m in static_models]
+                if model["id"] not in static_ids
             ]
 
             if dynamic_models:
@@ -98,14 +112,13 @@ class OpenAICompatibleProvider(ProviderInterface):
         Get options for a specific model from static definitions or environment variables.
 
         Args:
-            model_name: Model name (without provider prefix)
+            model_name: Model name, optionally with provider prefix
 
         Returns:
             Dictionary of model options
         """
-        # Extract model name without provider prefix if present
-        if "/" in model_name:
-            model_name = model_name.split("/")[-1]
+        if model_name.startswith(f"{self.provider_name}/"):
+            model_name = model_name[len(self.provider_name) + 1:]
 
         return self.model_definitions.get_model_options(self.provider_name, model_name)
 

@@ -142,3 +142,5 @@ tests/*
 !tests/test_session_tracking.py
 !tests/test_selection_engine.py
 docs/ignored/
+.env
+.agent/

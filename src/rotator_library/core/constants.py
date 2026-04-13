@@ -57,6 +57,7 @@ ENV_PREFIX_CONCURRENCY_MULTIPLIER = "CONCURRENCY_MULTIPLIER_"
 ENV_PREFIX_CUSTOM_CAP = "CUSTOM_CAP_"
 ENV_PREFIX_CUSTOM_CAP_COOLDOWN = "CUSTOM_CAP_COOLDOWN_"
 ENV_PREFIX_QUOTA_GROUPS = "QUOTA_GROUPS_"
+ENV_PREFIX_MAX_RETRIES = "MAX_RETRIES_"
 
 # Provider-specific providers that use request_count instead of success_count
 # for credential selection (because failed requests also consume quota)
@@ -110,6 +111,7 @@ __all__ = [
     "ENV_PREFIX_CUSTOM_CAP",
     "ENV_PREFIX_CUSTOM_CAP_COOLDOWN",
     "ENV_PREFIX_QUOTA_GROUPS",
+    "ENV_PREFIX_MAX_RETRIES",
     # Provider sets
     "REQUEST_COUNT_PROVIDERS",
     # Storage

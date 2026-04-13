@@ -43,6 +43,7 @@ from .transforms import ProviderTransforms
 from .executor import RequestExecutor
 from .anthropic import AnthropicHandler
 
+
 # Import providers and other dependencies
 from ..providers import PROVIDER_PLUGINS
 from ..cooldown_manager import CooldownManager
@@ -53,6 +54,8 @@ from ..transaction_logger import TransactionLogger
 from ..provider_config import ProviderConfig as LiteLLMProviderConfig
 from ..utils.paths import get_default_root, get_logs_dir, get_oauth_dir
 from ..utils.suppress_litellm_warnings import suppress_litellm_serialization_warnings
+
+from ..model_latest_registry import ModelLatestRegistry
 from ..failure_logger import configure_failure_logger
 
 # Import new usage package
@@ -255,8 +258,17 @@ class RotatingClient:
         )
 
         self._model_list_cache: Dict[str, List[str]] = {}
+        self._model_list_cache_time: Dict[str, float] = {}
+        self.MODEL_LIST_CACHE_TTL = 6 * 60 * 60  # 6 hours
         self._usage_initialized = False
         self._usage_init_lock = asyncio.Lock()
+
+
+
+        # Initialize smart "latest" model alias registry
+        self._latest_registry = ModelLatestRegistry()
+        if self._latest_registry.has_rules():
+            self._latest_registry.set_pricing_resolver(self._pricing_resolver_callback)
 
         # Initialize Anthropic compatibility handler
         self._anthropic_handler = AnthropicHandler(self)
@@ -322,6 +334,8 @@ class RotatingClient:
         """
         Dispatcher for completion requests.
 
+        Routes to the provider specified in the provider/model format.
+
         Returns:
             Response object or async generator for streaming
         """
@@ -333,6 +347,7 @@ class RotatingClient:
                 f"Invalid model format or no credentials for provider: {model}"
             )
 
+        # Standard single-provider path (unchanged)
         # Extract internal logging parameters (not passed to API)
         parent_log_dir = kwargs.pop("_parent_log_dir", None)
 
@@ -442,8 +457,14 @@ class RotatingClient:
 
     async def get_available_models(self, provider: str) -> List[str]:
         """Get available models for a provider with caching."""
+        now = time.time()
         if provider in self._model_list_cache:
-            return self._model_list_cache[provider]
+            age = now - self._model_list_cache_time.get(provider, 0)
+            if age < self.MODEL_LIST_CACHE_TTL:
+                return self._model_list_cache[provider]
+            # Stale cache — evict so we re-fetch
+            del self._model_list_cache[provider]
+            self._model_list_cache_time.pop(provider, None)
 
         credentials = self.all_credentials.get(provider, [])
         if not credentials:
@@ -469,6 +490,9 @@ class RotatingClient:
                 ]
 
                 self._model_list_cache[provider] = final
+                self._model_list_cache_time[provider] = now
+                # Underlying model catalog changed — invalidate alias resolutions
+                self._latest_registry.clear_resolution_cache()
                 return final
 
             except Exception as e:
@@ -558,52 +582,77 @@ class RotatingClient:
 
             providers[provider] = stats
 
-        summary = {
-            "total_providers": len(providers),
-            "total_credentials": 0,
-            "active_credentials": 0,
-            "exhausted_credentials": 0,
-            "total_requests": 0,
-            "tokens": {
-                "input_cached": 0,
-                "input_uncached": 0,
-                "input_cache_pct": 0,
-                "output": 0,
-            },
-            "approx_total_cost": None,
-        }
+        def _build_summary(providers_data, source_key=None):
+            """Build a summary dict from provider data.
 
-        for prov in providers.values():
-            summary["total_credentials"] += prov.get("credential_count", 0)
-            summary["active_credentials"] += prov.get("active_count", 0)
-            summary["exhausted_credentials"] += prov.get("exhausted_count", 0)
-            summary["total_requests"] += prov.get("total_requests", 0)
-            tokens = prov.get("tokens", {})
-            summary["tokens"]["input_cached"] += tokens.get("input_cached", 0)
-            summary["tokens"]["input_uncached"] += tokens.get("input_uncached", 0)
-            summary["tokens"]["output"] += tokens.get("output", 0)
+            Args:
+                providers_data: Dict of provider stats
+                source_key: If set, read stats from this sub-key of each
+                    provider (e.g. "current_period"). If None, read from
+                    the provider-level fields directly (lifetime/totals).
+            """
+            s = {
+                "total_providers": len(providers_data),
+                "total_credentials": 0,
+                "active_credentials": 0,
+                "exhausted_credentials": 0,
+                "total_requests": 0,
+                "tokens": {
+                    "input_cached": 0,
+                    "input_uncached": 0,
+                    "input_cache_pct": 0,
+                    "output": 0,
+                },
+                "approx_total_cost": None,
+            }
 
-        total_input = (
-            summary["tokens"]["input_cached"] + summary["tokens"]["input_uncached"]
-        )
-        summary["tokens"]["input_cache_pct"] = (
-            round(summary["tokens"]["input_cached"] / total_input * 100, 1)
-            if total_input > 0
-            else 0
-        )
+            approx_total_cost = 0.0
+            has_cost = False
 
-        approx_total_cost = 0.0
-        has_cost = False
-        for prov in providers.values():
-            cost = prov.get("approx_cost")
-            if cost:
-                approx_total_cost += cost
-                has_cost = True
-        summary["approx_total_cost"] = approx_total_cost if has_cost else None
+            for prov in providers_data.values():
+                s["total_credentials"] += prov.get("credential_count", 0)
+                s["active_credentials"] += prov.get("active_count", 0)
+                s["exhausted_credentials"] += prov.get("exhausted_count", 0)
+
+                if source_key:
+                    src = prov.get(source_key, {})
+                    s["total_requests"] += src.get("total_requests", 0)
+                    tokens = src.get("tokens", {})
+                    cost = src.get("approx_cost")
+                else:
+                    s["total_requests"] += prov.get("total_requests", 0)
+                    tokens = prov.get("tokens", {})
+                    cost = prov.get("approx_cost")
+
+                s["tokens"]["input_cached"] += tokens.get("input_cached", 0)
+                s["tokens"]["input_uncached"] += tokens.get("input_uncached", 0)
+                s["tokens"]["output"] += tokens.get("output", 0)
+
+                if cost:
+                    approx_total_cost += cost
+                    has_cost = True
+
+            total_input = (
+                s["tokens"]["input_cached"] + s["tokens"]["input_uncached"]
+            )
+            s["tokens"]["input_cache_pct"] = (
+                round(s["tokens"]["input_cached"] / total_input * 100, 1)
+                if total_input > 0
+                else 0
+            )
+            s["approx_total_cost"] = approx_total_cost if has_cost else None
+            return s
+
+        # summary = current period stats (from primary window)
+        summary = _build_summary(providers, source_key="current_period")
+
+        # global_summary = lifetime/all-time stats (from totals)
+        global_summary = _build_summary(providers)
 
         return {
             "providers": providers,
             "summary": summary,
+            "global_summary": global_summary,
             "data_source": "cache",
             "timestamp": time.time(),
         }
@@ -667,6 +716,82 @@ class RotatingClient:
     def usage_managers(self) -> Dict[str, NewUsageManager]:
         """Get all new usage managers."""
         return self._usage_managers
+
+
+
+    @property
+    def latest_registry(self) -> "ModelLatestRegistry":
+        """Get the smart 'latest' model alias registry."""
+        return self._latest_registry
+
+    def resolve_latest(self, model: str) -> Optional[str]:
+        """Try to resolve a 'latest' model alias using cached model lists."""
+        if not self._latest_registry.has_rules():
+            return None
+        return self._latest_registry.resolve(model, self._model_list_cache)
+
+    async def resolve_latest_async(self, model: str) -> Optional[str]:
+        """Resolve a 'latest' alias, warming the model cache if needed.
+
+        Unlike resolve_latest(), this will fetch the provider's model list
+        on-demand if the cache is cold (e.g. right after a container restart).
+        """
+        if not self._latest_registry.has_rules():
+            return None
+
+        # Try with current cache first
+        resolved = self._latest_registry.resolve(model, self._model_list_cache)
+        if resolved:
+            return resolved
+
+        # If this is a known alias but cache is empty, warm it
+        if self._latest_registry.is_latest_alias(model):
+            rule = self._latest_registry.get_all_rules().get(model.lower())
+            if rule and rule.provider not in self._model_list_cache:
+                lib_logger.info(
+                    f"Latest alias '{model}': warming model cache for "
+                    f"provider '{rule.provider}'"
+                )
+                await self.get_available_models(rule.provider)
+                return self._latest_registry.resolve(
+                    model, self._model_list_cache
+                )
+
+        return None
+
+    def _pricing_resolver_callback(
+        self, provider: str, model_id: str
+    ) -> Optional[float]:
+        """
+        Pricing resolver callback for cost-based tiebreaking in latest aliases.
+
+        Checks provider-specific pricing cache first, then falls back to the
+        global ModelRegistry (ModelInfoService).
+        """
+        # 1. Try provider-specific pricing cache (e.g., ChutesProvider._pricing_cache)
+        plugin = self._provider_instances.get(provider)
+        if plugin and hasattr(plugin, "_pricing_cache"):
+            # Strip org prefix for cache lookup
+            bare_name = model_id.rsplit("/", 1)[-1] if "/" in model_id else model_id
+            pricing = plugin._pricing_cache.get(bare_name) or plugin._pricing_cache.get(
+                model_id
+            )
+            if pricing:
+                return pricing.get("input", 0.0)
+
+        # 2. Fall back to global ModelRegistry (ModelInfoService)
+        try:
+            from ..model_info_service import get_model_info_service
+
+            registry = get_model_info_service()
+            if registry.is_ready:
+                pricing = registry.get_pricing(f"{provider}/{model_id}")
+                if pricing:
+                    return pricing.get("input_cost_per_token")
+        except Exception:
+            pass
+
+        return None
 
     def _apply_usage_reset_config(
         self,

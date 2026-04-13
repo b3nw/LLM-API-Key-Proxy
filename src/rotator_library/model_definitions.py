@@ -22,11 +22,23 @@ class ModelDefinitions:
     2. Dict format (advanced): PROVIDER_MODELS={"model-name": {"id": "model-id", "options": {...}}}
        - The 'id' field is optional - if not provided, the model name (key) is used as the ID
 
+    Dict keys may contain slashes for multi-segment display names, matching
+    the ``provider/org/model`` convention used by aggregation providers::
+
+        UMANS_MODELS='{
+          "moonshot/kimi-k2": {"id": "umans-kimi-k2.6"},
+          "google/gemini-2.0-flash": {"id": "umans-flash"}
+        }'
+
+    This lists models as ``umans/moonshot/kimi-k2`` etc. in /v1/models while
+    routing the ``"id"`` value to the upstream API.
+
     Examples:
     - MYSERVER_MODELS='["model-a", "model-b"]' - simple array format
     - MYSERVER_MODELS='{"model-a": {}}' - dict format, uses "model-a" as both name and ID
     - MYSERVER_MODELS='{"custom-name": {"id": "actual-id"}}' - dict format with custom ID
     - MYSERVER_MODELS='{"model": {"id": "id", "options": {"temperature": 0.7}}}' - with options
+    - MYSERVER_MODELS='{"org/model": {"id": "upstream-id"}}' - multi-segment display key
 
     This class is a singleton - instantiated once and shared across all providers.
     """
@@ -88,9 +100,19 @@ class ModelDefinitions:
     def get_model_definition(
         self, provider_name: str, model_name: str
     ) -> Optional[Dict[str, Any]]:
-        """Get a specific model definition."""
+        """Get a specific model definition.
+
+        Supports multi-segment keys (e.g. "moonshot/kimi-k2") for aggregation
+        providers.  Falls back to last-segment lookup for backward compat with
+        single-segment configs.
+        """
         provider_models = self.get_provider_models(provider_name)
-        return provider_models.get(model_name)
+        result = provider_models.get(model_name)
+        if result is not None:
+            return result
+        if "/" in model_name:
+            return provider_models.get(model_name.rsplit("/", 1)[-1])
+        return None
 
     def get_model_options(self, provider_name: str, model_name: str) -> Dict[str, Any]:
         """Get options for a specific model."""

@@ -2,7 +2,6 @@
 # Copyright (c) 2026 Mirrowel
 
 import time
-import uuid
 
 # Phase 1: Minimal imports for arg parsing and TUI
 import asyncio
@@ -11,6 +10,7 @@ from pathlib import Path
 import sys
 import argparse
 import logging
+from logging.handlers import RotatingFileHandler
 
 # --- Argument Parsing (BEFORE heavy imports) ---
 parser = argparse.ArgumentParser(description="API Key Proxy Server")
@@ -61,7 +61,6 @@ _start_time = time.time()
 
 # Load all .env files from root folder (main .env first, then any additional *.env files)
 from dotenv import load_dotenv
-from glob import glob
 
 # Get the application root directory (EXE dir if frozen, else CWD)
 # Inlined here to avoid triggering heavy rotator_library imports before loading screen
@@ -118,7 +117,7 @@ with _console.status("[dim]Loading core dependencies...", spinner="dots"):
     from dotenv import load_dotenv
     import colorlog
     import json
-    from typing import AsyncGenerator, Any, List, Optional, Union
+    from typing import AsyncGenerator, List, Optional, Union
     from pydantic import BaseModel, ConfigDict, Field
 
     # --- Early Log Level Configuration ---
@@ -128,15 +127,30 @@ print("  → Loading LiteLLM library...")
 with _console.status("[dim]Loading LiteLLM library...", spinner="dots"):
     import litellm
 
-litellm.suppress_debug_info = True
+    litellm.suppress_debug_info = True
+
+    from litellm.litellm_core_utils.streaming_handler import CustomStreamWrapper
+
+    _original_raise_on_model_repetition = CustomStreamWrapper.raise_on_model_repetition
+
+    def _patched_raise_on_model_repetition(self):
+        if len(self.chunks) < 2:
+            return
+        if not self.chunks[-1].choices:
+            return
+        if not self.chunks[-2].choices:
+            return
+        _original_raise_on_model_repetition(self)
+
+    CustomStreamWrapper.raise_on_model_repetition = _patched_raise_on_model_repetition
 
 # Phase 4: Application imports with granular loading messages
 print("  → Initializing proxy core...")
 with _console.status("[dim]Initializing proxy core...", spinner="dots"):
     from rotator_library import RotatingClient
     from rotator_library.credential_manager import CredentialManager
-    from rotator_library.background_refresher import BackgroundRefresher
     from rotator_library.model_info_service import init_model_info_service
+    from rotator_library.core.errors import ProxyExhaustionError
     from proxy_app.request_logger import log_request_to_console
     from proxy_app.batch_manager import EmbeddingBatcher
     from proxy_app.detailed_logger import RawIOLogger
@@ -279,15 +293,21 @@ formatter = colorlog.ColoredFormatter(
 )
 console_handler.setFormatter(formatter)
 
-# Configure a file handler for INFO-level logs and higher
-info_file_handler = logging.FileHandler(LOG_DIR / "proxy.log", encoding="utf-8")
+# Configure a rotating file handler for INFO-level logs and higher
+# 50 MB max per file, keep 3 backups → 200 MB total cap
+info_file_handler = RotatingFileHandler(
+    LOG_DIR / "proxy.log", maxBytes=50 * 1024 * 1024, backupCount=3, encoding="utf-8"
+)
 info_file_handler.setLevel(logging.INFO)
 info_file_handler.setFormatter(
     logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 )
 
-# Configure a dedicated file handler for all DEBUG-level logs
-debug_file_handler = logging.FileHandler(LOG_DIR / "proxy_debug.log", encoding="utf-8")
+# Configure a dedicated rotating file handler for all DEBUG-level logs
+# 50 MB max per file, keep 2 backups → 150 MB total cap
+debug_file_handler = RotatingFileHandler(
+    LOG_DIR / "proxy_debug.log", maxBytes=50 * 1024 * 1024, backupCount=2, encoding="utf-8"
+)
 debug_file_handler.setLevel(logging.DEBUG)
 debug_file_handler.setFormatter(
     logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -607,6 +627,7 @@ async def lifespan(app: FastAPI):
 
     os.environ["LITELLM_LOG"] = "ERROR"
     litellm.set_verbose = False
+    litellm.suppress_debug_info = True
     litellm.drop_params = True
     if USE_EMBEDDING_BATCHER:
         batcher = EmbeddingBatcher(client=client)
@@ -913,6 +934,18 @@ async def chat_completions(
         if raw_logger:
             raw_logger.log_request(headers=request.headers, body=request_data)
 
+        # Apply model alias rewriting (transparent redirect for unavailable models)
+        if "model" in request_data:
+            # First: resolve smart "latest" aliases (dynamic, uses live model cache)
+            resolved = await client.resolve_latest_async(request_data["model"])
+            if resolved:
+                logging.info(
+                    f"Latest alias: {request_data['model']} → {resolved}"
+                )
+                request_data["model"] = resolved
+
+
+
         # Extract and log specific reasoning parameters for monitoring.
         model = request_data.get("model")
         generation_cfg = (
@@ -972,6 +1005,9 @@ async def chat_completions(
                 )
             return response
 
+    except ProxyExhaustionError as e:
+        # Executor exhausted all credentials — return structured error with correct HTTP status.
+        return JSONResponse(status_code=e.http_status, content=e.error_response)
     except (
         litellm.InvalidRequestError,
         ValueError,
@@ -1030,6 +1066,16 @@ async def anthropic_messages(
         )
 
     try:
+        # Apply model alias rewriting (transparent redirect for unavailable models)
+        if body.model:
+            # First: resolve smart "latest" aliases (dynamic, uses live model cache)
+            resolved = await client.resolve_latest_async(body.model)
+            if resolved:
+                logging.info(f"Latest alias: {body.model} → {resolved}")
+                body.model = resolved
+
+
+
         # Log the request to console
         log_request_to_console(
             url=str(request.url),
@@ -1065,6 +1111,16 @@ async def anthropic_messages(
                 )
             return JSONResponse(content=result)
 
+    except ProxyExhaustionError as e:
+        # Wrap in Anthropic error envelope with correct HTTP status.
+        anthropic_error_response = {
+            "type": "error",
+            "error": {
+                "type": "api_error",
+                "message": e.error_response.get("error", {}).get("message", str(e)),
+            },
+        }
+        raise HTTPException(status_code=e.http_status, detail=anthropic_error_response)
     except (
         litellm.InvalidRequestError,
         ValueError,
@@ -1230,6 +1286,8 @@ async def embeddings(
     except HTTPException as e:
         # Re-raise HTTPException to ensure it's not caught by the generic Exception handler
         raise e
+    except ProxyExhaustionError as e:
+        return JSONResponse(status_code=e.http_status, content=e.error_response)
     except (
         litellm.InvalidRequestError,
         ValueError,
@@ -1272,11 +1330,53 @@ async def list_models(
     """
     model_ids = await client.get_all_available_models(grouped=False)
 
+
+
+
+    # Append smart "latest" virtual model names
+    latest_models = client.latest_registry.get_virtual_models()
+    if latest_models:
+        model_ids = list(model_ids) + latest_models
+
+    # Append virtual "latest" models
+    if hasattr(client, "latest_registry") and client.latest_registry:
+        latest_models = client.latest_registry.get_virtual_models()
+        if latest_models:
+            model_ids = list(model_ids) + latest_models
+
     if enriched and hasattr(request.app.state, "model_info_service"):
         model_info_service = request.app.state.model_info_service
         if model_info_service.is_ready:
             # Return enriched model data
             enriched_data = model_info_service.enrich_model_list(model_ids)
+
+            # For "latest" virtual models, inherit metadata from the
+            # model they currently resolve to (pricing, context window, etc.)
+            if latest_models:
+                # Build a lookup from enriched data for resolved targets
+                enriched_by_id = {e["id"]: e for e in enriched_data}
+
+                for entry in enriched_data:
+                    if entry["id"] in latest_models:
+                        resolved = client.resolve_latest(entry["id"])
+                        if resolved and resolved in enriched_by_id:
+                            target = enriched_by_id[resolved]
+                            # Copy metadata fields, keep our virtual ID
+                            for key in (
+                                "context_window",
+                                "max_output_tokens",
+                                "max_completion_tokens",
+                                "max_input_tokens",
+                                "pricing",
+                                "capabilities",
+                                "top_provider",
+                                "architecture",
+                            ):
+                                if key in target:
+                                    entry[key] = target[key]
+                            # Tag as a latest-alias so clients know
+                            entry["latest_alias_for"] = resolved
+
             return {"object": "list", "data": enriched_data}
 
     # Fallback to basic model cards
@@ -1339,6 +1439,18 @@ async def list_providers(_=Depends(verify_api_key)):
     Returns a list of all available providers.
     """
     return list(PROVIDER_PLUGINS.keys())
+
+
+@app.get("/v1/admin/latest-aliases")
+async def get_latest_aliases(
+    client: RotatingClient = Depends(get_rotating_client),
+    _=Depends(verify_api_key),
+):
+    """
+    Debug endpoint showing all configured 'latest' model alias rules,
+    their current resolutions, and matched candidates.
+    """
+    return client.latest_registry.get_diagnostics(client._model_list_cache)
 
 
 @app.get("/v1/quota-stats")

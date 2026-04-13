@@ -134,3 +134,4 @@ cache/antigravity/thought_signatures.json
 
 /usage/
 .env
+.agent/

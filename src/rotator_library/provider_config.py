@@ -708,6 +708,9 @@ class ProviderConfig:
         Returns:
             Modified kwargs dict ready for LiteLLM
         """
+        # Pop request_type from kwargs so it doesn't get passed downstream
+        request_type = kwargs.pop("request_type", "chat")
+
         model = kwargs.get("model")
         if not model:
             return kwargs
@@ -715,6 +718,14 @@ class ProviderConfig:
         # Extract provider from model string (e.g., "openai/gpt-4" → "openai")
         provider = model.split("/")[0].lower()
         api_base = self._api_bases.get(provider)
+
+        # If this is a Gemini embedding request and the api_base points to the OpenAI compatibility layer,
+        # we must ignore the api_base override so LiteLLM falls back to standard Gemini native embedding.
+        if api_base and request_type == "embedding" and provider in ("gemini", "google") and "/openai" in api_base.lower():
+            lib_logger.info(
+                f"Ignoring Gemini api_base override '{api_base}' for embedding request to avoid 404 errors."
+            )
+            api_base = None
 
         if not api_base:
             # No override configured for this provider

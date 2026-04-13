@@ -262,6 +262,24 @@ def mask_credential(credential: str, style: str = "short") -> str:
         - For API keys with style="short": shows last 6 chars (e.g., "...xyz123")
         - For API keys with style="full": shows first 4 + last 4 (e.g., "AIza...3456")
     """
+    # Handle combined credentials (e.g., api_key:wrk_id:auth=cookie)
+    if ":" in credential:
+        parts = credential.split(":")
+        masked_parts = []
+        for part in parts:
+            if part.startswith("auth="):
+                continue # Skip cookie
+            masked_parts.append(mask_credential(part, style))
+        return ":".join(masked_parts)
+
+    # Special handling for auth cookies and keys
+    if credential.startswith("wrk_"):
+        return credential # Show full workspace ID
+    if credential.startswith("auth="):
+        return "auth=..." # Omit full cookie
+    if credential.startswith("sk-"):
+        return f"sk-...{credential[-4:]}"
+
     # File paths: show just filename
     if os.path.isfile(credential) or credential.endswith(".json"):
         return os.path.basename(credential)
@@ -368,6 +386,60 @@ class RequestErrorAccumulator:
         parts = [f"{count} {err_type}" for err_type, count in counts.items()]
         return ", ".join(parts)
 
+    def get_dominant_error_type(self) -> Optional[str]:
+        """
+        Return the machine-readable dominant upstream error type.
+
+        Priority order (highest first):
+          context_window_exceeded, invalid_request -> client errors (400)
+          authentication                           -> auth error (401)
+          forbidden                                -> access error (403)
+          rate_limit, quota_exceeded               -> rate errors (429)
+          server_error, api_connection             -> upstream errors (502)
+          unknown                                  -> fallback (502)
+
+        Abnormal errors always take precedence over normal errors.
+        Within a tier, the most frequent type wins; ties broken by priority.
+        """
+        _PRIORITY = [
+            "context_window_exceeded",
+            "invalid_request",
+            "authentication",
+            "forbidden",
+            "rate_limit",
+            "quota_exceeded",
+            "server_error",
+            "api_connection",
+            "unknown",
+        ]
+
+        # Abnormal errors take precedence
+        if self.abnormal_errors:
+            counts: Dict[str, int] = {}
+            for err in self.abnormal_errors:
+                t = err["error_type"]
+                counts[t] = counts.get(t, 0) + 1
+            max_count = max(counts.values())
+            candidates = [t for t, c in counts.items() if c == max_count]
+            for p in _PRIORITY:
+                if p in candidates:
+                    return p
+            return candidates[0]
+
+        if self.normal_errors:
+            counts = {}
+            for err in self.normal_errors:
+                t = err["error_type"]
+                counts[t] = counts.get(t, 0) + 1
+            max_count = max(counts.values())
+            candidates = [t for t, c in counts.items() if c == max_count]
+            for p in _PRIORITY:
+                if p in candidates:
+                    return p
+            return candidates[0]
+
+        return None
+
     def build_client_error_response(self) -> dict:
         """
         Build a structured error response for the client.
@@ -409,10 +481,14 @@ class RequestErrorAccumulator:
                     "\nThis is normal during high load - retry later or add more credentials."
                 )
 
+        # Determine machine-readable dominant upstream error code
+        dominant_code = self.get_dominant_error_type()
+
         response = {
             "error": {
                 "message": "".join(message_parts),
                 "type": error_type,
+                "code": dominant_code,
                 "details": {
                     "model": self.model,
                     "provider": self.provider,
@@ -431,6 +507,25 @@ class RequestErrorAccumulator:
             response["error"]["details"]["normal_error_summary"] = normal_summary
 
         return response
+
+    def get_dominant_error_type(self) -> str | None:
+        """
+        Return the most frequent error_type across all recorded errors.
+
+        Used by ProxyExhaustionError to pick the correct HTTP status code.
+        Abnormal errors take priority as they indicate specific issues.
+        Returns None if no errors were recorded.
+        """
+        all_errors = self.abnormal_errors + self.normal_errors
+        if not all_errors:
+            return None
+
+        counts: dict[str, int] = {}
+        for err in all_errors:
+            err_type = err["error_type"]
+            counts[err_type] = counts.get(err_type, 0) + 1
+
+        return max(counts, key=counts.get)  # type: ignore[arg-type]
 
     def build_log_message(self) -> str:
         """
@@ -628,6 +723,23 @@ def _extract_quota_details(json_text: str) -> Tuple[Optional[str], Optional[str]
         pass
 
     return None, None
+
+
+def _is_short_term_quota_error(error_body: str, quota_id: Optional[str]) -> bool:
+    """
+    Check if the error looks like a short-term rate limit (per minute/second) rather than long-term quota.
+    """
+    if quota_id:
+        qid = quota_id.lower()
+        if "perminute" in qid or "persecond" in qid:
+            return True
+            
+    if error_body:
+        bod = str(error_body).lower()
+        if "per minute" in bod or "per_minute" in bod or "per second" in bod or "per_second" in bod:
+            return True
+            
+    return False
 
 
 def get_retry_after(error: Exception) -> Optional[int]:
@@ -852,8 +964,12 @@ def classify_error(e: Exception, provider: Optional[str] = None) -> ClassifiedEr
                 except Exception:
                     pass
 
+                error_type = "quota_exceeded"
+                if _is_short_term_quota_error(error_body, quota_id):
+                    error_type = "rate_limit"
+
                 return ClassifiedError(
-                    error_type="quota_exceeded",
+                    error_type=error_type,
                     original_exception=e,
                     status_code=status_code,
                     retry_after=retry_after,
@@ -989,8 +1105,12 @@ def classify_error(e: Exception, provider: Optional[str] = None) -> ClassifiedEr
             except Exception:
                 pass
 
+            error_type = "quota_exceeded"
+            if _is_short_term_quota_error(str(error_body) if 'error_body' in locals() else error_msg, quota_id):
+                error_type = "rate_limit"
+
             return ClassifiedError(
-                error_type="quota_exceeded",
+                error_type=error_type,
                 original_exception=e,
                 status_code=status_code or 429,
                 retry_after=retry_after,
@@ -1040,6 +1160,27 @@ def classify_error(e: Exception, provider: Optional[str] = None) -> ClassifiedEr
             original_exception=e,
             status_code=status_code or 503,
             retry_after=30,  # Default 30s cooldown for server errors
+        )
+
+    # StreamedAPIError: errors received inside SSE streams (e.g. Codex response.failed)
+    # These are authoritative API rejections, not transient — don't rotate credentials.
+    from .core.errors import StreamedAPIError
+
+    if isinstance(e, StreamedAPIError):
+        error_msg = str(e).lower()
+        if any(
+            p in error_msg
+            for p in ["context window", "context_length", "too many tokens", "too long"]
+        ):
+            return ClassifiedError(
+                error_type="context_window_exceeded",
+                original_exception=e,
+                status_code=400,
+            )
+        return ClassifiedError(
+            error_type="invalid_request",
+            original_exception=e,
+            status_code=400,
         )
 
     # Fallback for any other unclassified errors
@@ -1119,17 +1260,21 @@ def should_retry_same_key(
     Returns:
         True if should retry same key, False if should rotate immediately
     """
-    # Small retry_after = faster to just wait than rotate
-    # This preserves cache locality and avoids unnecessary rotation
-    if (
-        classified_error.retry_after is not None
-        and 0 < classified_error.retry_after < small_cooldown_threshold
-    ):
-        return True
+    # If the provider told us to wait, use that to decide
+    if classified_error.retry_after is not None:
+        if 0 < classified_error.retry_after < small_cooldown_threshold:
+            return True
+        else:
+            # Server told us to wait too long - better to rotate now
+            return False
 
-    # Standard transient errors that should retry same key
+    # Standard transient errors that should retry same key (when no retry_after is provided)
+    # rate_limit (429) is included because transient capacity errors are
+    # better handled by backing off and retrying the same credential,
+    # especially when there are few credentials available.
     retryable_errors = {
         "server_error",
         "api_connection",
+        "rate_limit",
     }
     return classified_error.error_type in retryable_errors

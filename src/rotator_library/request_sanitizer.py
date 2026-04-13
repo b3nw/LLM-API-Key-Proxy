@@ -9,9 +9,12 @@ def sanitize_request_payload(payload: Dict[str, Any], model: str) -> Dict[str, A
     """
     if "dimensions" in payload and not model.startswith("openai/text-embedding-3"):
         del payload["dimensions"]
-        
-    if payload.get("thinking") == {"type": "enabled", "budget_tokens": -1}:
-        if model not in ["gemini/gemini-2.5-pro", "gemini/gemini-2.5-flash"]:
+
+    # Strip top-level thinking key for models that don't support it
+    if "thinking" in payload:
+        is_anthropic = model.startswith("anthropic/") or "claude-" in model
+        is_gemini_thinking = any(p in model for p in ("gemini-2.5-pro", "gemini-2.5-flash"))
+        if not (is_anthropic or is_gemini_thinking):
             del payload["thinking"]
-            
+
     return payload

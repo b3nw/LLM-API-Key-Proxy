@@ -450,15 +450,23 @@ class StreamingHandler:
         Properly accounts for cached token pricing when available.
         Cached tokens are typically significantly cheaper than regular input
         tokens (e.g., 10x cheaper for Anthropic, ~4x for OpenAI).
-
-        Args:
-            model: Model identifier
-            prompt_tokens: Uncached prompt tokens
-            completion_tokens: Completion + thinking tokens
-            cache_read_tokens: Tokens read from cache (charged at reduced rate)
-            cache_write_tokens: Tokens written to cache (charged at write rate)
         """
         try:
+            # Prefer ModelInfoService if ready (supports provider aliases and unified pricing)
+            from ..model_info_service import get_model_info_service
+            registry = get_model_info_service()
+            if registry and registry.is_ready:
+                cost = registry.calculate_cost(
+                    model, 
+                    prompt_tokens, 
+                    completion_tokens,
+                    cache_read_tokens=cache_read_tokens,
+                    cache_creation_tokens=cache_write_tokens
+                )
+                if cost is not None:
+                    return float(cost)
+
+            # Fallback to LiteLLM's internal database
             model_info = litellm.get_model_info(model)
             input_cost = model_info.get("input_cost_per_token")
             output_cost = model_info.get("output_cost_per_token")

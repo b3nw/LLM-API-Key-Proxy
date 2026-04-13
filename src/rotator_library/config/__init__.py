@@ -35,6 +35,10 @@ from .defaults import (
     COOLDOWN_RATE_LIMIT_DEFAULT,
     # Small Cooldown Auto-Retry
     DEFAULT_SMALL_COOLDOWN_RETRY_THRESHOLD,
+    # Rate Limit Max Retry After
+    DEFAULT_RATE_LIMIT_MAX_RETRY_AFTER,
+    # Quota Failure Threshold
+    DEFAULT_QUOTA_FAILURE_THRESHOLD,
 )
 
 __all__ = [
@@ -65,4 +69,8 @@ __all__ = [
     "COOLDOWN_RATE_LIMIT_DEFAULT",
     # Small Cooldown Auto-Retry
     "DEFAULT_SMALL_COOLDOWN_RETRY_THRESHOLD",
+    # Rate Limit Max Retry After
+    "DEFAULT_RATE_LIMIT_MAX_RETRY_AFTER",
+    # Quota Failure Threshold
+    "DEFAULT_QUOTA_FAILURE_THRESHOLD",
 ]

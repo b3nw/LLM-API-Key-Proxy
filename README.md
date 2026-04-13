@@ -106,6 +106,9 @@ openai/gpt-4o                    ← OpenAI API
 anthropic/claude-3-5-sonnet      ← Anthropic API
 openrouter/anthropic/claude-3-opus  ← OpenRouter
 gemini_cli/gemini-2.5-pro        ← Gemini CLI (OAuth)
+codex/gpt-5.2                    ← OpenAI Codex (OAuth)
+copilot/claude-sonnet-4          ← GitHub Copilot (OAuth)
+deepseek/deepseek-chat           ← DeepSeek API
 ```
 
 ### Usage Examples
@@ -263,8 +266,8 @@ python -m rotator_library.credential_tool
 
 | Type | Providers | How to Add |
 |------|-----------|------------|
-| **API Keys** | Gemini, OpenAI, Anthropic, OpenRouter, Groq, Mistral, NVIDIA, Cohere, Chutes | Enter key in TUI or add to `.env` |
-| **OAuth** | Gemini CLI | Interactive browser login via credential tool |
+| **API Keys** | Gemini, OpenAI, Anthropic, OpenRouter, Groq, Mistral, NVIDIA, Cohere, Chutes, DeepSeek | Enter key in TUI or add to `.env` |
+| **OAuth** | Gemini CLI, Codex, Anthropic (Claude), Copilot | Interactive browser login or device flow via credential tool |
 
 ### The `.env` File
 
@@ -295,7 +298,7 @@ The proxy is powered by a standalone Python library that you can use directly in
 - **Intelligent key selection** with tiered, model-aware locking
 - **Deadline-driven requests** with configurable global timeout
 - **Automatic failover** between keys on errors
-- **OAuth support** for Gemini CLI
+- **OAuth support** for Gemini CLI, Codex, Anthropic, and Copilot
 - **Stateless deployment ready** — load credentials from environment variables
 
 ### Basic Usage
@@ -738,6 +741,7 @@ Customize OAuth callback ports if defaults conflict:
 | Provider    | Default Port | Environment Variable     |
 | ----------- | ------------ | ------------------------ |
 | Gemini CLI  | 8085         | `GEMINI_CLI_OAUTH_PORT`  |
+| Codex       | 1455         | `CODEX_OAUTH_PORT`       |
 
 </details>
 
@@ -924,7 +928,7 @@ See [VPS Deployment](Deployment%20guide.md#appendix-deploying-to-a-custom-vps) f
 | `500 Internal Server Error` | Check provider key validity; enable `--enable-request-logging` for details |
 | All keys on cooldown | All keys failed recently; check `logs/detailed_logs/` for upstream errors |
 | Model not found | Verify format is `provider/model_name` (e.g., `gemini/gemini-2.5-flash`) |
-| OAuth callback failed | Ensure callback port (8085, 51121, 11451) isn't blocked by firewall |
+| OAuth callback failed | Ensure callback port (8085 for Gemini CLI, 1455 for Codex) isn't blocked by firewall |
 | Streaming hangs | Increase `TIMEOUT_READ_STREAMING`; check provider status |
 
 **Detailed Logs:**

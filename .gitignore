@@ -143,3 +143,4 @@ tests/*
 !tests/test_selection_engine.py
 docs/ignored/
 .env
+.agent/

@@ -368,6 +368,60 @@ class RequestErrorAccumulator:
         parts = [f"{count} {err_type}" for err_type, count in counts.items()]
         return ", ".join(parts)
 
+    def get_dominant_error_type(self) -> Optional[str]:
+        """
+        Return the machine-readable dominant upstream error type.
+
+        Priority order (highest first):
+          context_window_exceeded, invalid_request -> client errors (400)
+          authentication                           -> auth error (401)
+          forbidden                                -> access error (403)
+          rate_limit, quota_exceeded               -> rate errors (429)
+          server_error, api_connection             -> upstream errors (502)
+          unknown                                  -> fallback (502)
+
+        Abnormal errors always take precedence over normal errors.
+        Within a tier, the most frequent type wins; ties broken by priority.
+        """
+        _PRIORITY = [
+            "context_window_exceeded",
+            "invalid_request",
+            "authentication",
+            "forbidden",
+            "rate_limit",
+            "quota_exceeded",
+            "server_error",
+            "api_connection",
+            "unknown",
+        ]
+
+        # Abnormal errors take precedence
+        if self.abnormal_errors:
+            counts: Dict[str, int] = {}
+            for err in self.abnormal_errors:
+                t = err["error_type"]
+                counts[t] = counts.get(t, 0) + 1
+            max_count = max(counts.values())
+            candidates = [t for t, c in counts.items() if c == max_count]
+            for p in _PRIORITY:
+                if p in candidates:
+                    return p
+            return candidates[0]
+
+        if self.normal_errors:
+            counts = {}
+            for err in self.normal_errors:
+                t = err["error_type"]
+                counts[t] = counts.get(t, 0) + 1
+            max_count = max(counts.values())
+            candidates = [t for t, c in counts.items() if c == max_count]
+            for p in _PRIORITY:
+                if p in candidates:
+                    return p
+            return candidates[0]
+
+        return None
+
     def build_client_error_response(self) -> dict:
         """
         Build a structured error response for the client.
@@ -409,10 +463,14 @@ class RequestErrorAccumulator:
                     "\nThis is normal during high load - retry later or add more credentials."
                 )
 
+        # Determine machine-readable dominant upstream error code
+        dominant_code = self.get_dominant_error_type()
+
         response = {
             "error": {
                 "message": "".join(message_parts),
                 "type": error_type,
+                "code": dominant_code,
                 "details": {
                     "model": self.model,
                     "provider": self.provider,
@@ -431,6 +489,25 @@ class RequestErrorAccumulator:
             response["error"]["details"]["normal_error_summary"] = normal_summary
 
         return response
+
+    def get_dominant_error_type(self) -> str | None:
+        """
+        Return the most frequent error_type across all recorded errors.
+
+        Used by ProxyExhaustionError to pick the correct HTTP status code.
+        Abnormal errors take priority as they indicate specific issues.
+        Returns None if no errors were recorded.
+        """
+        all_errors = self.abnormal_errors + self.normal_errors
+        if not all_errors:
+            return None
+
+        counts: dict[str, int] = {}
+        for err in all_errors:
+            err_type = err["error_type"]
+            counts[err_type] = counts.get(err_type, 0) + 1
+
+        return max(counts, key=counts.get)  # type: ignore[arg-type]
 
     def build_log_message(self) -> str:
         """
@@ -1042,6 +1119,27 @@ def classify_error(e: Exception, provider: Optional[str] = None) -> ClassifiedEr
             retry_after=30,  # Default 30s cooldown for server errors
         )
 
+    # StreamedAPIError: errors received inside SSE streams (e.g. Codex response.failed)
+    # These are authoritative API rejections, not transient — don't rotate credentials.
+    from .core.errors import StreamedAPIError
+
+    if isinstance(e, StreamedAPIError):
+        error_msg = str(e).lower()
+        if any(
+            p in error_msg
+            for p in ["context window", "context_length", "too many tokens", "too long"]
+        ):
+            return ClassifiedError(
+                error_type="context_window_exceeded",
+                original_exception=e,
+                status_code=400,
+            )
+        return ClassifiedError(
+            error_type="invalid_request",
+            original_exception=e,
+            status_code=400,
+        )
+
     # Fallback for any other unclassified errors
     return ClassifiedError(
         error_type="unknown", original_exception=e, status_code=status_code
@@ -1128,8 +1226,12 @@ def should_retry_same_key(
         return True
 
     # Standard transient errors that should retry same key
+    # rate_limit (429) is included because transient capacity errors are
+    # better handled by backing off and retrying the same credential,
+    # especially when there are few credentials available.
     retryable_errors = {
         "server_error",
         "api_connection",
+        "rate_limit",
     }
     return classified_error.error_type in retryable_errors

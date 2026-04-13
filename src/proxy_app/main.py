@@ -1351,6 +1351,12 @@ async def list_models(
     if alias_models:
         model_ids = list(model_ids) + alias_models
 
+    # Append virtual "latest" models from the latest registry
+    if hasattr(client, "latest_registry") and client.latest_registry:
+        latest_models = client.latest_registry.get_virtual_models()
+        if latest_models:
+            model_ids = list(model_ids) + latest_models
+
     if enriched and hasattr(request.app.state, "model_info_service"):
         model_info_service = request.app.state.model_info_service
         if model_info_service.is_ready:

@@ -3,8 +3,9 @@
 
 import httpx
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from .provider_interface import ProviderInterface
+from .utilities.gemini_quota_utils import parse_google_quota_error
 
 lib_logger = logging.getLogger("rotator_library")
 lib_logger.propagate = False  # Ensure this logger doesn't propagate to root
@@ -17,6 +18,10 @@ class GeminiProvider(ProviderInterface):
     Provider implementation for the Google Gemini API.
     """
 
+    @staticmethod
+    def parse_quota_error(error: Exception, error_body: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        return parse_google_quota_error(error, error_body)
+
     async def get_models(self, api_key: str, client: httpx.AsyncClient) -> List[str]:
         """
         Fetches the list of available models from the Google Gemini API.
@@ -28,7 +33,7 @@ class GeminiProvider(ProviderInterface):
             )
             response.raise_for_status()
             return [
-                f"gemini/{model['name'].replace('models/', '')}"
+                f"google/{model['name'].replace('models/', '')}"
                 for model in response.json().get("models", [])
             ]
         except httpx.RequestError as e:

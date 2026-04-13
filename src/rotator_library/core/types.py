@@ -14,9 +14,7 @@ from typing import (
     Callable,
     Dict,
     List,
-    Literal,
     Optional,
-    Set,
     Tuple,
     Union,
 )
@@ -80,6 +78,7 @@ class RequestContext:
     request: Optional[Any] = None  # FastAPI Request object
     pre_request_callback: Optional[Callable] = None
     transaction_logger: Optional[Any] = None
+    request_type: str = "chat"
 
 
 @dataclass
@@ -94,6 +93,7 @@ class ProcessedChunk:
     usage: Optional[Dict[str, Any]] = None
     finish_reason: Optional[str] = None
     has_tool_calls: bool = False
+    in_thought_block: bool = False
 
 
 # =============================================================================

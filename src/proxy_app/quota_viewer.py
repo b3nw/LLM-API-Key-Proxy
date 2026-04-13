@@ -99,6 +99,39 @@ def format_cost(cost: Optional[float]) -> str:
     return f"${cost:.2f}"
 
 
+def _is_dollar_group(group_name: str) -> bool:
+    """Check if a quota group represents a dollar-based balance (e.g. 'credits($)')."""
+    return "($)" in group_name
+
+
+def _fmt_dollars(cents: Optional[int]) -> str:
+    """Format a cents value as a dollar string (e.g. 1485 → '$14.85', 1500 → '$15')."""
+    if cents is None:
+        return "?"
+    if cents % 100 == 0:
+        return f"${cents // 100}"
+    return f"${cents / 100:.2f}"
+
+
+def _fmt_compact(value: Optional[int]) -> str:
+    """Format a large number compactly for quota display.
+
+    Examples: 59796630 → '59.8M', 60000000 → '60M', 5000 → '5000'
+    Only kicks in for values >= 100,000 to avoid changing small quotas.
+    """
+    if value is None:
+        return "?"
+    if value >= 1_000_000_000:
+        s = f"{value / 1_000_000_000:.1f}B"
+        return s.replace(".0B", "B")
+    if value >= 1_000_000:
+        s = f"{value / 1_000_000:.1f}M"
+        return s.replace(".0M", "M")
+    if value >= 100_000:
+        return f"{value / 1_000:.0f}k"
+    return str(value)
+
+
 def format_time_ago(timestamp: Optional[float]) -> str:
     """Format timestamp as relative time (e.g., '5 min ago')."""
     if not timestamp:
@@ -187,18 +220,60 @@ def is_full_url(host: str) -> bool:
     return host.startswith("http://") or host.startswith("https://")
 
 
-def format_cooldown(seconds: int) -> str:
-    """Format cooldown seconds as human-readable string."""
+def format_duration(seconds: int, *, show_seconds: bool = False) -> str:
+    """Format a duration in seconds as a human-readable string.
+
+    Args:
+        seconds: Duration in seconds (must be non-negative).
+        show_seconds: If True, include seconds precision for short
+            durations (e.g. '5m 30s').  If False, the smallest unit
+            shown is minutes.
+
+    Returns:
+        Strings like '2d 5h', '12h 30m', '45m', '30s', etc.
+    """
+    if seconds < 0:
+        seconds = 0
     if seconds < 60:
-        return f"{seconds}s"
-    elif seconds < 3600:
-        mins = seconds // 60
+        return f"{seconds}s" if show_seconds else "< 1m"
+
+    total_minutes = seconds // 60
+    hours = total_minutes // 60
+    mins = total_minutes % 60
+
+    if hours >= 24:
+        days = hours // 24
+        remaining_hours = hours % 24
+        if remaining_hours > 0:
+            return f"{days}d {remaining_hours}h"
+        return f"{days}d"
+    if hours > 0:
+        return f"{hours}h {mins}m" if mins > 0 else f"{hours}h"
+    if show_seconds:
         secs = seconds % 60
         return f"{mins}m {secs}s" if secs > 0 else f"{mins}m"
-    else:
-        hours = seconds // 3600
-        mins = (seconds % 3600) // 60
-        return f"{hours}h {mins}m" if mins > 0 else f"{hours}h"
+    return f"{mins}m"
+
+
+def format_cooldown(seconds: int) -> str:
+    """Format cooldown seconds as human-readable string (includes seconds)."""
+    return format_duration(seconds, show_seconds=True)
+
+
+def format_time_remaining(reset_at: float) -> str:
+    """Format a reset timestamp as a human-readable countdown string.
+
+    Args:
+        reset_at: Absolute UTC timestamp (seconds since epoch) of the
+            upcoming reset.
+
+    Returns:
+        Strings like '12h 30m', '45m', '< 1m', '2d 5h', or 'now'.
+    """
+    diff = reset_at - time.time()
+    if diff <= 0:
+        return "now"
+    return format_duration(int(diff))
 
 
 def natural_sort_key(item: Any) -> List:
@@ -240,21 +315,20 @@ def get_credential_stats(
     """
     Extract display stats from a credential with field name adaptation.
 
-    Maps new API field names to what the viewer expects:
-    - totals.request_count -> requests
-    - totals.last_used_at -> last_used_ts
-    - totals.approx_cost -> approx_cost
-    - Derive tokens from totals
+    In 'current' mode, reads from the primary-window-scoped current_period.
+    In 'global' mode, reads from totals (all-time lifetime stats).
     """
     totals = cred.get("totals", {})
 
-    # For global view mode, we'd need global totals (currently same as totals)
     if view_mode == "global":
-        stats_source = cred.get("global", totals)
-        if stats_source == totals:
-            stats_source = totals
-    else:
         stats_source = totals
+    else:
+        # Use current_period if available, fall back to totals
+        cp = cred.get("current_period")
+        if cp and cp.get("request_count", 0) > 0 or cp:
+            stats_source = cp
+        else:
+            stats_source = totals
 
     # Calculate proper token stats
     prompt_tokens = stats_source.get("prompt_tokens", 0)
@@ -528,98 +602,78 @@ class QuotaViewer:
         """
         Recalculate summary fields from all provider data in cache.
 
-        Updates both 'summary' and 'global_summary' based on current
-        provider stats.
+        Updates both 'summary' (current period) and 'global_summary' (lifetime)
+        based on current provider stats.
         """
         providers = self.cached_stats.get("providers", {})
         if not providers:
             return
 
-        # Calculate summary from all providers
-        total_creds = 0
-        active_creds = 0
-        exhausted_creds = 0
-        total_requests = 0
-        total_input_cached = 0
-        total_input_uncached = 0
-        total_output = 0
-        total_cost = 0.0
+        def _aggregate(source_key=None):
+            """Aggregate stats across providers.
 
-        for prov_stats in providers.values():
-            total_creds += prov_stats.get("credential_count", 0)
-            active_creds += prov_stats.get("active_count", 0)
-            exhausted_creds += prov_stats.get("exhausted_count", 0)
-            total_requests += prov_stats.get("total_requests", 0)
-
-            tokens = prov_stats.get("tokens", {})
-            total_input_cached += tokens.get("input_cached", 0)
-            total_input_uncached += tokens.get("input_uncached", 0)
-            total_output += tokens.get("output", 0)
-
-            cost = prov_stats.get("approx_cost")
-            if cost:
-                total_cost += cost
-
-        total_input = total_input_cached + total_input_uncached
-        input_cache_pct = (
-            round(total_input_cached / total_input * 100, 1) if total_input > 0 else 0
-        )
-
-        self.cached_stats["summary"] = {
-            "total_providers": len(providers),
-            "total_credentials": total_creds,
-            "active_credentials": active_creds,
-            "exhausted_credentials": exhausted_creds,
-            "total_requests": total_requests,
-            "tokens": {
-                "input_cached": total_input_cached,
-                "input_uncached": total_input_uncached,
-                "input_cache_pct": input_cache_pct,
-                "output": total_output,
-            },
-            "approx_total_cost": total_cost if total_cost > 0 else None,
-        }
-
-        # Also recalculate global_summary if it exists
-        if "global_summary" in self.cached_stats:
-            global_total_requests = 0
-            global_input_cached = 0
-            global_input_uncached = 0
-            global_output = 0
-            global_cost = 0.0
+            Args:
+                source_key: if set, read from prov_stats[source_key],
+                    otherwise read from prov_stats directly.
+            """
+            agg_creds = 0
+            agg_active = 0
+            agg_exhausted = 0
+            agg_requests = 0
+            agg_input_cached = 0
+            agg_input_uncached = 0
+            agg_output = 0
+            agg_cost = 0.0
 
             for prov_stats in providers.values():
-                global_data = prov_stats.get("global", prov_stats)
-                global_total_requests += global_data.get("total_requests", 0)
+                agg_creds += prov_stats.get("credential_count", 0)
+                agg_active += prov_stats.get("active_count", 0)
+                agg_exhausted += prov_stats.get("exhausted_count", 0)
 
-                tokens = global_data.get("tokens", {})
-                global_input_cached += tokens.get("input_cached", 0)
-                global_input_uncached += tokens.get("input_uncached", 0)
-                global_output += tokens.get("output", 0)
+                if source_key:
+                    src = prov_stats.get(source_key, {})
+                    agg_requests += src.get("total_requests", 0)
+                    tokens = src.get("tokens", {})
+                    cost = src.get("approx_cost")
+                else:
+                    agg_requests += prov_stats.get("total_requests", 0)
+                    tokens = prov_stats.get("tokens", {})
+                    cost = prov_stats.get("approx_cost")
 
-                cost = global_data.get("approx_cost")
+                agg_input_cached += tokens.get("input_cached", 0)
+                agg_input_uncached += tokens.get("input_uncached", 0)
+                agg_output += tokens.get("output", 0)
+
                 if cost:
-                    global_cost += cost
+                    agg_cost += cost
 
-            global_total_input = global_input_cached + global_input_uncached
-            global_cache_pct = (
-                round(global_input_cached / global_total_input * 100, 1)
-                if global_total_input > 0
+            total_input = agg_input_cached + agg_input_uncached
+            cache_pct = (
+                round(agg_input_cached / total_input * 100, 1)
+                if total_input > 0
                 else 0
             )
 
-            self.cached_stats["global_summary"] = {
+            return {
                 "total_providers": len(providers),
-                "total_credentials": total_creds,
-                "total_requests": global_total_requests,
+                "total_credentials": agg_creds,
+                "active_credentials": agg_active,
+                "exhausted_credentials": agg_exhausted,
+                "total_requests": agg_requests,
                 "tokens": {
-                    "input_cached": global_input_cached,
-                    "input_uncached": global_input_uncached,
-                    "input_cache_pct": global_cache_pct,
-                    "output": global_output,
+                    "input_cached": agg_input_cached,
+                    "input_uncached": agg_input_uncached,
+                    "input_cache_pct": cache_pct,
+                    "output": agg_output,
                 },
-                "approx_total_cost": global_cost if global_cost > 0 else None,
+                "approx_total_cost": agg_cost if agg_cost > 0 else None,
             }
+
+        # summary = current period (from primary window)
+        self.cached_stats["summary"] = _aggregate(source_key="current_period")
+
+        # global_summary = lifetime (from provider-level totals)
+        self.cached_stats["global_summary"] = _aggregate()
 
     def post_action(
         self,
@@ -810,16 +864,16 @@ class QuotaViewer:
             for idx, (provider, prov_stats) in enumerate(sorted_providers, 1):
                 cred_count = prov_stats.get("credential_count", 0)
 
-                # Use global stats if in global mode
+                # Use current_period stats in current mode, provider-level totals in global mode
                 if self.view_mode == "global":
-                    stats_source = prov_stats.get("global", prov_stats)
-                    total_requests = stats_source.get("total_requests", 0)
-                    tokens = stats_source.get("tokens", {})
-                    cost_value = stats_source.get("approx_cost")
-                else:
                     total_requests = prov_stats.get("total_requests", 0)
                     tokens = prov_stats.get("tokens", {})
                     cost_value = prov_stats.get("approx_cost")
+                else:
+                    cp = prov_stats.get("current_period", {})
+                    total_requests = cp.get("total_requests", prov_stats.get("total_requests", 0))
+                    tokens = cp.get("tokens", prov_stats.get("tokens", {}))
+                    cost_value = cp.get("approx_cost", prov_stats.get("approx_cost"))
 
                 # Format tokens
                 input_total = tokens.get("input_cached", 0) + tokens.get(
@@ -848,6 +902,15 @@ class QuotaViewer:
 
                         if not windows:
                             # No windows = no data, skip
+                            continue
+
+                        # Skip groups that have no limits across any window
+                        # (e.g., rotation-only groups like "codex-global")
+                        has_any_limit = any(
+                            ws.get("total_max", 0) > 0
+                            for ws in windows.values()
+                        )
+                        if not has_any_limit:
                             continue
 
                         # Process each window for this group
@@ -917,8 +980,18 @@ class QuotaViewer:
                                 display_name = group_name
 
                             display_name_trunc = display_name[: QUOTA_NAME_WIDTH - 1]
-                            usage_str = f"{total_remaining}/{total_max}"
-                            bar = create_progress_bar(total_pct, QUOTA_BAR_WIDTH)
+                            if _is_dollar_group(group_name):
+                                if total_max == 0:
+                                    # Pure balance (no fixed grant) — show just the amount
+                                    usage_str = f"{_fmt_dollars(total_remaining)}"
+                                    pct_str = ""
+                                    bar = ""
+                                else:
+                                    usage_str = f"{_fmt_dollars(total_remaining)}/{_fmt_dollars(total_max)}"
+                                    bar = create_progress_bar(total_pct, QUOTA_BAR_WIDTH)
+                            else:
+                                usage_str = f"{_fmt_compact(total_remaining)}/{_fmt_compact(total_max)}"
+                                bar = create_progress_bar(total_pct, QUOTA_BAR_WIDTH)
 
                             # Build the line with tier info and FC summary
                             line_parts = [
@@ -955,16 +1028,6 @@ class QuotaViewer:
                         cost_str,
                     )
 
-                # Add separator between providers (except last)
-                if idx < len(sorted_providers):
-                    table.add_row(
-                        "─" * TABLE_PROVIDER_WIDTH,
-                        "─" * TABLE_CREDS_WIDTH,
-                        "─" * TABLE_QUOTA_STATUS_WIDTH,
-                        "─" * TABLE_REQUESTS_WIDTH,
-                        "─" * TABLE_TOKENS_WIDTH,
-                        "─" * TABLE_COST_WIDTH,
-                    )
 
             self.console.print(table)
 
@@ -996,23 +1059,31 @@ class QuotaViewer:
         # Menu
         self.console.print()
         self.console.print("━" * 78)
-        self.console.print()
 
         # Build provider menu options (use same sorted order as display)
         providers = self.cached_stats.get("providers", {}) if self.cached_stats else {}
         sorted_providers = sorted(providers.items(), key=provider_sort_key)
         provider_list = [name for name, _ in sorted_providers]
 
-        for idx, provider in enumerate(provider_list, 1):
-            self.console.print(f"   {idx}. View [cyan]{provider}[/cyan] details")
-
+        # Render provider list in 3 columns
+        cols = 3
+        col_width = 78 // cols
+        for row_start in range(0, len(provider_list), cols):
+            row_items = []
+            for c in range(cols):
+                i = row_start + c
+                if i < len(provider_list):
+                    # Pad the raw text before adding markup so columns align
+                    raw_entry = f"{i+1:>2}. {provider_list[i]}"
+                    padded = f"{raw_entry:<{col_width}}"
+                    # Re-apply cyan only to the provider name portion
+                    entry = f"{i+1:>2}. [cyan]{provider_list[i]}[/cyan]" + " " * (len(padded) - len(raw_entry))
+                    row_items.append(entry)
+            self.console.print(" " + " ".join(row_items))
         self.console.print()
-        self.console.print("   G. Toggle view mode (current/global)")
-        self.console.print("   R. Reload all stats (re-read from proxy)")
-        self.console.print("   S. Switch remote")
-        self.console.print("   M. Manage remotes")
-        self.console.print("   B. Back to main menu")
-        self.console.print()
+        self.console.print(
+            "   [G]lobal  [R]eload  [S]witch remote  [M]anage remotes  [B]ack"
+        )
         self.console.print("━" * 78)
 
         # Get input
@@ -1056,7 +1127,7 @@ class QuotaViewer:
                 f"[bold cyan]:bar_chart: {provider.title()} - Detailed Stats[/bold cyan]  |  {view_label}"
             )
             self.console.print("━" * 78)
-            self.console.print()
+
 
             if not self.cached_stats:
                 self.console.print("[yellow]No data available.[/yellow]")
@@ -1074,12 +1145,9 @@ class QuotaViewer:
                 else:
                     for idx, cred in enumerate(credentials, 1):
                         self._render_credential_panel(idx, cred, provider)
-                        self.console.print()
 
             # Menu
             self.console.print("━" * 78)
-            self.console.print()
-            self.console.print("   G.  Toggle view mode (current/global)")
 
             # Force refresh options (only for providers that support it)
             has_quota_groups = bool(
@@ -1089,49 +1157,29 @@ class QuotaViewer:
                 .get("quota_groups")
             )
 
-            # Model toggle option (only show if provider has quota groups) - MOVED UP
+            # Build inline action line
+            actions = ["[G]lobal"]
             if has_quota_groups:
                 show_models_status = (
                     "ON" if self.config.get_show_models(provider) else "OFF"
                 )
-                self.console.print(
-                    f"   T.  Toggle model details ({show_models_status})"
-                )
-
-            self.console.print("   R.  Reload stats (from proxy cache)")
-            self.console.print("   RA. Reload all stats")
+                actions.append(f"[T]oggle models ({show_models_status})")
+            actions.extend(["[R]eload", "[RA] Reload all", "[B]ack"])
+            self.console.print("   " + "  ".join(actions))
 
             if has_quota_groups:
-                self.console.print()
-                self.console.print(
-                    f"   F.  [yellow]Force refresh ALL {provider} quotas from API[/yellow]"
-                )
                 prov_stats_for_menu = (
                     self.cached_stats.get("providers", {}).get(provider, {})
                     if self.cached_stats
                     else {}
                 )
-                credentials = get_credentials_list(prov_stats_for_menu)
-                # Sort credentials naturally
-                credentials = sorted(credentials, key=natural_sort_key)
-                for idx, cred in enumerate(credentials, 1):
-                    identifier = cred.get("identifier", f"credential {idx}")
-                    email = cred.get("email", identifier)
+                cred_count = len(get_credentials_list(prov_stats_for_menu))
+                if cred_count > 0:
                     self.console.print(
-                        f"   F{idx}. Force refresh [{idx}] only ({email})"
+                        f"   [F] [yellow]Force refresh ALL {provider}[/yellow]  "
+                        f"[F1-F{cred_count}] per-credential"
                     )
 
-            # DEBUG: Add fake window for testing multi-window display
-            if has_quota_groups:
-                self.console.print()
-                self.console.print("   [dim]DEBUG:[/dim]")
-                self.console.print(
-                    "   W.  [dim]Add fake 'daily' window (test multi-window)[/dim]"
-                )
-
-            self.console.print()
-            self.console.print("   B.  Back to summary")
-            self.console.print()
             self.console.print("━" * 78)
 
             choice = Prompt.ask("Select option", default="B").strip().upper()
@@ -1178,13 +1226,6 @@ class QuotaViewer:
                         for err in rr["errors"]:
                             self.console.print(f"[red]  Error: {err}[/red]")
                     Prompt.ask("Press Enter to continue", default="")
-            elif choice == "W" and has_quota_groups:
-                # DEBUG: Inject fake "daily" window for testing multi-window display
-                self._inject_fake_daily_window(provider)
-                self.console.print(
-                    "[dim]Injected fake 'daily' window into cached stats[/dim]"
-                )
-                Prompt.ask("Press Enter to continue", default="")
             elif choice.startswith("F") and choice[1:].isdigit() and has_quota_groups:
                 idx = int(choice[1:])
                 prov_stats_for_refresh = (
@@ -1303,12 +1344,19 @@ class QuotaViewer:
         # Display group usage with per-window breakdown
         # Note: group_usage is pre-sorted by limit (lowest first) from the API
         if group_usage:
-            content_lines.append("")
             content_lines.append("[bold]Quota Groups:[/bold]")
 
             for group_name, group_stats in group_usage.items():
                 windows = group_stats.get("windows", {})
                 if not windows:
+                    continue
+
+                # Skip groups that have no limits (rotation-only groups)
+                has_any_limit = any(
+                    w.get("limit") is not None
+                    for w in windows.values()
+                )
+                if not has_any_limit:
                     continue
 
                 # Get per-group status info
@@ -1342,10 +1390,12 @@ class QuotaViewer:
 
                     # Format reset time (only show if there's actual usage or cooldown)
                     reset_time_str = ""
+                    reset_countdown_str = ""
                     if reset_at and (request_count > 0 or group_cooldown_remaining):
                         try:
                             reset_dt = datetime.fromtimestamp(reset_at)
                             reset_time_str = reset_dt.strftime("%b %d %H:%M")
+                            reset_countdown_str = format_time_remaining(reset_at)
                         except (ValueError, OSError):
                             reset_time_str = ""
 
@@ -1393,7 +1443,16 @@ class QuotaViewer:
                             f"{remaining_pct}%" if remaining_pct is not None else ""
                         )
                     elif limit is not None:
-                        usage_str = f"{remaining_val}/{limit}"
+                        if _is_dollar_group(group_name):
+                            if limit == 0:
+                                # Pure balance (no fixed grant) — show just the amount
+                                usage_str = f"{_fmt_dollars(remaining_val)}"
+                                pct_str = ""
+                                bar = create_progress_bar(100)  # Full bar
+                            else:
+                                usage_str = f"{_fmt_dollars(remaining_val)}/{_fmt_dollars(limit)}"
+                        else:
+                            usage_str = f"{_fmt_compact(remaining_val)}/{_fmt_compact(limit)}"
                         pct_str = f"{remaining_pct}%"
                     else:
                         usage_str = f"{request_count} req"
@@ -1401,9 +1460,14 @@ class QuotaViewer:
 
                     line = f"  [{color}]{display_name:<{DETAIL_GROUP_NAME_WIDTH}} {usage_str:<{DETAIL_USAGE_WIDTH}} {pct_str:>{DETAIL_PCT_WIDTH}} {bar}[/{color}]"
 
-                    # Add reset time if applicable
+                    # Add reset time with countdown if applicable
                     if reset_time_str:
-                        line += f"  Resets: {reset_time_str}"
+                        if reset_countdown_str and reset_countdown_str != "now":
+                            line += f"  Resets in {reset_countdown_str} ({reset_time_str})"
+                        elif reset_countdown_str == "now":
+                            line += f"  Resets now"
+                        else:
+                            line += f"  Resets: {reset_time_str}"
 
                     # Add indicators
                     indicators = []

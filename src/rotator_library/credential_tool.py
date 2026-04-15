@@ -68,6 +68,7 @@ OAUTH_FRIENDLY_NAMES = {
     "antigravity": "Antigravity",
     "codex": "OpenAI Codex",
     "anthropic": "Claude / Claude Code (Pro & Max)",
+    "copilot": "GitHub Copilot",
 }
 
 
@@ -1835,7 +1836,7 @@ async def setup_new_credential(provider_name: str):
                 success_text.append(
                     f"\nWorkspace: {' '.join(workspace_parts)}"
                 )
-            if result.account_id:
+            if hasattr(result, "account_id") and result.account_id:
                 success_text.append(
                     f"\nAccount ID: {result.account_id}"
                 )
@@ -2431,6 +2432,104 @@ async def export_anthropic_to_env():
             )
         )
 
+async def export_copilot_to_env():
+    """ Export a Copilot credential JSON file to .env format. Uses the auth class's build_env_lines() and list_credentials() methods.
+    """
+    clear_screen("Export Copilot Credential")
+    # Get auth instance for this provider
+    provider_factory, _ = _ensure_providers_loaded()
+    try:
+        auth_class = provider_factory.get_provider_auth_class("copilot")
+        auth_instance = auth_class()
+    except Exception:
+        console.print("[bold red]Unknown provider: copilot[/bold red]")
+        return
+
+    # List available credentials using auth class
+    credentials = auth_instance.list_credentials(_get_oauth_base_dir())
+
+    if not credentials:
+        console.print(
+            Panel(
+                "No Copilot credentials found. Please add one first using 'Add OAuth Credential'.",
+                style="bold red",
+                title="No Credentials",
+            )
+        )
+        return
+
+    # Display available credentials
+    cred_text = Text()
+    for i, cred_info in enumerate(credentials):
+        login = cred_info.get("login", cred_info.get("email", "unknown"))
+        cred_text.append(
+            f" {i + 1}. {Path(cred_info['file_path']).name} ({login})\n"
+        )
+
+    console.print(
+        Panel(
+            cred_text,
+            title="Available Copilot Credentials",
+            style="bold blue",
+        )
+    )
+
+    choice = Prompt.ask(
+        Text.from_markup(
+            "[bold]Please select a credential to export or type [red]'b'[/red] to go back[/bold]"
+        ),
+        choices=[str(i + 1) for i in range(len(credentials))] + ["b"],
+        show_choices=False,
+    )
+
+    if choice.lower() == "b":
+        return
+
+    try:
+        choice_index = int(choice) - 1
+        if 0 <= choice_index < len(credentials):
+            cred_info = credentials[choice_index]
+
+            # Use auth class to export
+            env_path = auth_instance.export_credential_to_env(
+                cred_info["file_path"], _get_oauth_base_dir()
+            )
+
+            if env_path:
+                numbered_prefix = f"COPILOT_{cred_info['number']}"
+                success_text = Text.from_markup(
+                    f"Successfully exported credential to [bold yellow]'{Path(env_path).name}'[/bold yellow]\n\n"
+                    f"[bold]Environment variable prefix:[/bold] [cyan]{numbered_prefix}_*[/cyan]\n\n"
+                    f"[bold]To use this credential:[/bold]\n"
+                    f"1. Copy the contents to your main .env file, OR\n"
+                    f"2. Source it: [bold cyan]source {Path(env_path).name}[/bold cyan] (Linux/Mac)\n\n"
+                    f"[bold]To combine multiple credentials:[/bold]\n"
+                    f"Copy lines from multiple .env files into one file.\n"
+                    f"Each credential uses a unique number ({numbered_prefix}_*)."
+                )
+                console.print(Panel(success_text, style="bold green", title="Success"))
+            else:
+                console.print(
+                    Panel(
+                        "Failed to export credential",
+                        style="bold red",
+                        title="Error",
+                    )
+                )
+        else:
+            console.print("[bold red]Invalid choice. Please try again.[/bold red]")
+    except ValueError:
+        console.print(
+            "[bold red]Invalid input. Please enter a number or 'b'.[/bold red]"
+        )
+    except Exception as e:
+        console.print(
+            Panel(
+                f"An error occurred during export: {e}",
+                style="bold red",
+                title="Error",
+            )
+        )
 
 async def export_all_provider_credentials(provider_name: str):
     """
@@ -2597,6 +2696,7 @@ async def combine_all_credentials():
 
     # List of providers that support OAuth credentials
     oauth_providers = ["gemini_cli", "qwen_code", "iflow", "antigravity", "codex", "anthropic"]
+    oauth_providers = ["gemini_cli", "qwen_code", "iflow", "antigravity", "codex", "anthropic", "copilot"]
 
     provider_factory, _ = _ensure_providers_loaded()
 
@@ -2720,6 +2820,26 @@ async def export_credentials_submenu():
                     "17. Combine all Codex into one file\n"
                     "18. Combine all Anthropic into one file\n"
                     "19. Combine ALL providers into one file"
+                "7. Export Copilot credential\n"
+                    "\n"
+                    "[bold]Bulk Exports (per provider):[/bold]\n"
+                    "8. Export ALL Gemini CLI credentials\n"
+                    "9. Export ALL Qwen Code credentials\n"
+                    "10. Export ALL iFlow credentials\n"
+                    "11. Export ALL Antigravity credentials\n"
+                    "12. Export ALL Codex credentials\n"
+                    "13. Export ALL Anthropic credentials\n"
+                "14. Export ALL Copilot credentials\n"
+                    "\n"
+                    "[bold]Combine Credentials:[/bold]\n"
+                    "15. Combine all Gemini CLI into one file\n"
+                    "16. Combine all Qwen Code into one file\n"
+                    "17. Combine all iFlow into one file\n"
+                    "18. Combine all Antigravity into one file\n"
+                    "19. Combine all Codex into one file\n"
+                    "20. Combine all Anthropic into one file\n"
+                "21. Combine all Copilot into one file\n"
+                    "22. Combine ALL providers into one file"
                 ),
                 title="Choose export option",
                 style="bold blue",
@@ -2734,6 +2854,9 @@ async def export_credentials_submenu():
                 "1", "2", "3", "4", "5", "6",
                 "7", "8", "9", "10", "11", "12",
                 "13", "14", "15", "16", "17", "18", "19",
+                    "20",
+                    "21",
+                    "22",
                 "b",
             ],
             show_choices=False,
@@ -2770,8 +2893,10 @@ async def export_credentials_submenu():
         # Bulk exports (all credentials for a provider)
         elif export_choice == "7":
             await export_all_provider_credentials("gemini_cli")
+            await export_copilot_to_env()
             console.print("\n[dim]Press Enter to return to export menu...[/dim]")
             input()
+        # Bulk exports (all credentials for a provider)
         elif export_choice == "8":
             await export_all_provider_credentials("qwen_code")
             console.print("\n[dim]Press Enter to return to export menu...[/dim]")
@@ -2819,6 +2944,64 @@ async def export_credentials_submenu():
             input()
         # Combine all providers
         elif export_choice == "19":
+            await export_all_provider_credentials("gemini_cli")
+            console.print("\n[dim]Press Enter to return to export menu...[/dim]")
+            input()
+        elif export_choice == "9":
+            await export_all_provider_credentials("qwen_code")
+            console.print("\n[dim]Press Enter to return to export menu...[/dim]")
+            input()
+        elif export_choice == "10":
+            await export_all_provider_credentials("iflow")
+            console.print("\n[dim]Press Enter to return to export menu...[/dim]")
+            input()
+        elif export_choice == "11":
+            await export_all_provider_credentials("antigravity")
+            console.print("\n[dim]Press Enter to return to export menu...[/dim]")
+            input()
+        elif export_choice == "12":
+            await export_all_provider_credentials("codex")
+            console.print("\n[dim]Press Enter to return to export menu...[/dim]")
+            input()
+        elif export_choice == "13":
+            await export_all_provider_credentials("anthropic")
+            console.print("\n[dim]Press Enter to return to export menu...[/dim]")
+            input()
+        elif export_choice == "14":
+            await export_all_provider_credentials("copilot")
+            console.print("\n[dim]Press Enter to return to export menu...[/dim]")
+            input()
+        # Combine per provider
+        elif export_choice == "15":
+            await combine_provider_credentials("gemini_cli")
+            console.print("\n[dim]Press Enter to return to export menu...[/dim]")
+            input()
+        elif export_choice == "16":
+            await combine_provider_credentials("qwen_code")
+            console.print("\n[dim]Press Enter to return to export menu...[/dim]")
+            input()
+        elif export_choice == "17":
+            await combine_provider_credentials("iflow")
+            console.print("\n[dim]Press Enter to return to export menu...[/dim]")
+            input()
+        elif export_choice == "18":
+            await combine_provider_credentials("antigravity")
+            console.print("\n[dim]Press Enter to return to export menu...[/dim]")
+            input()
+        elif export_choice == "19":
+            await combine_provider_credentials("codex")
+            console.print("\n[dim]Press Enter to return to export menu...[/dim]")
+            input()
+        elif export_choice == "20":
+            await combine_provider_credentials("anthropic")
+            console.print("\n[dim]Press Enter to return to export menu...[/dim]")
+            input()
+        elif export_choice == "21":
+            await combine_provider_credentials("copilot")
+            console.print("\n[dim]Press Enter to return to export menu...[/dim]")
+            input()
+        # Combine all providers
+        elif export_choice == "22":
             await combine_all_credentials()
             console.print("\n[dim]Press Enter to return to export menu...[/dim]")
             input()

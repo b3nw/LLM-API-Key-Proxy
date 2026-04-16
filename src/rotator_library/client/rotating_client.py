@@ -567,6 +567,7 @@ class RotatingClient:
 
             stats = await manager.get_stats_for_endpoint()
 
+
             # Filter out stale quota groups that no longer exist in the provider's
             # current model_quota_groups (e.g. after a group rename like
             # firmware_global → credits($))
@@ -585,6 +586,7 @@ class RotatingClient:
                     for cred_data in stats.get("credentials", {}).values():
                         for g in stale_groups:
                             cred_data.get("group_usage", {}).pop(g, None)
+
 
             # Skip providers with no activity AND no quota data
             # (filters out invalid/unused providers, but keeps quota-tracked providers visible)

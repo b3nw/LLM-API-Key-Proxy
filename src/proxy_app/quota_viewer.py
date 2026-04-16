@@ -1375,13 +1375,16 @@ class QuotaViewer:
                     max_recorded_at = window_stats.get("max_recorded_at")
 
                     # Calculate remaining percentage
-                    if limit is not None and limit > 0:
+                    if limit is not None:
                         remaining_val = (
                             remaining
                             if remaining is not None
                             else max(0, limit - request_count)
                         )
-                        remaining_pct = round(remaining_val / limit * 100, 1)
+                        if limit > 0:
+                            remaining_pct = round(remaining_val / limit * 100, 1)
+                        else:
+                            remaining_pct = 0.0
                         is_exhausted = remaining_val <= 0
                     else:
                         remaining_pct = None

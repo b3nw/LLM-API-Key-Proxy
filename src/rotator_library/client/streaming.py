@@ -274,7 +274,11 @@ class StreamingHandler:
                                 approx_cost = 0.0
                         if approx_cost == 0.0:
                             approx_cost = self._calculate_stream_cost(
-                                model, total_prompt, total_completion,
+                                model,
+                                prompt_tokens_uncached,
+                                total_completion,
+                                cache_read_tokens=prompt_tokens_cached,
+                                cache_write_tokens=prompt_tokens_cache_write,
                             )
                     cred_context.mark_success(
                         prompt_tokens=prompt_tokens_uncached,
@@ -438,16 +442,46 @@ class StreamingHandler:
         model: str,
         prompt_tokens: int,
         completion_tokens: int,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
     ) -> float:
+        """Calculate cost for a streaming response.
+
+        Properly accounts for cached token pricing when available.
+        Cached tokens are typically significantly cheaper than regular input
+        tokens (e.g., 10x cheaper for Anthropic, ~4x for OpenAI).
+
+        Args:
+            model: Model identifier
+            prompt_tokens: Uncached prompt tokens
+            completion_tokens: Completion + thinking tokens
+            cache_read_tokens: Tokens read from cache (charged at reduced rate)
+            cache_write_tokens: Tokens written to cache (charged at write rate)
+        """
         try:
             model_info = litellm.get_model_info(model)
             input_cost = model_info.get("input_cost_per_token")
             output_cost = model_info.get("output_cost_per_token")
+            cache_read_cost = model_info.get("cache_read_input_token_cost")
+            cache_write_cost = model_info.get("cache_creation_input_token_cost")
+
             total_cost = 0.0
             if input_cost:
                 total_cost += prompt_tokens * input_cost
             if output_cost:
                 total_cost += completion_tokens * output_cost
+
+            # Apply cached token pricing: use discounted rate if available,
+            # otherwise fall back to full input rate
+            if cache_read_tokens > 0:
+                rate = cache_read_cost if cache_read_cost else input_cost
+                if rate:
+                    total_cost += cache_read_tokens * rate
+            if cache_write_tokens > 0:
+                rate = cache_write_cost if cache_write_cost else input_cost
+                if rate:
+                    total_cost += cache_write_tokens * rate
+
             return total_cost
         except Exception as exc:
             lib_logger.debug(f"Stream cost calculation failed for {model}: {exc}")

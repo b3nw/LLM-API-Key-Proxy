@@ -12,7 +12,8 @@ scattered throughout client.py, including:
 - NVIDIA thinking parameter
 - iflow stream_options removal
 - dedaluslabs tool_choice=auto removal
-- chutes allowed_openai_params injection for tool calling support
+- kimi-k2.5 mandatory top_p
+- GLM-5 max_tokens floor for thinking models
 
 Transforms are applied in a defined order with logging of modifications.
 """
@@ -63,7 +64,9 @@ class ProviderTransforms:
             "nvidia_nim": [self._transform_nvidia_thinking],
             "iflow": [self._transform_iflow_stream_options],
             "dedaluslabs": [self._transform_dedaluslabs_tool_choice],
-            "chutes": [self._transform_chutes_allowed_params],
+            "kimi-k2.5": [self._transform_kimi_parameters],
+            "glm-5": [self._transform_glm5_max_tokens],
+            "glm-4": [self._transform_glm5_max_tokens],
         }
 
     def _get_plugin_instance(self, provider: str) -> Optional[Any]:
@@ -375,43 +378,65 @@ class ProviderTransforms:
             return "dedaluslabs: removed tool_choice=auto"
         return None
 
-    # OpenAI-compatible params that LiteLLM's Chutes provider config
-    # doesn't declare support for.  Without this list, drop_params=True
-    # causes LiteLLM to silently strip tools / tool_choice / etc.
-    _CHUTES_ALLOWED_OPENAI_PARAMS = [
-        "tools",
-        "tool_choice",
-        "parallel_tool_calls",
-        "response_format",
-    ]
-
-    def _transform_chutes_allowed_params(
+    def _transform_kimi_parameters(
         self,
         kwargs: Dict[str, Any],
         model: str,
         provider: str,
     ) -> Optional[str]:
         """
-        Inject allowed_openai_params for Chutes provider.
+        Set top_p=0.95 for Kimi K2.5 models.
 
-        LiteLLM's built-in Chutes provider config doesn't advertise support
-        for tool calling parameters (tools, tool_choice, etc.), so with
-        litellm.drop_params=True they get silently removed.  This transform
-        tells LiteLLM these standard OpenAI params are safe to pass through
-        to the Chutes API, which is fully OpenAI-compatible.
+        The Kimi K2.5 API (via various providers) strictly requires top_p to be 0.95.
+        Other values or missing top_p results in a 400 error.
         """
-        if provider != "chutes":
+        if "kimi-k2.5" not in model.lower():
             return None
 
-        # Only inject if the request actually uses any of these params
-        has_tool_params = any(k in kwargs for k in self._CHUTES_ALLOWED_OPENAI_PARAMS)
-        if not has_tool_params:
+        if kwargs.get("top_p") != 0.95:
+            kwargs["top_p"] = 0.95
+            return "kimi-k2.5: set top_p=0.95 (mandatory)"
+        return None
+
+    # GLM-5 / GLM-4 thinking model minimum token floor
+    GLM_MIN_MAX_TOKENS = 4096
+
+    def _transform_glm5_max_tokens(
+        self,
+        kwargs: Dict[str, Any],
+        model: str,
+        provider: str,
+    ) -> Optional[str]:
+        """
+        Enforce a minimum max_tokens floor for GLM-5/GLM-4 thinking models.
+
+        GLM-5 (and GLM-4.x) thinking variants share a single max_tokens budget
+        between reasoning tokens and content tokens. When max_tokens is too low,
+        the model exhausts the entire budget on chain-of-thought reasoning and
+        returns content: null/"". This affects all providers hosting these models
+        (Modal, NanoGPT, Kilo, Zenmux, etc.).
+
+        This transform enforces a minimum floor so the model always has enough
+        headroom to produce actual response content after reasoning.
+        """
+        model_lower = model.lower()
+        # Only apply to GLM thinking/reasoning model variants
+        if not any(prefix in model_lower for prefix in ("glm-5", "glm-4")):
             return None
 
-        existing = kwargs.get("allowed_openai_params", [])
-        merged = list(set(existing) | set(self._CHUTES_ALLOWED_OPENAI_PARAMS))
-        kwargs["allowed_openai_params"] = merged
-        return "chutes: injected allowed_openai_params for tool calling"
+        current = kwargs.get("max_tokens")
+        if current is None or current < self.GLM_MIN_MAX_TOKENS:
+            kwargs["max_tokens"] = self.GLM_MIN_MAX_TOKENS
+            if current is not None:
+                return (
+                    f"glm: raised max_tokens from {current} to "
+                    f"{self.GLM_MIN_MAX_TOKENS} (thinking budget floor)"
+                )
+            return (
+                f"glm: set max_tokens to {self.GLM_MIN_MAX_TOKENS} "
+                f"(thinking budget floor)"
+            )
+        return None
 
     # =========================================================================
     # SAFETY SETTINGS CONVERSION

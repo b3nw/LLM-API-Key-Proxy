@@ -176,11 +176,6 @@ class CredentialRegistry:
         """
         Get stable ID for an OAuth credential.
 
-        Reads the email from _proxy_metadata.email in the credential file.
-        When account_id is also present (e.g. for Codex credentials that can
-        span multiple OpenAI workspaces), the stable ID combines both to
-        prevent collisions between same-email, different-workspace credentials.
-        Falls back to file hash if email not found.
         Reads login or email from _proxy_metadata in the credential file.
         Login is preferred (for providers like Copilot), falling back to email.
         When account_id is also present (e.g. for Codex credentials that can
@@ -200,9 +195,6 @@ class CredentialRegistry:
                 metadata = data.get("_proxy_metadata", {})
                 login = metadata.get("login")
                 email = metadata.get("email")
-                if email:
-                    # Include account_id in stable ID to differentiate
-                    # credentials for the same email on different workspaces
                 stable = login or email
                 if stable:
                     # Include account_id in stable ID to differentiate
@@ -212,8 +204,6 @@ class CredentialRegistry:
                         or metadata.get("account_id")
                     )
                     if account_id:
-                        return f"{email}::{account_id}"
-                    return email
                         return f"{stable}::{account_id}"
                     return stable
 

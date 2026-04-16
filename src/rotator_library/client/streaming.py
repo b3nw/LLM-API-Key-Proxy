@@ -17,7 +17,7 @@ import codecs
 import json
 import logging
 import re
-from typing import Any, AsyncGenerator, AsyncIterator, Dict, Optional, TYPE_CHECKING
+from typing import Any, AsyncGenerator, AsyncIterator, Callable, Dict, Optional, TYPE_CHECKING
 
 import litellm
 
@@ -48,6 +48,7 @@ class StreamingHandler:
         request: Optional[Any] = None,
         cred_context: Optional["CredentialContext"] = None,
         skip_cost_calculation: bool = False,
+        cost_calculator: Optional[Callable[[str, int, int], float]] = None,
     ) -> AsyncGenerator[str, None]:
         """
         Wrap a LiteLLM stream with error handling and usage tracking.
@@ -93,8 +94,32 @@ class StreamingHandler:
                     )
                 )
             raise StreamedAPIError("Provider returned empty stream", data=None)
-        
-        stream_iterator = stream.__aiter__()
+
+        if not hasattr(stream, "__aiter__"):
+            lib_logger.warning(
+                f"Provider returned a non-streaming response for {model} when stream was requested. Converting to stream."
+            )
+            async def _fake_stream():
+                if hasattr(stream, "model_dump"):
+                    data = stream.model_dump()
+                elif hasattr(stream, "dict"):
+                    data = stream.dict()
+                else:
+                    data = dict(stream)
+                
+                if "choices" in data and isinstance(data["choices"], list):
+                    for choice in data["choices"]:
+                        if "message" in choice:
+                            choice["delta"] = choice.pop("message")
+                
+                if data.get("object") == "chat.completion":
+                    data["object"] = "chat.completion.chunk"
+                
+                yield data
+
+            stream_iterator = _fake_stream().__aiter__()
+        else:
+            stream_iterator = stream.__aiter__()
 
         try:
             while True:
@@ -238,11 +263,19 @@ class StreamingHandler:
                 if cred_context:
                     approx_cost = 0.0
                     if not skip_cost_calculation:
-                        approx_cost = self._calculate_stream_cost(
-                            model,
-                            prompt_tokens_uncached + prompt_tokens_cached,
-                            completion_tokens + thinking_tokens,
-                        )
+                        total_prompt = prompt_tokens_uncached + prompt_tokens_cached
+                        total_completion = completion_tokens + thinking_tokens
+                        if cost_calculator:
+                            try:
+                                approx_cost = cost_calculator(
+                                    model, total_prompt, total_completion
+                                )
+                            except Exception:
+                                approx_cost = 0.0
+                        if approx_cost == 0.0:
+                            approx_cost = self._calculate_stream_cost(
+                                model, total_prompt, total_completion,
+                            )
                     cred_context.mark_success(
                         prompt_tokens=prompt_tokens_uncached,
                         completion_tokens=completion_tokens,
@@ -292,6 +325,12 @@ class StreamingHandler:
         if "choices" in chunk_dict and chunk_dict["choices"]:
             choice = chunk_dict["choices"][0]
             delta = choice.get("delta", {})
+
+            # Normalize non-standard thinking/reasoning field names to
+            # the OpenAI-standard "reasoning_content".
+            # NanoGPT uses "reasoning" instead of "reasoning_content".
+            if "reasoning" in delta and "reasoning_content" not in delta:
+                delta["reasoning_content"] = delta.pop("reasoning")
 
             # Check for tool_calls
             if delta.get("tool_calls"):

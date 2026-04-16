@@ -495,20 +495,22 @@ async def lifespan(app: FastAPI):
                     with open(path, "r") as f:
                         data = json.load(f)
                     metadata = data.get("_proxy_metadata", {})
-                    email = metadata.get("email")
+                    # Use email for identity (most providers), fall back to login
+                    # (Copilot stores login as the primary identifier)
+                    identity = metadata.get("email") or metadata.get("login")
 
-                    if email:
-                        if email not in processed_emails:
-                            processed_emails[email] = {}
+                    if identity:
+                        if identity not in processed_emails:
+                            processed_emails[identity] = {}
 
-                        if provider in processed_emails[email]:
-                            original_path = processed_emails[email][provider]
+                        if provider in processed_emails[identity]:
+                            original_path = processed_emails[identity][provider]
                             logging.warning(
-                                f"Duplicate for '{email}' on '{provider}' found in pre-scan: '{Path(path).name}'. Original: '{Path(original_path).name}'. Skipping."
+                                f"Duplicate for '{identity}' on '{provider}' found in pre-scan: '{Path(path).name}'. Original: '{Path(original_path).name}'. Skipping."
                             )
                             continue
                         else:
-                            processed_emails[email][provider] = path
+                            processed_emails[identity][provider] = path
 
                     credentials_to_initialize[provider].append(path)
 
@@ -529,8 +531,10 @@ async def lifespan(app: FastAPI):
                     return (provider, path, None, None)
 
                 user_info = await provider_instance.get_user_info(path)
-                email = user_info.get("email")
-                return (provider, path, email, None)
+                # Use email for identity (most providers), fall back to login
+                # (Copilot returns {"login": "username"} instead of email)
+                identity = user_info.get("email") or user_info.get("login")
+                return (provider, path, identity, None)
 
             except Exception as e:
                 logging.error(
@@ -563,23 +567,23 @@ async def lifespan(app: FastAPI):
                 logging.error(f"Credential processing raised exception: {result}")
                 continue
 
-            provider, path, email, error = result
+            provider, path, identity, error = result
 
             # Skip if there was an error
             if error:
                 continue
 
             # If provider doesn't support get_user_info, add directly
-            if email is None:
+            if identity is None:
                 if provider not in final_oauth_credentials:
                     final_oauth_credentials[provider] = []
                 final_oauth_credentials[provider].append(path)
                 continue
 
-            # Handle empty email
-            if not email:
+            # Handle empty identity
+            if not identity:
                 logging.warning(
-                    f"Could not retrieve email for '{path}'. Treating as unique."
+                    f"Could not retrieve identity for '{path}'. Treating as unique."
                 )
                 if provider not in final_oauth_credentials:
                     final_oauth_credentials[provider] = []
@@ -587,20 +591,20 @@ async def lifespan(app: FastAPI):
                 continue
 
             # Deduplication check
-            if email not in processed_emails:
-                processed_emails[email] = {}
+            if identity not in processed_emails:
+                processed_emails[identity] = {}
 
             if (
-                provider in processed_emails[email]
-                and processed_emails[email][provider] != path
+                provider in processed_emails[identity]
+                and processed_emails[identity][provider] != path
             ):
-                original_path = processed_emails[email][provider]
+                original_path = processed_emails[identity][provider]
                 logging.warning(
-                    f"Duplicate for '{email}' on '{provider}' found post-init: '{Path(path).name}'. Original: '{Path(original_path).name}'. Skipping."
+                    f"Duplicate for '{identity}' on '{provider}' found post-init: '{Path(path).name}'. Original: '{Path(original_path).name}'. Skipping."
                 )
                 continue
             else:
-                processed_emails[email][provider] = path
+                processed_emails[identity][provider] = path
                 if provider not in final_oauth_credentials:
                     final_oauth_credentials[provider] = []
                 final_oauth_credentials[provider].append(path)
@@ -611,7 +615,7 @@ async def lifespan(app: FastAPI):
                         with open(path, "r+") as f:
                             data = json.load(f)
                             metadata = data.get("_proxy_metadata", {})
-                            metadata["email"] = email
+                            metadata["email"] = identity
                             metadata["last_check_timestamp"] = time.time()
                             data["_proxy_metadata"] = metadata
                             f.seek(0)

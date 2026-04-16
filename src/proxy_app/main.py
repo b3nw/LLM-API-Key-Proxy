@@ -407,6 +407,38 @@ for key, value in os.environ.items():
             f"Loaded whitelist for provider '{provider}': {models_to_whitelist}"
         )
 
+# Load model aliases from environment variable
+# Format: MODEL_ALIASES="from_model:to_model,from_model2:to_model2"
+# Example: MODEL_ALIASES="nanogpt/glm-5.1:nanogpt/glm-5,nanogpt/glm-5.1-thinking:nanogpt/glm-5-thinking"
+# This rewrites the model name in incoming requests before any routing occurs,
+# allowing transparent redirection when a model is temporarily unavailable.
+model_aliases: dict[str, str] = {}
+_aliases_raw = os.getenv("MODEL_ALIASES", "")
+if _aliases_raw:
+    for pair in _aliases_raw.split(","):
+        pair = pair.strip()
+        if ":" in pair:
+            from_model, to_model = pair.split(":", 1)
+            from_model = from_model.strip()
+            to_model = to_model.strip()
+            if from_model and to_model:
+                model_aliases[from_model] = to_model
+    if model_aliases:
+        logging.info(
+            f"Loaded {len(model_aliases)} model alias(es): "
+            + ", ".join(f"{k} → {v}" for k, v in model_aliases.items())
+        )
+
+
+def apply_model_alias(model_name: str) -> str:
+    """Rewrite model name if it matches a configured alias."""
+    if not model_aliases:
+        return model_name
+    rewritten = model_aliases.get(model_name)
+    if rewritten:
+        logging.info(f"Model alias: {model_name} → {rewritten}")
+        return rewritten
+    return model_name
 
 # Load max concurrent requests per key from environment variables
 max_concurrent_requests_per_key = {}
@@ -945,14 +977,16 @@ async def chat_completions(
 
         # Apply model alias rewriting (transparent redirect for unavailable models)
         if "model" in request_data:
-            # First: resolve smart "latest" aliases (dynamic, uses live model cache)
+            # Static aliases first (ENV-configured redirects)
+            request_data["model"] = apply_model_alias(request_data["model"])
+
+            # Then resolve smart "latest" aliases (dynamic, uses live model cache)
             resolved = await client.resolve_latest_async(request_data["model"])
             if resolved:
                 logging.info(
                     f"Latest alias: {request_data['model']} → {resolved}"
                 )
                 request_data["model"] = resolved
-
 
 
         # Extract and log specific reasoning parameters for monitoring.
@@ -1070,12 +1104,16 @@ async def anthropic_messages(
     try:
         # Apply model alias rewriting (transparent redirect for unavailable models)
         if body.model:
-            # First: resolve smart "latest" aliases (dynamic, uses live model cache)
+            # Static aliases first
+            rewritten = apply_model_alias(body.model)
+            if rewritten != body.model:
+                body.model = rewritten
+
+            # Then resolve smart "latest" aliases
             resolved = await client.resolve_latest_async(body.model)
             if resolved:
                 logging.info(f"Latest alias: {body.model} → {resolved}")
                 body.model = resolved
-
 
 
         # Log the request to console
@@ -1333,18 +1371,15 @@ async def list_models(
     model_ids = await client.get_all_available_models(grouped=False)
 
 
-
+    # Append canonical alias model names (cross-provider routing)
+    alias_models = client.alias_registry.get_canonical_models()
+    if alias_models:
+        model_ids = list(model_ids) + alias_models
 
     # Append smart "latest" virtual model names
     latest_models = client.latest_registry.get_virtual_models()
     if latest_models:
         model_ids = list(model_ids) + latest_models
-
-    # Append virtual "latest" models
-    if hasattr(client, "latest_registry") and client.latest_registry:
-        latest_models = client.latest_registry.get_virtual_models()
-        if latest_models:
-            model_ids = list(model_ids) + latest_models
 
     if enriched and hasattr(request.app.state, "model_info_service"):
         model_info_service = request.app.state.model_info_service

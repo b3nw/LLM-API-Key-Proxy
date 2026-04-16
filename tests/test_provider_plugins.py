@@ -60,6 +60,8 @@ class TestDynamicProviderCreation:
 
     def test_dynamic_provider_without_base_raises(self):
         """DynamicOpenAICompatibleProvider raises without _API_BASE."""
+        # Clear singleton instance to force __init__
+        SingletonABCMeta._instances.pop(DynamicOpenAICompatibleProvider, None)
         with patch.dict(os.environ, {}, clear=True):
             with pytest.raises(ValueError, match="_API_BASE"):
                 DynamicOpenAICompatibleProvider("nonexistent")

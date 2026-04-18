@@ -1482,6 +1482,227 @@ async def list_providers(_=Depends(verify_api_key)):
     return list(PROVIDER_PLUGINS.keys())
 
 
+@app.get("/v1/health")
+async def health_check(
+    request: Request,
+    client: RotatingClient = Depends(get_rotating_client),
+    _=Depends(verify_api_key),
+    detail: str = "summary",
+):
+    """
+    Health and diagnostics endpoint for the proxy.
+
+    Query Parameters:
+        detail: Level of detail to return.
+            - "summary" (default): status, uptime, provider/credential counts,
+              and a list of providers with recent errors.
+            - "full": Adds per-model usage stats for the current primary window
+              per provider, plus an aggregated error summary from the ring buffer.
+
+    Returns:
+        {
+            "status": "healthy",
+            "uptime_seconds": int,
+            "timestamp": str (ISO-8601),
+            "providers": {
+                "total": int,
+                "active": [str],
+                "with_errors": [str]
+            },
+            "credentials": {
+                "total": int,
+                "active": int,
+                "on_cooldown": int,
+                "exhausted": int
+            },
+            // detail=full only:
+            "models_current_window": [...],
+            "errors": { "total_errors": int, "by_provider": {...}, "by_model": {...} }
+        }
+    """
+    from datetime import datetime, timezone
+    from rotator_library.error_tracker import get_error_tracker
+
+    now_ts = time.time()
+    uptime_seconds = int(now_ts - _start_time)
+    timestamp = datetime.fromtimestamp(now_ts, tz=timezone.utc).isoformat()
+
+    # --- Credential / provider aggregation ---
+    total_credentials = 0
+    active_credentials = 0
+    on_cooldown_credentials = 0
+    exhausted_credentials = 0
+    active_providers = []
+
+    try:
+        full_stats = await client.get_quota_stats()
+        for provider_name, pstats in full_stats.get("providers", {}).items():
+            active_providers.append(provider_name)
+            total_credentials += pstats.get("credential_count", 0)
+            active_credentials += pstats.get("active_count", 0)
+            exhausted_credentials += pstats.get("exhausted_count", 0)
+            cred_count = pstats.get("credential_count", 0)
+            on_cooldown_credentials += max(
+                0,
+                cred_count
+                - pstats.get("active_count", 0)
+                - pstats.get("exhausted_count", 0),
+            )
+    except Exception as e:
+        logging.error(f"Health endpoint: failed to get quota stats: {e}")
+        full_stats = {"providers": {}}
+
+    # Providers that have any buffered errors
+    tracker = get_error_tracker()
+    error_summary = tracker.get_error_summary()
+    providers_with_errors = sorted(error_summary.get("by_provider", {}).keys())
+
+    response = {
+        "status": "healthy",
+        "uptime_seconds": uptime_seconds,
+        "timestamp": timestamp,
+        "providers": {
+            "total": len(active_providers),
+            "active": sorted(active_providers),
+            "with_errors": providers_with_errors,
+        },
+        "credentials": {
+            "total": total_credentials,
+            "active": active_credentials,
+            "on_cooldown": on_cooldown_credentials,
+            "exhausted": exhausted_credentials,
+        },
+    }
+
+    if detail == "full":
+        # --- Per-model stats from primary window ---
+        # Aggregate across all credentials, keyed by model name.
+        # Uses each provider's primary window (e.g. "5h", "daily").
+        model_agg: dict = {}  # model_id -> aggregated block
+
+        for provider_name, pstats in full_stats.get("providers", {}).items():
+            manager = client.get_usage_manager(provider_name)
+            primary_window_name = None
+            if manager:
+                try:
+                    primary_def = manager._window_manager.get_primary_definition()
+                    primary_window_name = primary_def.name if primary_def else None
+                except Exception:
+                    pass
+
+            for cred_data in pstats.get("credentials", {}).values():
+                for model_id, mu in cred_data.get("model_usage", {}).items():
+                    window_data = None
+                    if primary_window_name:
+                        window_data = mu.get("windows", {}).get(primary_window_name)
+
+                    if not window_data or window_data.get("request_count", 0) == 0:
+                        continue
+
+                    # Convert timestamps to ISO strings
+                    started_ts = window_data.get("first_used_at")
+                    window_started_at = (
+                        datetime.fromtimestamp(started_ts, tz=timezone.utc).isoformat()
+                        if started_ts
+                        else None
+                    )
+                    last_used_ts = window_data.get("last_used_at")
+                    last_used_str = (
+                        datetime.fromtimestamp(last_used_ts, tz=timezone.utc).isoformat()
+                        if last_used_ts
+                        else None
+                    )
+
+                    if model_id not in model_agg:
+                        model_agg[model_id] = {
+                            "model": model_id,
+                            "provider": provider_name,
+                            "window_name": primary_window_name,
+                            "window_started_at": window_started_at,
+                            "requests": 0,
+                            "success_count": 0,
+                            "failure_count": 0,
+                            "tokens": {"prompt": 0, "completion": 0, "total": 0},
+                            "approx_cost": 0.0,
+                            "last_used": None,
+                        }
+
+                    entry = model_agg[model_id]
+                    entry["requests"] += window_data.get("request_count", 0)
+                    entry["success_count"] += window_data.get("success_count", 0)
+                    entry["failure_count"] += window_data.get("failure_count", 0)
+                    entry["tokens"]["prompt"] += window_data.get("prompt_tokens", 0)
+                    entry["tokens"]["completion"] += window_data.get("completion_tokens", 0)
+                    raw_total = window_data.get("total_tokens", 0) or (
+                        window_data.get("prompt_tokens", 0)
+                        + window_data.get("completion_tokens", 0)
+                    )
+                    entry["tokens"]["total"] += raw_total
+                    if window_data.get("approx_cost"):
+                        entry["approx_cost"] += window_data["approx_cost"]
+
+                    # Newest last_used wins
+                    if last_used_str and (
+                        entry["last_used"] is None or last_used_str > entry["last_used"]
+                    ):
+                        entry["last_used"] = last_used_str
+                    # Earliest window_started_at wins
+                    if window_started_at and (
+                        entry["window_started_at"] is None
+                        or window_started_at < entry["window_started_at"]
+                    ):
+                        entry["window_started_at"] = window_started_at
+
+        # Sort by request count descending
+        models_list = sorted(
+            model_agg.values(), key=lambda m: m["requests"], reverse=True
+        )
+
+        response["models_current_window"] = models_list
+        response["errors"] = error_summary
+
+    return response
+
+
+@app.get("/v1/health/errors")
+async def health_errors(
+    _=Depends(verify_api_key),
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+    limit: int = 5,
+):
+    """
+    Returns recent error records from the in-memory error ring buffer.
+
+    Query Parameters:
+        provider: Filter by provider name (e.g., "modal"). Optional.
+        model: Filter by full model ID (e.g., "modal/qwen3-coder-480b"). Optional.
+               When both are specified, both filters apply.
+        limit: Maximum number of records to return (default: 5, max: 50).
+
+    Returns:
+        {
+            "errors": [ErrorRecord, ...],   // newest first
+            "total_matching": int,
+            "limit": int
+        }
+    """
+    from rotator_library.error_tracker import get_error_tracker
+
+    tracker = get_error_tracker()
+    records, total_matching = tracker.get_recent_errors(
+        provider=provider,
+        model=model,
+        limit=limit,
+    )
+
+    return {
+        "errors": [r.to_dict() for r in records],
+        "total_matching": total_matching,
+        "limit": min(max(1, limit), 50),
+    }
+
+
 @app.get("/v1/admin/latest-aliases")
 async def get_latest_aliases(
     client: RotatingClient = Depends(get_rotating_client),

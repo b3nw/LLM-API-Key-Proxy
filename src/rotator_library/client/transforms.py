@@ -64,6 +64,7 @@ class ProviderTransforms:
             "nvidia_nim": [self._transform_nvidia_thinking],
             "iflow": [self._transform_iflow_stream_options],
             "dedaluslabs": [self._transform_dedaluslabs_tool_choice],
+            "chutes": [self._transform_chutes_allowed_params],
             "kimi-k2.5": [self._transform_kimi_parameters],
             "glm-5": [self._transform_glm5_max_tokens],
             "glm-4": [self._transform_glm5_max_tokens],
@@ -377,6 +378,44 @@ class ProviderTransforms:
             del kwargs["tool_choice"]
             return "dedaluslabs: removed tool_choice=auto"
         return None
+
+    # OpenAI-compatible params that LiteLLM's Chutes provider config
+    # doesn't declare support for.  Without this list, drop_params=True
+    # causes LiteLLM to silently strip tools / tool_choice / etc.
+    _CHUTES_ALLOWED_OPENAI_PARAMS = [
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "response_format",
+    ]
+
+    def _transform_chutes_allowed_params(
+        self,
+        kwargs: Dict[str, Any],
+        model: str,
+        provider: str,
+    ) -> Optional[str]:
+        """
+        Inject allowed_openai_params for Chutes provider.
+
+        LiteLLM's built-in Chutes provider config doesn't advertise support
+        for tool calling parameters (tools, tool_choice, etc.), so with
+        litellm.drop_params=True they get silently removed.  This transform
+        tells LiteLLM these standard OpenAI params are safe to pass through
+        to the Chutes API, which is fully OpenAI-compatible.
+        """
+        if provider != "chutes":
+            return None
+
+        # Only inject if the request actually uses any of these params
+        has_tool_params = any(k in kwargs for k in self._CHUTES_ALLOWED_OPENAI_PARAMS)
+        if not has_tool_params:
+            return None
+
+        existing = kwargs.get("allowed_openai_params", [])
+        merged = list(set(existing) | set(self._CHUTES_ALLOWED_OPENAI_PARAMS))
+        kwargs["allowed_openai_params"] = merged
+        return "chutes: injected allowed_openai_params for tool calling"
 
     def _transform_kimi_parameters(
         self,

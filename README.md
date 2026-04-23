@@ -24,7 +24,7 @@ A personal fork of [Mirrowel/LLM-API-Key-Proxy](https://github.com/Mirrowel/LLM-
 | **Kilocode** | OpenAI-compatible provider with frequent free model offerings |
 | **Chutes** | Dollar credit quota tracking with sliding window, tool-calling support |
 | **Lightning AI** | Dollar credit quotas with date-based parsing |
-| **Vertex AI** | Express Mode API key auth via `x-goog-api-key`, dynamic model discovery |
+| **Vertex AI** | Express Mode API key auth via `x-goog-api-key`, curated model list (Vertex has no `/v1/models` endpoint) |
 | **Opencode Go** | 3-window quota tracking (`5hr`, `weekly`, `monthly`) via SolidJS scraping, custom OpenAI routing |
 
 ### Smart "Latest" Model Aliases
@@ -571,6 +571,12 @@ VERTEX_PROJECT=your-default-project-id  # optional if keys embed project
 VERTEX_LOCATION=global
 VERTEX_API_KEY_1=your-vertex-express-key             # uses VERTEX_PROJECT
 VERTEX_API_KEY_2=other-project:your-other-key        # project embedded in key
+
+# Vertex does not expose a v1/models endpoint, so model discovery is
+# not possible at runtime. A curated set of known-active models is
+# provided as defaults. To override (e.g. when Google ships a new model),
+# set VERTEX_MODELS to a comma-separated list of bare model names:
+# VERTEX_MODELS=gemini-2.5-pro,gemini-3-flash-preview,my-new-model
 
 # Opencode Go (scraped quota tracking)
 # Format: sk-key (required) or api_key:workspace_id:auth_cookie (workspace and cookie optional)

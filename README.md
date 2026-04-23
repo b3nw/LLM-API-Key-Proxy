@@ -19,6 +19,7 @@ A personal fork of [Mirrowel/LLM-API-Key-Proxy](https://github.com/Mirrowel/LLM-
 | **Chutes** | Dollar credit quota tracking with sliding window, tool-calling support |
 | **Firmware** | Credit balance tracking with dollar-denominated displays |
 | **Lightning AI** | Dollar credit quotas with date-based parsing |
+| **Vertex AI** | Express Mode API key auth via `x-goog-api-key`, dynamic model discovery |
 
 ### Smart "Latest" Model Aliases
 
@@ -81,6 +82,12 @@ ZENMUX_API_KEY_1=your-zenmux-key
 # Global concurrency default (max concurrent requests per key across all providers)
 # Per-provider override: MAX_CONCURRENT_REQUESTS_PER_KEY_<PROVIDER>=N
 MAX_CONCURRENT_REQUESTS_PER_KEY=1
+
+# Vertex AI (Express Mode API key)
+VERTEX_PROJECT=your-default-project-id  # optional if keys embed project
+VERTEX_LOCATION=global
+VERTEX_API_KEY_1=your-vertex-express-key             # uses VERTEX_PROJECT
+VERTEX_API_KEY_2=other-project:your-other-key        # project embedded in key
 
 # Per-provider retry overrides
 MAX_RETRIES_NANOGPT=2

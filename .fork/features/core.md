@@ -52,3 +52,67 @@ Notes:
   post-thinking content was suppressed as reasoning_content.
 - The tag-based detection in `_split_thought_tags` remains for providers that emit
   tags but where LiteLLM does not strip them (e.g. `<thought>` from Gemma-4).
+
+## 2026-06-22 — Multi-segment display keys for PROVIDER_MODELS
+
+Target: `feat(core): infrastructure improvements - latest aliases, error standardization, and utilities`
+Files:
+- `src/rotator_library/client/models.py`
+- `src/rotator_library/model_definitions.py`
+- `src/rotator_library/providers/openai_compatible_provider.py`
+- `.fork/stack.yml` (added file ownership for model_definitions.py, openai_compatible_provider.py)
+
+Verification:
+- `uv run python3 -m py_compile` — passed (all 3 files)
+- `uv run ruff check --select F401,F811,F821,E9` — passed (all 3 files)
+- Hot-patched llm-proxy-dev: models listed as `umans/moonshot/kimi-k2.6` etc.
+- Pricing fuzzy-matched correctly for kimi-k2.6, glm-5.1, glm-5.2
+- Routing test: `umans/moonshot/kimi-k2` resolved to `umans-kimi-k2.6` upstream, response received
+
+Notes:
+- Enables aggregation providers (like umans) to present canonical `provider/org/model`
+  display names via `PROVIDER_MODELS` dict keys containing slashes, while routing
+  the `"id"` value to the upstream API.
+- `ModelResolver.resolve_model_id`: changed `split("/")[-1]` to `split("/", 1)[1]`
+  so multi-segment keys like `moonshot/kimi-k2.6` are preserved during lookup.
+- `ModelDefinitions.get_model_definition`: added last-segment fallback so existing
+  single-segment configs still work when the resolver passes multi-segment names.
+- `OpenAICompatibleProvider.get_models`: dedup now checks both display-key suffixes
+  and explicit `"id"` values from static definitions, preventing dynamic discovery
+  from re-adding models that have a static display mapping.
+- `OpenAICompatibleProvider.get_model_options`: strips provider prefix correctly
+  instead of taking only the last segment.
+
+## 2026-06-22 — Sub-provider alias resolution and upstream context overrides
+
+Target: `feat(core): infrastructure improvements - latest aliases, error standardization, and utilities`
+Files:
+- `src/rotator_library/model_info_service.py`
+- `src/proxy_app/main.py`
+
+Working commits before autosquash:
+- `b9966964 fixup! feat(core): infrastructure improvements - latest aliases, error standardization, and utilities`
+
+Changes:
+- `model_info_service._get_alias_candidates()`: for multi-segment model IDs
+  (e.g. `umans/moonshot/kimi-k2.6`), generate alias candidates for the
+  sub-provider segment using `PROVIDER_ALIASES` (moonshot→moonshotai,
+  z-ai→zai/zhipuai, qwen→alibaba).
+- `model_info_service._resolve_model()` Step 3: fuzzy index search now includes
+  alias candidates alongside the raw model ID for better matching.
+- `PROVIDER_ALIASES` expanded with `moonshot`, `z-ai`, `qwen` entries.
+- `main.py /v1/models`: generic loop applies upstream-authoritative context
+  window overrides from providers (like Umans) that fetch context data during
+  model discovery, overriding models.dev enrichment values.
+
+Verification:
+- `uv run python3 -m py_compile` — passed (both files)
+- `uv run ruff check --select F401,F811,F821,E9` — passed (both files)
+- Hot-patched llm-proxy-dev: pricing resolved correctly for all umans models
+- `/v1/models` context_window values match upstream API (e.g. glm-5.2: 405504)
+
+Notes:
+- The sub-provider aliasing is generic and will benefit any future aggregation
+  provider that uses multi-segment display keys.
+- Context window override loop is guarded with try/except and only runs for
+  providers known to supply `get_model_context_overrides()`.

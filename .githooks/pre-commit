@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# Pre-commit hook: syntax + undefined-name checks on staged Python files,
+# and rejection of any staged symlinks.
+# Uses only stdlib (py_compile) so it works with no extra installs.
+# If ruff is present it also runs the critical F8xx checks.
+
+set -euo pipefail
+
+ERRORS=0
+
+# ── 0. Reject staged symlinks ────────────────────────────────────────────────
+SYMLINKS=$(git diff --cached --name-only --diff-filter=ACM | while read -r f; do
+    mode=$(git ls-files --stage -- "$f" 2>/dev/null | awk '{print $1}')
+    if [[ "$mode" == "120000" ]]; then
+        echo "$f"
+    fi
+done || true)
+
+if [[ -n "$SYMLINKS" ]]; then
+    echo "❌ pre-commit: staged symlinks are NOT allowed in this repository:"
+    echo "$SYMLINKS" | while read -r s; do echo "  → $s"; done
+    echo ""
+    echo "Remove them with: git rm --cached <path>"
+    ERRORS=$((ERRORS + 1))
+fi
+
+# ── 1. Python file checks ────────────────────────────────────────────────────
+STAGED=$(git diff --cached --name-only --diff-filter=ACM | grep '\.py$' || true)
+
+if [[ -z "$STAGED" && "$ERRORS" -eq 0 ]]; then
+    exit 0
+elif [[ -z "$STAGED" && "$ERRORS" -gt 0 ]]; then
+    echo ""
+    echo "❌ pre-commit FAILED — fix the errors above before committing."
+    exit 1
+fi
+
+echo "🔍 pre-commit: checking staged Python files..."
+
+# ── 1a. Syntax check (py_compile — always available) ─────────────────────────
+for f in $STAGED; do
+    if ! python3 -m py_compile "$f" 2>&1; then
+        echo "  ✗ syntax error in $f"
+        ERRORS=$((ERRORS + 1))
+    fi
+done
+
+# ── 1b. Undefined names + missing imports (ruff F8xx) ────────────────────────
+RUFF=""
+for candidate in .venv/bin/ruff venv/bin/ruff; do
+    if [[ -x "$candidate" ]]; then
+        RUFF="$candidate"
+        break
+    fi
+done
+if [[ -z "$RUFF" ]] && command -v ruff &>/dev/null; then
+    RUFF="ruff"
+fi
+
+if [[ -n "$RUFF" ]]; then
+    if ! $RUFF check $STAGED --select F401,F811,F821,E9 --quiet; then
+        ERRORS=$((ERRORS + 1))
+    fi
+else
+    echo "  ⚠  ruff not found — skipping undefined-name checks (run: pip install ruff)"
+fi
+
+# ── 2. Fork stack validation ─────────────────────────────────────────────────
+if [[ -f ".fork/check-stack.py" ]]; then
+    PYTHON=""
+    for candidate in .venv/bin/python venv/bin/python; do
+        if [[ -x "$candidate" ]]; then
+            PYTHON="$candidate"
+            break
+        fi
+    done
+    if [[ -z "$PYTHON" ]] && command -v python3 &>/dev/null; then
+        PYTHON="python3"
+    fi
+
+    if [[ -n "$PYTHON" ]]; then
+        if ! $PYTHON .fork/check-stack.py 2>&1; then
+            echo "  ✗ .fork/check-stack.py failed"
+            ERRORS=$((ERRORS + 1))
+        fi
+    fi
+fi
+
+if [[ "$ERRORS" -gt 0 ]]; then
+    echo ""
+    echo "❌ pre-commit FAILED — fix the errors above before committing."
+    exit 1
+fi
+
+echo "✅ pre-commit checks passed."
+exit 0

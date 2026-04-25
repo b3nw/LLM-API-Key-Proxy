@@ -91,3 +91,40 @@ class TestSanitizeThinking:
         """Empty payload doesn't crash."""
         result = sanitize_request_payload({}, "any-model")
         assert result == {}
+
+    def test_thinking_with_invalid_type(self):
+        """thinking parameter with non-dict type doesn't crash and is not removed."""
+        payload = {
+            "model": "some-model",
+            "messages": [],
+            "thinking": "enabled",  # String instead of dict
+        }
+        result = sanitize_request_payload(copy.deepcopy(payload), "some-model")
+        assert "thinking" in result
+        assert result["thinking"] == "enabled"
+
+
+class TestSanitizeCombined:
+    """Test payloads containing multiple parameters that need sanitization."""
+
+    def test_both_removed_for_unsupported_model(self):
+        """Both dimensions and thinking are removed for unsupported model."""
+        payload = {
+            "model": "anthropic/claude-3-opus",
+            "input": "test",
+            "dimensions": 1024,
+            "thinking": {"type": "enabled", "budget_tokens": -1},
+        }
+        result = sanitize_request_payload(copy.deepcopy(payload), "anthropic/claude-3-opus")
+        assert "dimensions" not in result
+        assert "thinking" not in result
+
+    def test_dimensions_removed_for_openai_non_embedding(self):
+        """Dimensions removed for OpenAI chat models."""
+        payload = {
+            "model": "openai/gpt-4o",
+            "messages": [],
+            "dimensions": 512,
+        }
+        result = sanitize_request_payload(copy.deepcopy(payload), "openai/gpt-4o")
+        assert "dimensions" not in result

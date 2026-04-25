@@ -20,6 +20,9 @@ def reset_failure_logger_state():
 
     yield
 
+    # Clear handlers from the failure logger to prevent accumulation
+    logging.getLogger("failure_logger").handlers.clear()
+
     failure_logger_module._failure_logger = original_logger
     failure_logger_module._configured_logs_dir = original_configured_dir
 
@@ -53,7 +56,7 @@ def test_get_failure_logger_with_configured_dir(tmp_path):
 
         get_failure_logger()
 
-        mock_setup.assert_called_once_with(Path(tmp_path))
+        mock_setup.assert_called_once_with(tmp_path)
 
 def test_get_failure_logger_with_get_logs_dir_fallback():
     """Verify that get_failure_logger falls back to get_logs_dir() if no directory has been configured."""
@@ -72,3 +75,16 @@ def test_get_failure_logger_with_get_logs_dir_fallback():
 
             mock_get_logs_dir.assert_called_once()
             mock_setup.assert_called_once_with(fallback_dir)
+
+def test_get_failure_logger_directory_creation_failure(tmp_path):
+    """Verify get_failure_logger adds a NullHandler if directory creation fails."""
+    configure_failure_logger(tmp_path)
+
+    with patch("pathlib.Path.mkdir") as mock_mkdir:
+        mock_mkdir.side_effect = PermissionError("Permission denied")
+
+        logger = get_failure_logger()
+
+        assert isinstance(logger, logging.Logger)
+        assert len(logger.handlers) == 1
+        assert isinstance(logger.handlers[0], logging.NullHandler)

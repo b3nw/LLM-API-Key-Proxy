@@ -1,8 +1,23 @@
-import pytest
 from pathlib import Path
+
+import pytest
 
 from rotator_library import failure_logger
 from rotator_library.failure_logger import configure_failure_logger
+
+
+@pytest.fixture(autouse=True)
+def cleanup_failure_logger_globals():
+    """Fixture to reset module-level globals before and after each test for isolation."""
+    # Store initial state (likely None, but good practice)
+    original_logs_dir = failure_logger._configured_logs_dir
+    original_logger = failure_logger._failure_logger
+
+    yield
+
+    # Restore original state after test
+    failure_logger._configured_logs_dir = original_logs_dir
+    failure_logger._failure_logger = original_logger
 
 
 class TestConfigureFailureLogger:

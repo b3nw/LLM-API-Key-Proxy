@@ -1,19 +1,15 @@
 import pytest
-from rotator_library.provider_config import get_provider_ui_config, LITELLM_PROVIDERS
+from rotator_library.provider_config import get_provider_ui_config
 
-def test_get_provider_ui_config_existing():
-    # Test getting an existing provider's UI config
-    # We use the first key in the dictionary to avoid hardcoding a specific provider name,
-    # ensuring the test remains robust if the configuration changes.
-    if not LITELLM_PROVIDERS:
-        pytest.skip("LITELLM_PROVIDERS is empty, cannot test existing provider")
-
-    first_provider = next(iter(LITELLM_PROVIDERS.keys()))
-    expected_config = LITELLM_PROVIDERS[first_provider]
-
-    result = get_provider_ui_config(first_provider)
-    assert result == expected_config
-    assert "category" in result
+@pytest.mark.parametrize("provider,expected_category", [
+    ("openai", "popular"),
+    ("anthropic", "popular"),
+    ("gemini", "popular"),
+])
+def test_get_provider_ui_config_existing(provider, expected_category):
+    # Test getting an existing provider's UI config using hardcoded expectations
+    result = get_provider_ui_config(provider)
+    assert result["category"] == expected_category
 
 def test_get_provider_ui_config_missing():
     # Test getting a missing provider's UI config

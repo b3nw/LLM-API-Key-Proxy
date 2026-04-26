@@ -1,23 +1,19 @@
 import threading
 import pytest
-import importlib.util
-import sys
 
-# Load error_tracker bypassing package-level imports
-spec = importlib.util.spec_from_file_location("error_tracker", "src/rotator_library/error_tracker.py")
-error_tracker_module = importlib.util.module_from_spec(spec)
-sys.modules["error_tracker"] = error_tracker_module
-spec.loader.exec_module(error_tracker_module)
-
-ErrorTracker = error_tracker_module.ErrorTracker
-get_error_tracker = error_tracker_module.get_error_tracker
+from rotator_library.error_tracker import ErrorTracker, get_error_tracker
+import rotator_library.error_tracker as error_tracker_module
 
 @pytest.fixture(autouse=True)
 def reset_error_tracker():
     """Reset the global _error_tracker to None before and after each test."""
-    original_tracker = getattr(error_tracker_module, "_error_tracker", None)
+    original_tracker = error_tracker_module._error_tracker
+    if error_tracker_module._error_tracker:
+        error_tracker_module._error_tracker.clear()
     error_tracker_module._error_tracker = None
     yield
+    if error_tracker_module._error_tracker:
+        error_tracker_module._error_tracker.clear()
     error_tracker_module._error_tracker = original_tracker
 
 def test_get_error_tracker_returns_instance():
@@ -38,8 +34,11 @@ def test_get_error_tracker_thread_safe_initialization():
     results = []
 
     def worker():
-        barrier.wait()
-        results.append(get_error_tracker())
+        try:
+            barrier.wait(timeout=5.0)
+            results.append(get_error_tracker())
+        except threading.BrokenBarrierError:
+            pass
 
     threads = [threading.Thread(target=worker) for _ in range(num_threads)]
 
@@ -47,7 +46,8 @@ def test_get_error_tracker_thread_safe_initialization():
         t.start()
 
     for t in threads:
-        t.join()
+        t.join(timeout=5.0)
+        assert not t.is_alive(), "Thread hung indefinitely"
 
     assert len(results) == num_threads
 

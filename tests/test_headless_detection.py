@@ -6,15 +6,18 @@ from unittest.mock import patch
 from rotator_library.utils.headless_detection import is_headless_environment
 
 
+HEADLESS_ENV_VARS = [
+    "DISPLAY", "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "SESSIONNAME",
+    "CI", "GITHUB_ACTIONS", "GITLAB_CI", "JENKINS_URL", "CIRCLECI",
+    "TRAVIS", "BUILDKITE", "DRONE", "TEAMCITY_VERSION", "TF_BUILD", "CODEBUILD_BUILD_ID"
+]
+
+
 @pytest.fixture
 def clean_env(monkeypatch):
     """Fixture to ensure a clean environment for each test."""
     # Clear variables we care about
-    for var in [
-        "DISPLAY", "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "SESSIONNAME",
-        "CI", "GITHUB_ACTIONS", "GITLAB_CI", "JENKINS_URL", "CIRCLECI",
-        "TRAVIS", "BUILDKITE", "DRONE", "TEAMCITY_VERSION", "TF_BUILD", "CODEBUILD_BUILD_ID"
-    ]:
+    for var in HEADLESS_ENV_VARS:
         monkeypatch.delenv(var, raising=False)
 
     # Default mock: not a container
@@ -54,31 +57,26 @@ def test_windows_gui(clean_env):
         assert is_headless_environment() is False
 
 
-def test_windows_headless_services(clean_env):
-    """Test Windows with SESSIONNAME=services (headless)."""
+@pytest.mark.parametrize("session_name", ["services", "rdp-tcp", "Services"])
+def test_windows_headless_session(clean_env, session_name):
+    """Test Windows with different headless session names."""
     with patch("os.name", "nt"), patch("sys.platform", "win32"):
-        clean_env.setenv("SESSIONNAME", "services")
-        assert is_headless_environment() is True
-
-
-def test_windows_headless_rdp(clean_env):
-    """Test Windows with SESSIONNAME=rdp-tcp (headless)."""
-    with patch("os.name", "nt"), patch("sys.platform", "win32"):
-        clean_env.setenv("SESSIONNAME", "rdp-tcp")
-        assert is_headless_environment() is True
-
-
-def test_windows_headless_caps_sessionname(clean_env):
-    """Test Windows with capitalized SESSIONNAME=Services (headless)."""
-    with patch("os.name", "nt"), patch("sys.platform", "win32"):
-        clean_env.setenv("SESSIONNAME", "Services")
+        clean_env.setenv("SESSIONNAME", session_name)
         assert is_headless_environment() is True
 
 
 @pytest.mark.parametrize("ssh_var", ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"])
 def test_ssh_detection(clean_env, ssh_var):
     """Test SSH connection detection."""
-    with patch("os.name", "posix"), patch("sys.platform", "darwin"):  # use darwin so DISPLAY check doesn't trigger
+    # Test on Linux (posix/linux) with DISPLAY set so it would normally be GUI,
+    # but SSH overrides it and makes it headless.
+    with patch("os.name", "posix"), patch("sys.platform", "linux"):
+        clean_env.setenv("DISPLAY", ":0.0")  # normally GUI
+        clean_env.setenv(ssh_var, "1")
+        assert is_headless_environment() is True
+
+    # Test on macOS where DISPLAY is ignored
+    with patch("os.name", "posix"), patch("sys.platform", "darwin"):
         clean_env.setenv(ssh_var, "1")
         assert is_headless_environment() is True
 

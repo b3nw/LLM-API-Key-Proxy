@@ -65,16 +65,49 @@ def test_get_full_provider_config_unknown_provider():
             # Should fallback to default category and have no scraped properties
             assert config == {"category": "other"}
 
-def test_get_full_provider_config_partial_data():
-    """Test get_full_provider_config when provider is only in scraped or only in UI config."""
-    # Only in UI config
-    mock_litellm_providers = {"test_ui_only": {"category": "ui_only_category"}}
-    mock_scraped_providers = {}
+@pytest.mark.parametrize(
+    "scraped_data, ui_data, provider_key, expected",
+    [
+        (
+            {},
+            {"test_provider": {"category": "ui_only_category"}},
+            "test_provider",
+            {"category": "ui_only_category"}
+        ),
+        (
+            {"test_provider": {"api_base": "https://test.com"}},
+            {},
+            "test_provider",
+            {"api_base": "https://test.com", "category": "other"}
+        ),
+        (
+            {"test_provider": None},
+            {"test_provider": None},
+            "test_provider",
+            {"category": "other"}
+        ),
+        (
+            {"test_provider": {"category": "scraped_category", "api_base": "https://scraped.com"}},
+            {"test_provider": {"category": "ui_category", "note": "ui note"}},
+            "test_provider",
+            {"category": "ui_category", "api_base": "https://scraped.com", "note": "ui note"}
+        )
+    ]
+)
+def test_get_full_provider_config_parametrized(scraped_data, ui_data, provider_key, expected):
+    """Test get_full_provider_config with various partial and overlapping data scenarios."""
 
-    with patch("rotator_library.provider_config.SCRAPED_PROVIDERS", mock_scraped_providers):
-        with patch("rotator_library.provider_config.LITELLM_PROVIDERS", mock_litellm_providers):
-            config = get_full_provider_config("test_ui_only")
-            assert config == {"category": "ui_only_category"}
+    with patch("rotator_library.provider_config.SCRAPED_PROVIDERS", scraped_data):
+        with patch("rotator_library.provider_config.LITELLM_PROVIDERS", ui_data):
+            config = get_full_provider_config(provider_key)
+            assert config == expected
+
+def test_get_provider_ui_config_malformed():
+    """Test get_provider_ui_config when provider is malformed."""
+    mock_litellm_providers = {"malformed_provider": None}
+    with patch("rotator_library.provider_config.LITELLM_PROVIDERS", mock_litellm_providers):
+        config = get_provider_ui_config("malformed_provider")
+        assert config == {"category": "other"}
 
     # Only in scraped config
     mock_litellm_providers = {}

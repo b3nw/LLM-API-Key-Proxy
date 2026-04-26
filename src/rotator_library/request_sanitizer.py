@@ -11,7 +11,9 @@ def sanitize_request_payload(payload: Dict[str, Any], model: str) -> Dict[str, A
         del payload["dimensions"]
         
     if "thinking" in payload:
-        if not (model.startswith("gemini/") or "gemini-" in model):
+        is_gemini = model.startswith("gemini/") or "gemini-" in model
+        is_anthropic = model.startswith("anthropic/") or "claude-" in model
+        if not (is_gemini or is_anthropic):
             del payload["thinking"]
             
     return payload

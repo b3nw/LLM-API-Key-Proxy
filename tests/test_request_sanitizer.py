@@ -45,15 +45,25 @@ class TestSanitizeDimensions:
 class TestSanitizeThinking:
     """Test removal of `thinking` parameter for non-Gemini models."""
 
-    def test_thinking_removed_for_non_gemini(self):
-        """thinking is removed for models that aren't gemini/gemini-2.5-pro/flash."""
+    def test_thinking_removed_for_non_gemini_and_non_anthropic(self):
+        """thinking is removed for models that aren't gemini or anthropic models."""
         payload = {
-            "model": "claude-sonnet-4-5",
+            "model": "openai/gpt-4o",
             "messages": [],
             "thinking": {"type": "enabled", "budget_tokens": -1},
         }
         result = sanitize_request_payload(copy.deepcopy(payload), payload["model"])
         assert "thinking" not in result
+
+    def test_thinking_kept_for_anthropic(self):
+        """thinking is preserved for anthropic models."""
+        payload = {
+            "model": "anthropic/claude-3-7-sonnet",
+            "messages": [],
+            "thinking": {"type": "enabled", "budget_tokens": -1},
+        }
+        result = sanitize_request_payload(copy.deepcopy(payload), payload["model"])
+        assert "thinking" in result
 
     def test_thinking_kept_for_gemini_25_pro(self):
         """thinking is preserved for gemini/gemini-2.5-pro."""
@@ -107,7 +117,7 @@ class TestSanitizeCombined:
     def test_both_removed_for_unsupported_model(self):
         """Both dimensions and thinking are removed for unsupported model."""
         payload = {
-            "model": "anthropic/claude-3-opus",
+            "model": "some/unsupported-model",
             "input": "test",
             "dimensions": 1024,
             "thinking": {"type": "enabled", "budget_tokens": -1},

@@ -25,20 +25,20 @@ class TestSanitizeDimensions:
     def test_dimensions_removed_for_non_openai(self):
         """dimensions is removed for any model that isn't OpenAI text-embedding-3-*."""
         payload = {"model": "some-other-model", "input": "test", "dimensions": 512}
-        result = sanitize_request_payload(payload, payload["model"])
+        result = sanitize_request_payload(copy.deepcopy(payload), payload["model"])
         assert "dimensions" not in result
 
     def test_dimensions_kept_for_openai_embedding(self):
         """dimensions is preserved for OpenAI text-embedding-3 models."""
         for model in ["openai/text-embedding-3-small", "openai/text-embedding-3-large"]:
             payload = {"model": model, "input": "test", "dimensions": 512}
-            result = sanitize_request_payload(payload, payload["model"])
+            result = sanitize_request_payload(copy.deepcopy(payload), payload["model"])
             assert result["dimensions"] == 512
 
     def test_no_dimensions_key(self):
         """Payload without dimensions is unchanged."""
         payload = {"model": "test-model", "input": "test"}
-        result = sanitize_request_payload(payload, payload["model"])
+        result = sanitize_request_payload(copy.deepcopy(payload), payload["model"])
         assert result == payload
 
 
@@ -52,7 +52,7 @@ class TestSanitizeThinking:
             "messages": [],
             "thinking": {"type": "enabled", "budget_tokens": -1},
         }
-        result = sanitize_request_payload(payload, payload["model"])
+        result = sanitize_request_payload(copy.deepcopy(payload), payload["model"])
         assert "thinking" not in result
 
     def test_thinking_kept_for_gemini_25_pro(self):
@@ -62,7 +62,7 @@ class TestSanitizeThinking:
             "messages": [],
             "thinking": {"type": "enabled", "budget_tokens": -1},
         }
-        result = sanitize_request_payload(payload, payload["model"])
+        result = sanitize_request_payload(copy.deepcopy(payload), payload["model"])
         assert "thinking" in result
 
     def test_thinking_kept_for_gemini_25_flash(self):
@@ -72,7 +72,7 @@ class TestSanitizeThinking:
             "messages": [],
             "thinking": {"type": "enabled", "budget_tokens": -1},
         }
-        result = sanitize_request_payload(payload, payload["model"])
+        result = sanitize_request_payload(copy.deepcopy(payload), payload["model"])
         assert "thinking" in result
 
     def test_thinking_removed_if_different_value(self):
@@ -82,7 +82,7 @@ class TestSanitizeThinking:
             "messages": [],
             "thinking": {"type": "enabled", "budget_tokens": 5000},
         }
-        result = sanitize_request_payload(payload, payload["model"])
+        result = sanitize_request_payload(copy.deepcopy(payload), payload["model"])
         assert "thinking" not in result
 
     def test_empty_payload(self):
@@ -97,7 +97,7 @@ class TestSanitizeThinking:
             "messages": [],
             "thinking": "enabled",  # String instead of dict
         }
-        result = sanitize_request_payload(payload, payload["model"])
+        result = sanitize_request_payload(copy.deepcopy(payload), payload["model"])
         assert "thinking" not in result
 
 
@@ -112,7 +112,7 @@ class TestSanitizeCombined:
             "dimensions": 1024,
             "thinking": {"type": "enabled", "budget_tokens": -1},
         }
-        result = sanitize_request_payload(payload, payload["model"])
+        result = sanitize_request_payload(copy.deepcopy(payload), payload["model"])
         assert "dimensions" not in result
         assert "thinking" not in result
 
@@ -123,5 +123,5 @@ class TestSanitizeCombined:
             "messages": [],
             "dimensions": 512,
         }
-        result = sanitize_request_payload(payload, payload["model"])
+        result = sanitize_request_payload(copy.deepcopy(payload), payload["model"])
         assert "dimensions" not in result

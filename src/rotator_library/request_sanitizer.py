@@ -11,7 +11,7 @@ def sanitize_request_payload(payload: Dict[str, Any], model: str) -> Dict[str, A
         del payload["dimensions"]
         
     if "thinking" in payload:
-        if model not in ["gemini/gemini-2.5-pro", "gemini/gemini-2.5-flash"]:
+        if not (model.startswith("gemini/") or "gemini-" in model):
             del payload["thinking"]
             
     return payload

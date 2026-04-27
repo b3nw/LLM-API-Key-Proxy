@@ -20,6 +20,7 @@ A personal fork of [Mirrowel/LLM-API-Key-Proxy](https://github.com/Mirrowel/LLM-
 | **Firmware** | Credit balance tracking with dollar-denominated displays |
 | **Lightning AI** | Dollar credit quotas with date-based parsing |
 | **Vertex AI** | Express Mode API key auth via `x-goog-api-key`, dynamic model discovery |
+| **Opencode Go** | 3-window quota tracking (`5hr`, `weekly`, `monthly`) via SolidJS scraping, custom OpenAI routing |
 
 ### Smart "Latest" Model Aliases
 
@@ -84,6 +85,11 @@ VERTEX_PROJECT=your-default-project-id  # optional if keys embed project
 VERTEX_LOCATION=global
 VERTEX_API_KEY_1=your-vertex-express-key             # uses VERTEX_PROJECT
 VERTEX_API_KEY_2=other-project:your-other-key        # project embedded in key
+
+# Opencode Go (scraped quota tracking)
+# Format: sk-key (required) or api_key:workspace_id:auth_cookie (workspace and cookie optional)
+OPENCODE_GO_API_KEY_1=sk-...
+OPENCODE_GO_API_KEY_2=sk-...:wrk_...:auth=...
 
 # Per-provider retry overrides
 MAX_RETRIES_NANOGPT=2

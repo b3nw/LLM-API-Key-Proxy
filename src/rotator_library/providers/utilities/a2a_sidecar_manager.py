@@ -5,6 +5,7 @@ import asyncio
 import logging
 import os
 import subprocess
+import shlex
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -209,10 +210,15 @@ class A2ASidecarManager:
 
         # For sidecar mode, we need to update the env and restart the container
         # This uses docker compose to recreate with new environment
+        safe_dir = shlex.quote(str(self._compose_dir))
+        safe_cred = shlex.quote(str(abs_cred_path))
+        safe_project = shlex.quote(str(self._compose_project))
+        safe_service = shlex.quote(str(self._compose_service))
+
         cmd = (
-            f"cd {self._compose_dir} && "
-            f"GOOGLE_APPLICATION_CREDENTIALS={abs_cred_path} "
-            f"docker compose -p {self._compose_project} restart {self._compose_service}"
+            f"cd {safe_dir} && "
+            f"GOOGLE_APPLICATION_CREDENTIALS={safe_cred} "
+            f"docker compose -p {safe_project} restart {safe_service}"
         )
 
         lib_logger.info(f"[A2A Sidecar] Restarting container with new credential")

@@ -4,10 +4,9 @@
 import asyncio
 import logging
 import os
-import subprocess
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import List, Optional
 
 lib_logger = logging.getLogger("rotator_library")
 
@@ -209,16 +208,17 @@ class A2ASidecarManager:
 
         # For sidecar mode, we need to update the env and restart the container
         # This uses docker compose to recreate with new environment
-        cmd = (
-            f"cd {self._compose_dir} && "
-            f"GOOGLE_APPLICATION_CREDENTIALS={abs_cred_path} "
-            f"docker compose -p {self._compose_project} restart {self._compose_service}"
-        )
+        env = {
+            **os.environ,
+            "GOOGLE_APPLICATION_CREDENTIALS": abs_cred_path,
+        }
 
         lib_logger.info(f"[A2A Sidecar] Restarting container with new credential")
         try:
-            proc = await asyncio.create_subprocess_shell(
-                cmd,
+            proc = await asyncio.create_subprocess_exec(
+                "docker", "compose", "-p", self._compose_project, "restart", self._compose_service,
+                cwd=self._compose_dir,
+                env=env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )

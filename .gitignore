@@ -144,3 +144,4 @@ tests/*
 docs/ignored/
 .env
 .agent/
+.private/

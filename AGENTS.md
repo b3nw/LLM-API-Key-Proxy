@@ -185,3 +185,4 @@ git push origin dev --force-with-lease
 
 - **Deployment & hot-patching**: `.agent/rules/llm-proxy.md`
 - **Development environment**: `.agent/rules/claude.md`
+- **Local Docker testing** (container info, hot-patching, remote folder structure): `.private/README.md`

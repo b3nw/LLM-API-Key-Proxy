@@ -61,12 +61,14 @@ Match files to commits:
 
 ```bash
 # Syntax check (stdlib — zero deps)
-python3 -m py_compile <file.py>
+uv run python3 -m py_compile src/path/to/file.py
 
 # Undefined names / missing imports / unused imports
-# (ruff is installed: pip install ruff)
-ruff check <file.py> --select F401,F811,F821,E9
+uv run ruff check src/path/to/file.py --select F401,F811,F821,E9
 ```
+
+> This project uses `uv` for environment management. Always prefix `python3` and
+> `ruff` commands with `uv run` rather than relying on system-level installations.
 
 The pre-commit hook (`.git/hooks/pre-commit`) also runs these automatically when
 you `git commit`, but running them manually first gives faster feedback.
@@ -154,8 +156,8 @@ commit that touched the affected lines — resolve it there and continue.
    carefully. You can always compare with the current file content using
    `git stash` to save your work and inspect.
 
-7. **Always lint Python files before committing.** Run `python3 -m py_compile
-   <file>` and `ruff check <file> --select F401,F811,F821,E9` on every file
+7. **Always lint Python files before committing.** Run `uv run python3 -m py_compile
+   <file>` and `uv run ruff check <file> --select F401,F811,F821,E9` on every file
    you changed. The pre-commit hook enforces this automatically, but treat it
    as a manual checklist item too — catching errors before `git add` is faster
    than fixing a broken deployment.
@@ -172,8 +174,8 @@ git log --oneline upstream/dev..HEAD
 git log --oneline upstream/dev..HEAD -- path/to/file.py
 
 # Lint changed Python files (run BEFORE git add)
-python3 -m py_compile src/path/to/file.py
-ruff check src/path/to/file.py --select F401,F811,F821,E9
+uv run python3 -m py_compile src/path/to/file.py
+uv run ruff check src/path/to/file.py --select F401,F811,F821,E9
 
 # Make a fix and fold it in
 git commit -m "fixup! <exact commit message from git log>"

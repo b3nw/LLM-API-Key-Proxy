@@ -31,6 +31,41 @@ def parse_duration(duration_str: str) -> Optional[int]:
     return int(total_seconds) if total_seconds > 0 else None
 
 
+def _extract_body_from_exception(error: Exception) -> str:
+    """
+    Extract the error body string from various exception types.
+
+    Handles litellm, httpx, and generic exceptions.  When the body is a
+    Python object (dict/list) rather than a raw JSON string, we re-serialize
+    it with json.dumps so downstream JSON parsing succeeds.
+    """
+    # httpx response body (raw JSON string)
+    if hasattr(error, 'response') and hasattr(error.response, 'text'):
+        try:
+            return error.response.text
+        except Exception:
+            pass
+
+    # litellm body attribute – can be dict, list, str, or None
+    body_attr = getattr(error, 'body', None)
+    if body_attr is not None:
+        if isinstance(body_attr, str):
+            return body_attr
+        if isinstance(body_attr, (dict, list)):
+            try:
+                return json.dumps(body_attr)
+            except (TypeError, ValueError):
+                return str(body_attr)
+        return str(body_attr)
+
+    # litellm message attribute
+    message = getattr(error, 'message', None)
+    if message:
+        return str(message)
+
+    return str(error)
+
+
 def parse_google_quota_error(error: Exception, error_body: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
     Parse Google API 429 RESOURCE_EXHAUSTED errors.
@@ -41,16 +76,7 @@ def parse_google_quota_error(error: Exception, error_body: Optional[str] = None)
 
     Returns dict with retry_after, reason, etc., or None if not parseable.
     """
-    body = error_body
-    if not body:
-        if hasattr(error, 'response') and hasattr(error.response, 'text'):
-            body = error.response.text
-        elif hasattr(error, 'body'):
-            body = str(error.body) if not isinstance(error.body, str) else error.body
-        elif hasattr(error, 'message'):
-            body = str(error.message)
-        else:
-            body = str(error)
+    body = error_body if error_body else _extract_body_from_exception(error)
 
     try:
         parsed = json.loads(body)

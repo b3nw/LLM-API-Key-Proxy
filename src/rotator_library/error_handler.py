@@ -1166,13 +1166,18 @@ def classify_error(e: Exception, provider: Optional[str] = None) -> ClassifiedEr
         )
 
     if isinstance(e, (ServiceUnavailableError, InternalServerError)):
-        # These are often temporary server-side issues
+        # These are often temporary server-side issues — retry same key
+        # with exponential backoff (handled by should_retry_same_key).
+        # Do NOT set retry_after=30 here: that value exceeds the
+        # small_cooldown_threshold (10s), causing should_retry_same_key()
+        # to return False and the executor to rotate immediately instead
+        # of backing off and retrying the same credential.
         # Note: OpenAIError removed - it's too broad and can catch client errors
         return ClassifiedError(
             error_type="server_error",
             original_exception=e,
             status_code=status_code or 503,
-            retry_after=30,  # Default 30s cooldown for server errors
+            retry_after=None,
         )
 
     # StreamedAPIError: errors received inside SSE streams (e.g. Codex response.failed)
@@ -1282,12 +1287,14 @@ def should_retry_same_key(
             return False
 
     # Standard transient errors that should retry same key (when no retry_after is provided)
-    # rate_limit (429) is included because transient capacity errors are
-    # better handled by backing off and retrying the same credential,
-    # especially when there are few credentials available.
+    # rate_limit and quota_exceeded (429) are included because transient
+    # capacity errors (including Google RESOURCE_EXHAUSTED) are better
+    # handled by backing off and retrying the same credential, especially
+    # when there are few credentials available.
     retryable_errors = {
         "server_error",
         "api_connection",
         "rate_limit",
+        "quota_exceeded",
     }
     return classified_error.error_type in retryable_errors

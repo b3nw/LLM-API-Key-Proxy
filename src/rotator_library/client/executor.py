@@ -55,6 +55,7 @@ from ..core.errors import (
 from ..core.constants import (
     DEFAULT_MAX_RETRIES,
     DEFAULT_SMALL_COOLDOWN_RETRY_THRESHOLD,
+    DEFAULT_RATE_LIMIT_MAX_RETRY_AFTER,
     ENV_PREFIX_MAX_RETRIES,
 )
 from ..request_sanitizer import sanitize_request_payload
@@ -68,6 +69,7 @@ from .streaming import StreamingHandler
 
 if TYPE_CHECKING:
     from ..usage import UsageManager
+    from ..proxy_config import ProxiedClientPool
 
 lib_logger = logging.getLogger("rotator_library")
 
@@ -97,6 +99,7 @@ class RequestExecutor:
         litellm_provider_params: Optional[Dict[str, Any]] = None,
         litellm_logger_fn: Optional[Any] = None,
         provider_instances: Optional[Dict[str, Any]] = None,
+        client_pool: Optional["ProxiedClientPool"] = None,
     ):
         """
         Initialize RequestExecutor.
@@ -107,7 +110,7 @@ class RequestExecutor:
             credential_filter: CredentialFilter instance
             provider_transforms: ProviderTransforms instance
             provider_plugins: Dict mapping provider names to plugin classes
-            http_client: Shared httpx.AsyncClient for provider requests
+            http_client: Shared httpx.AsyncClient for provider requests (fallback)
             max_retries: Max retries per credential
             global_timeout: Global request timeout in seconds
             abort_on_callback_error: Abort on pre-request callback errors
@@ -116,6 +119,8 @@ class RequestExecutor:
             litellm_logger_fn: Optional callback function for LiteLLM logging
             provider_instances: Shared dict for caching provider instances.
                 If None, creates a new dict (not recommended - leads to duplicate instances).
+            client_pool: Optional ProxiedClientPool for proxy-aware HTTP clients.
+                When set, per-request clients are resolved from this pool.
         """
         self._usage_managers = usage_managers
         self._cooldown = cooldown_manager
@@ -126,6 +131,7 @@ class RequestExecutor:
             provider_instances if provider_instances is not None else {}
         )
         self._http_client = http_client
+        self._client_pool: Optional["ProxiedClientPool"] = client_pool
         self._max_retries = max_retries
         self._global_timeout = global_timeout
         self._abort_on_callback_error = abort_on_callback_error
@@ -136,6 +142,23 @@ class RequestExecutor:
         self._provider_retries_loaded = False
         # StreamingHandler no longer needs usage_manager - we pass cred_context directly
         self._streaming_handler = StreamingHandler()
+
+    async def _resolve_http_client(
+        self, provider: str, credential: str, stable_id: str
+    ) -> httpx.AsyncClient:
+        """Resolve the httpx client for a request, using proxy pool if available."""
+        if self._client_pool:
+            return await self._client_pool.get_client(provider, credential, stable_id)
+        return self._http_client
+
+    def _resolve_litellm_proxy(
+        self, provider: str, credential: str, stable_id: str
+    ) -> Optional[str]:
+        """Resolve the proxy URL to inject into litellm kwargs, if any."""
+        if not self._client_pool:
+            return None
+        spec = self._client_pool.config.resolve(provider, credential, stable_id)
+        return spec.url if spec else None
 
     def _get_max_retries(self, provider: str) -> int:
         """Get max retries for a provider.
@@ -613,18 +636,30 @@ class RequestExecutor:
                                 # Pre-request callback
                                 await self._run_pre_request_callback(context, kwargs)
 
+                                # Resolve proxy-aware HTTP client
+                                request_client = await self._resolve_http_client(
+                                    provider, cred, cred_context.stable_id
+                                )
+
                                 # Make the API call
                                 if plugin and plugin.has_custom_logic():
                                     kwargs["credential_identifier"] = cred
                                     response = await plugin.acompletion(
-                                        self._http_client, **kwargs
+                                        request_client, **kwargs
                                     )
                                 else:
                                     # Standard LiteLLM call
                                     kwargs["api_key"] = cred
+                                    kwargs["max_retries"] = 0  # Disable litellm internal retries; we handle them
                                     self._apply_litellm_logger(kwargs)
                                     # Remove internal context before litellm call
                                     kwargs.pop("transaction_context", None)
+                                    # Inject proxy URL for litellm's internal HTTP client
+                                    proxy_url = self._resolve_litellm_proxy(
+                                        provider, cred, cred_context.stable_id
+                                    )
+                                    if proxy_url:
+                                        kwargs["proxy"] = proxy_url
                                     response = await litellm.acompletion(**kwargs)
 
                                 # Success! Extract token usage if available
@@ -868,18 +903,30 @@ class RequestExecutor:
                                         context, kwargs
                                     )
 
+                                    # Resolve proxy-aware HTTP client
+                                    request_client = await self._resolve_http_client(
+                                        provider, cred, cred_context.stable_id
+                                    )
+
                                     # Make the API call
                                     if plugin and plugin.has_custom_logic():
                                         kwargs["credential_identifier"] = cred
                                         stream = await plugin.acompletion(
-                                            self._http_client, **kwargs
+                                            request_client, **kwargs
                                         )
                                     else:
                                         kwargs["api_key"] = cred
                                         kwargs["stream"] = True
+                                        kwargs["max_retries"] = 0  # Disable litellm internal retries; we handle them
                                         self._apply_litellm_logger(kwargs)
                                         # Remove internal context before litellm call
                                         kwargs.pop("transaction_context", None)
+                                        # Inject proxy URL for litellm's internal HTTP client
+                                        proxy_url = self._resolve_litellm_proxy(
+                                            provider, cred, cred_context.stable_id
+                                        )
+                                        if proxy_url:
+                                            kwargs["proxy"] = proxy_url
                                         stream = await litellm.acompletion(**kwargs)
 
                                     # Hand off to streaming handler with cred_context
@@ -972,7 +1019,80 @@ class RequestExecutor:
                                         cred, classified, str(e)[:150]
                                     )
 
-                                    # Track consecutive quota failures
+                                    if not should_rotate_on_error(classified):
+                                        cred_context.mark_failure(classified)
+                                        raise
+
+                                    # Check for small cooldown - retry same key instead of rotating
+                                    small_cooldown_threshold = int(
+                                        os.environ.get(
+                                            "SMALL_COOLDOWN_RETRY_THRESHOLD",
+                                            DEFAULT_SMALL_COOLDOWN_RETRY_THRESHOLD,
+                                        )
+                                    )
+                                    rate_limit_max_retry_after = int(
+                                        os.environ.get(
+                                            "RATE_LIMIT_MAX_RETRY_AFTER",
+                                            DEFAULT_RATE_LIMIT_MAX_RETRY_AFTER,
+                                        )
+                                    )
+                                    if (
+                                        classified.retry_after is not None
+                                        and 0
+                                        < classified.retry_after
+                                        < small_cooldown_threshold
+                                        and attempt < max_retries - 1
+                                    ):
+                                        remaining = deadline - time.time()
+                                        if classified.retry_after <= remaining:
+                                            lib_logger.info(
+                                                f"Retrying {mask_credential(cred)} in {classified.retry_after:.1f}s "
+                                                f"(small cooldown {classified.retry_after}s < {small_cooldown_threshold}s threshold)"
+                                            )
+                                            await asyncio.sleep(classified.retry_after)
+                                            continue  # Retry same key
+
+                                    # For rate_limit with retry_after, wait and retry same key
+                                    # if the wait is within our max threshold.
+                                    if (
+                                        classified.error_type == "rate_limit"
+                                        and classified.retry_after is not None
+                                        and 0 < classified.retry_after <= rate_limit_max_retry_after
+                                        and attempt < max_retries - 1
+                                    ):
+                                        remaining = deadline - time.time()
+                                        if classified.retry_after <= remaining:
+                                            lib_logger.info(
+                                                f"Retrying {mask_credential(cred)} in {classified.retry_after:.1f}s "
+                                                f"(rate_limit retry_after={classified.retry_after}s <= {rate_limit_max_retry_after}s max)"
+                                            )
+                                            await asyncio.sleep(classified.retry_after)
+                                            continue  # Retry same key
+
+                                    # For rate_limit/quota_exceeded without retry_after,
+                                    # retry with exponential backoff instead of rotating.
+                                    # Transient capacity errors (including Google
+                                    # RESOURCE_EXHAUSTED misclassified as quota_exceeded)
+                                    # are better handled by backoff, especially with few
+                                    # credentials.
+                                    if (
+                                        classified.error_type in ("rate_limit", "quota_exceeded")
+                                        and attempt < max_retries - 1
+                                        and not classified.retry_after
+                                    ):
+                                        wait_time = (2 ** attempt) + random.uniform(0, 1)
+                                        remaining = deadline - time.time()
+                                        if wait_time <= remaining:
+                                            lib_logger.info(
+                                                f"Retrying {mask_credential(cred)} in {wait_time:.1f}s "
+                                                f"(transient backoff, attempt {attempt + 1}/{max_retries})"
+                                            )
+                                            await asyncio.sleep(wait_time)
+                                            continue  # Retry same key
+
+                                    # Track consecutive quota failures (only on rotation,
+                                    # not same-key retries) to detect genuinely oversized
+                                    # requests that exceed every credential's quota.
                                     if classified.error_type == "quota_exceeded":
                                         retry_state.increment_quota_failures()
                                         if retry_state.consecutive_quota_failures >= retry_state.quota_failure_threshold:
@@ -993,52 +1113,6 @@ class RequestExecutor:
                                             return
                                     else:
                                         retry_state.reset_quota_failures()
-
-                                    if not should_rotate_on_error(classified):
-                                        cred_context.mark_failure(classified)
-                                        raise
-
-                                    # Check for small cooldown - retry same key instead of rotating
-                                    small_cooldown_threshold = int(
-                                        os.environ.get(
-                                            "SMALL_COOLDOWN_RETRY_THRESHOLD",
-                                            DEFAULT_SMALL_COOLDOWN_RETRY_THRESHOLD,
-                                        )
-                                    )
-                                    if (
-                                        classified.retry_after is not None
-                                        and 0
-                                        < classified.retry_after
-                                        < small_cooldown_threshold
-                                        and attempt < max_retries - 1
-                                    ):
-                                        remaining = deadline - time.time()
-                                        if classified.retry_after <= remaining:
-                                            lib_logger.info(
-                                                f"Retrying {mask_credential(cred)} in {classified.retry_after:.1f}s "
-                                                f"(small cooldown {classified.retry_after}s < {small_cooldown_threshold}s threshold)"
-                                            )
-                                            await asyncio.sleep(classified.retry_after)
-                                            continue  # Retry same key
-
-                                    # For rate_limit (429) without retry_after, retry with
-                                    # exponential backoff instead of rotating — transient
-                                    # capacity errors are better handled by backoff,
-                                    # especially with few credentials.
-                                    if (
-                                        classified.error_type == "rate_limit"
-                                        and attempt < max_retries - 1
-                                        and not classified.retry_after
-                                    ):
-                                        wait_time = (2 ** attempt) + random.uniform(0, 1)
-                                        remaining = deadline - time.time()
-                                        if wait_time <= remaining:
-                                            lib_logger.info(
-                                                f"Retrying {mask_credential(cred)} in {wait_time:.1f}s "
-                                                f"(rate_limit backoff, attempt {attempt + 1}/{max_retries})"
-                                            )
-                                            await asyncio.sleep(wait_time)
-                                            continue  # Retry same key
 
                                     cred_context.mark_failure(classified)
                                     break  # Rotate
@@ -1065,7 +1139,7 @@ class RequestExecutor:
                                         cred_context.mark_failure(classified)
                                         break  # Rotate
 
-                                    # Calculate wait time
+                                    # Calculate wait time (exponential backoff for server errors)
                                     wait_time = classified.retry_after or (
                                         2**attempt
                                     ) + random.uniform(0, 1)
@@ -1073,6 +1147,10 @@ class RequestExecutor:
                                     if wait_time > remaining:
                                         break  # No time to wait
 
+                                    lib_logger.info(
+                                        f"Retrying {mask_credential(cred)} in {wait_time:.1f}s "
+                                        f"(server_error backoff, attempt {attempt + 1}/{max_retries})"
+                                    )
                                     await asyncio.sleep(wait_time)
                                     continue  # Retry
 
@@ -1306,19 +1384,6 @@ class RequestExecutor:
             request_headers=request_headers,
         )
 
-        # Check for quota errors
-        if classified.error_type == "quota_exceeded":
-            retry_state.increment_quota_failures()
-            if retry_state.consecutive_quota_failures >= retry_state.quota_failure_threshold:
-                lib_logger.error(
-                    f"{retry_state.quota_failure_threshold} consecutive quota errors - request may be too large"
-                )
-                error_accumulator.record_error(credential, classified, error_message)
-                cred_context.mark_failure(classified)
-                return ErrorAction.FAIL
-        else:
-            retry_state.reset_quota_failures()
-
         # Check if should rotate
         if not should_rotate_on_error(classified):
             error_accumulator.record_error(credential, classified, error_message)
@@ -1331,26 +1396,53 @@ class RequestExecutor:
                 "SMALL_COOLDOWN_RETRY_THRESHOLD", DEFAULT_SMALL_COOLDOWN_RETRY_THRESHOLD
             )
         )
+        rate_limit_max_retry_after = int(
+            os.environ.get(
+                "RATE_LIMIT_MAX_RETRY_AFTER", DEFAULT_RATE_LIMIT_MAX_RETRY_AFTER
+            )
+        )
         is_small_cooldown = (
             classified.retry_after is not None
             and 0 < classified.retry_after < small_cooldown_threshold
         )
+        is_rate_limit_with_retry_after = (
+            classified.error_type == "rate_limit"
+            and classified.retry_after is not None
+            and 0 < classified.retry_after <= rate_limit_max_retry_after
+        )
 
         if (
-            should_retry_same_key(classified, small_cooldown_threshold)
+            (
+                should_retry_same_key(classified, small_cooldown_threshold)
+                or is_rate_limit_with_retry_after
+            )
             and attempt < max_retries - 1
         ):
             wait_time = classified.retry_after or (2**attempt) + random.uniform(0, 1)
-            retry_reason = (
-                f" (small cooldown {classified.retry_after}s < {small_cooldown_threshold}s threshold)"
-                if is_small_cooldown
-                else ""
-            )
+            if is_small_cooldown:
+                retry_reason = f" (small cooldown {classified.retry_after}s < {small_cooldown_threshold}s threshold)"
+            elif is_rate_limit_with_retry_after:
+                retry_reason = f" (rate_limit retry_after={classified.retry_after}s <= {rate_limit_max_retry_after}s max)"
+            else:
+                retry_reason = ""
             lib_logger.info(
                 f"Retrying {mask_credential(credential)} in {wait_time:.1f}s{retry_reason}"
             )
             await asyncio.sleep(wait_time)
             return ErrorAction.RETRY_SAME
+
+        # Track quota failures only on rotation (not same-key retries)
+        if classified.error_type == "quota_exceeded":
+            retry_state.increment_quota_failures()
+            if retry_state.consecutive_quota_failures >= retry_state.quota_failure_threshold:
+                lib_logger.error(
+                    f"{retry_state.quota_failure_threshold} consecutive quota errors - request may be too large"
+                )
+                error_accumulator.record_error(credential, classified, error_message)
+                cred_context.mark_failure(classified)
+                return ErrorAction.FAIL
+        else:
+            retry_state.reset_quota_failures()
 
         # Record error and rotate
         error_accumulator.record_error(credential, classified, error_message)

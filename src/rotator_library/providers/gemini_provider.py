@@ -13,7 +13,7 @@ lib_logger.propagate = False  # Ensure this logger doesn't propagate to root
 if not lib_logger.handlers:
     lib_logger.addHandler(logging.NullHandler())
 
-RATE_LIMIT_COOLDOWN = 60.0
+RATE_LIMIT_COOLDOWN = 15.0
 
 
 class GeminiProvider(ProviderInterface):
@@ -37,10 +37,10 @@ class GeminiProvider(ProviderInterface):
         Apply per-key cooldown after rate-limit / quota errors.
 
         Google's free-tier API keys share per-project RPM limits (typically
-        15 RPM).  When one key gets RESOURCE_EXHAUSTED, the others on the
-        same project are very likely to hit the same wall.  A 60-second
-        cooldown keeps the key out of rotation for the remainder of the
-        rate-limit window, preventing wasteful retry storms.
+        15 RPM).  A short cooldown (15s) keeps the key out of rotation
+        briefly, but short enough that the 30s request deadline can wait
+        for it to expire and retry — avoiding both wasteful retry storms
+        and premature "all credentials exhausted" failures.
         """
         if success or error is None:
             return None

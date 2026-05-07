@@ -37,6 +37,7 @@ class OpencodeProvider(OpencodeQuotaTracker, ProviderInterface):
         "max_tokens",
         "max_completion_tokens",
         "stream",
+        "stream_options",
         "tools",
         "tool_choice",
         "presence_penalty",

@@ -13,6 +13,8 @@ litellm
 
 filelock
 httpx
+# SOCKS5 proxy support for httpx (enables socks5:// proxy URLs)
+socksio
 aiofiles
 aiohttp
 

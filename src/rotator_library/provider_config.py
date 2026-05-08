@@ -655,8 +655,10 @@ class ProviderConfig:
 
     def __init__(self):
         self._api_bases: Dict[str, str] = {}
+        self._extra_headers: Dict[str, Dict[str, str]] = {}
         self._custom_providers: Set[str] = set()
         self._load_api_bases()
+        self._load_extra_headers()
 
     def _load_api_bases(self) -> None:
         """
@@ -681,6 +683,30 @@ class ProviderConfig:
                     lib_logger.info(
                         f"Detected API base override for {provider}: {value}"
                     )
+
+    def _load_extra_headers(self) -> None:
+        """Load EXTRA_HEADERS_<PROVIDER> env vars.
+
+        Format: ``EXTRA_HEADERS_OPENCODE_ZEN="User-Agent:opencode/1.0,X-Title:opencode"``
+        Each value is a comma-separated list of ``Name:Value`` pairs.
+        """
+        for key, value in os.environ.items():
+            if not key.startswith("EXTRA_HEADERS_") or not value:
+                continue
+            provider = key[len("EXTRA_HEADERS_"):].lower()
+            headers: Dict[str, str] = {}
+            for pair in value.split(","):
+                pair = pair.strip()
+                if ":" not in pair:
+                    continue
+                name, val = pair.split(":", 1)
+                headers[name.strip()] = val.strip()
+            if headers:
+                self._extra_headers[provider] = headers
+                lib_logger.info(
+                    f"Extra headers for {provider}: "
+                    f"{', '.join(f'{k}={v}' for k, v in headers.items())}"
+                )
 
     def is_known_provider(self, provider: str) -> bool:
         """Check if provider is known to LiteLLM."""
@@ -766,5 +792,10 @@ class ProviderConfig:
                 f"Routing {provider} through openai: "
                 f"model={kwargs['model']}, api_base={api_base}"
             )
+
+        extra = self._extra_headers.get(provider)
+        if extra:
+            existing = kwargs.get("extra_headers") or {}
+            kwargs["extra_headers"] = {**existing, **extra}
 
         return kwargs

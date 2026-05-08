@@ -34,6 +34,7 @@ import httpx
 import litellm
 from litellm.exceptions import (
     APIConnectionError,
+    MidStreamFallbackError,
     RateLimitError,
     ServiceUnavailableError,
     InternalServerError,
@@ -74,6 +75,7 @@ from .stream_retry_policy import can_retry_stream_after_error
 if TYPE_CHECKING:
     from ..error_handler import ClassifiedError
     from ..usage import UsageManager
+    from ..proxy_config import ProxiedClientPool
 
 lib_logger = logging.getLogger("rotator_library")
 
@@ -103,6 +105,7 @@ class RequestExecutor:
         litellm_provider_params: Optional[Dict[str, Any]] = None,
         litellm_logger_fn: Optional[Any] = None,
         provider_instances: Optional[Dict[str, Any]] = None,
+        client_pool: Optional["ProxiedClientPool"] = None,
     ):
         """
         Initialize RequestExecutor.
@@ -113,7 +116,7 @@ class RequestExecutor:
             credential_filter: CredentialFilter instance
             provider_transforms: ProviderTransforms instance
             provider_plugins: Dict mapping provider names to plugin classes
-            http_client: Shared httpx.AsyncClient for provider requests
+            http_client: Shared httpx.AsyncClient for provider requests (fallback)
             max_retries: Max retries per credential
             global_timeout: Global request timeout in seconds
             abort_on_callback_error: Abort on pre-request callback errors
@@ -122,6 +125,8 @@ class RequestExecutor:
             litellm_logger_fn: Optional callback function for LiteLLM logging
             provider_instances: Shared dict for caching provider instances.
                 If None, creates a new dict (not recommended - leads to duplicate instances).
+            client_pool: Optional ProxiedClientPool for proxy-aware HTTP clients.
+                When set, per-request clients are resolved from this pool.
         """
         self._usage_managers = usage_managers
         self._cooldown = cooldown_manager
@@ -132,6 +137,7 @@ class RequestExecutor:
             provider_instances if provider_instances is not None else {}
         )
         self._http_client = http_client
+        self._client_pool: Optional["ProxiedClientPool"] = client_pool
         self._max_retries = max_retries
         self._global_timeout = global_timeout
         self._abort_on_callback_error = abort_on_callback_error
@@ -209,12 +215,12 @@ class RequestExecutor:
         HTTP proxy.
 
         Args:
-            base_url: The API base URL.  Required for the injected
-                ``openai.AsyncOpenAI`` client — without it the SDK would
-                default to ``api.openai.com``.  For native litellm providers
-                (e.g. gemini/) where no ``API_BASE_*`` is configured, this
-                will be ``None`` and the method returns ``None``; litellm
-                then uses its own handler (without SOCKS proxy).
+            base_url: The API base URL to use.  **Required** — without it
+                the OpenAI SDK would default to ``api.openai.com``, leaking
+                credentials and traffic to a wrong endpoint.  If no
+                ``base_url`` can be resolved the method returns ``None`` and
+                the request falls back to litellm's own client (no proxy).
+
             extra_headers: Additional default headers to set on the OpenAI
                 client (e.g. User-Agent, X-Title).  When we inject our own
                 ``openai.AsyncOpenAI`` client, litellm's ``extra_headers``
@@ -228,10 +234,10 @@ class RequestExecutor:
         if spec is None:
             return None
         if not base_url:
-            lib_logger.debug(
+            lib_logger.warning(
                 f"Proxy configured for {provider}/{stable_id} but no api_base "
-                f"available — skipping custom client (litellm will use its "
-                f"native handler without SOCKS proxy)"
+                f"available — skipping proxy client to avoid defaulting to "
+                f"api.openai.com"
             )
             return None
         import openai
@@ -249,6 +255,7 @@ class RequestExecutor:
             http_client=proxied_httpx,
             default_headers=extra_headers or {},
         )
+
     def _get_max_retries(self, provider: str) -> int:
         """Get max retries for a provider.
 
@@ -310,7 +317,10 @@ class RequestExecutor:
             plugin_class = self._plugins.get(provider)
             if plugin_class:
                 if isinstance(plugin_class, type):
-                    self._plugin_instances[provider] = plugin_class()
+                    instance = plugin_class()
+                    if hasattr(instance, "_proxy_config") and self._client_pool:
+                        instance._proxy_config = self._client_pool.config
+                    self._plugin_instances[provider] = instance
                 else:
                     self._plugin_instances[provider] = plugin_class
             else:
@@ -742,11 +752,16 @@ class RequestExecutor:
                                 # Pre-request callback
                                 await self._run_pre_request_callback(context, kwargs)
 
+                                # Resolve proxy-aware HTTP client
+                                request_client = await self._resolve_http_client(
+                                    provider, cred, cred_context.stable_id
+                                )
+
                                 # Make the API call
                                 if plugin and plugin.has_custom_logic():
                                     kwargs["credential_identifier"] = cred
                                     response = await plugin.acompletion(
-                                        self._http_client, **kwargs
+                                        request_client, **kwargs
                                     )
                                 else:
                                     # Standard LiteLLM call
@@ -755,6 +770,13 @@ class RequestExecutor:
                                     self._apply_litellm_logger(kwargs)
                                     # Remove internal context before litellm call
                                     kwargs.pop("transaction_context", None)
+                                    litellm_client = await self._resolve_litellm_client(
+                                        provider, cred, cred_context.stable_id,
+                                        base_url=kwargs.get("api_base"),
+                                        extra_headers=kwargs.get("extra_headers"),
+                                    )
+                                    if litellm_client:
+                                        kwargs["client"] = litellm_client
                                     response = await litellm.acompletion(**kwargs)
 
                                 # Success! Extract token usage if available
@@ -1005,11 +1027,16 @@ class RequestExecutor:
                                         context, kwargs
                                     )
 
+                                    # Resolve proxy-aware HTTP client
+                                    request_client = await self._resolve_http_client(
+                                        provider, cred, cred_context.stable_id
+                                    )
+
                                     # Make the API call
                                     if plugin and plugin.has_custom_logic():
                                         kwargs["credential_identifier"] = cred
                                         stream = await plugin.acompletion(
-                                            self._http_client, **kwargs
+                                            request_client, **kwargs
                                         )
                                     else:
                                         kwargs["api_key"] = cred
@@ -1018,6 +1045,13 @@ class RequestExecutor:
                                         self._apply_litellm_logger(kwargs)
                                         # Remove internal context before litellm call
                                         kwargs.pop("transaction_context", None)
+                                        litellm_client = await self._resolve_litellm_client(
+                                            provider, cred, cred_context.stable_id,
+                                            base_url=kwargs.get("api_base"),
+                                            extra_headers=kwargs.get("extra_headers"),
+                                        )
+                                        if litellm_client:
+                                            kwargs["client"] = litellm_client
                                         stream = await litellm.acompletion(**kwargs)
 
                                     # Hand off to streaming handler with cred_context
@@ -1258,6 +1292,7 @@ class RequestExecutor:
                                 except (
                                     APIConnectionError,
                                     InternalServerError,
+                                    MidStreamFallbackError,
                                     ServiceUnavailableError,
                                 ) as e:
                                     last_exception = e

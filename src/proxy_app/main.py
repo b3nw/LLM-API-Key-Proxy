@@ -627,6 +627,10 @@ async def lifespan(app: FastAPI):
     # Load global timeout from environment (default 30 seconds)
     global_timeout = int(os.getenv("GLOBAL_TIMEOUT", "30"))
 
+    # Load outbound proxy configuration (HTTP/SOCKS5 forward proxies)
+    from rotator_library.proxy_config import load_proxy_config
+    proxy_config = load_proxy_config()
+
     # The client now uses the root logger configuration
     client = RotatingClient(
         api_keys=api_keys,
@@ -637,6 +641,7 @@ async def lifespan(app: FastAPI):
         ignore_models=ignore_models,
         whitelist_models=whitelist_models,
         enable_request_logging=ENABLE_REQUEST_LOGGING,
+        proxy_config=proxy_config,
     )
 
     await client.initialize_usage_managers()
@@ -1616,6 +1621,24 @@ async def health_check(
             "exhausted": exhausted_credentials,
         },
     }
+
+    # Outbound proxy config status
+    proxy_cfg = getattr(client, "_proxy_config", None)
+    if proxy_cfg and proxy_cfg.has_any_proxy:
+        proxy_info = {}
+        if proxy_cfg.default:
+            proxy_info["default"] = proxy_cfg.default.url
+        if proxy_cfg.provider_proxies:
+            proxy_info["providers"] = {
+                p: s.url for p, s in proxy_cfg.provider_proxies.items()
+            }
+        if proxy_cfg.credential_proxies:
+            proxy_info["credential_count"] = len(proxy_cfg.credential_proxies)
+        if proxy_cfg.rotation_pool:
+            proxy_info["rotation_pool_size"] = len(proxy_cfg.rotation_pool)
+            proxy_info["rotation_strategy"] = proxy_cfg.rotation_strategy
+            proxy_info["rotation_scope"] = proxy_cfg.rotation_scope
+        response["outbound_proxy"] = proxy_info
 
     if detail == "full":
         # --- Per-model stats from primary window ---

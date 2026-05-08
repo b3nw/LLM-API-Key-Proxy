@@ -55,6 +55,7 @@ from ..transaction_logger import TransactionLogger
 from ..provider_config import ProviderConfig as LiteLLMProviderConfig
 from ..utils.paths import get_default_root, get_logs_dir, get_oauth_dir
 from ..utils.suppress_litellm_warnings import suppress_litellm_serialization_warnings
+from ..proxy_config import ProxyConfig, ProxiedClientPool, load_proxy_config
 
 from ..model_latest_registry import ModelLatestRegistry
 from ..model_alias_registry import ModelAliasRegistry
@@ -105,6 +106,7 @@ class RotatingClient:
         ] = None,
         rotation_tolerance: float = DEFAULT_ROTATION_TOLERANCE,
         data_dir: Optional[Union[str, Path]] = None,
+        proxy_config: Optional[ProxyConfig] = None,
     ):
         """
         Initialize the RotatingClient.
@@ -212,7 +214,28 @@ class RotatingClient:
         self.background_refresher = BackgroundRefresher(self)
         self.model_definitions = ModelDefinitions()
         self.provider_config = LiteLLMProviderConfig()
+        self._proxy_config = proxy_config or load_proxy_config()
+        self._client_pool = ProxiedClientPool(self._proxy_config)
         self.http_client = httpx.AsyncClient()
+
+        if self._proxy_config.has_any_proxy:
+            proxy_summary = []
+            if self._proxy_config.default:
+                proxy_summary.append(f"default={self._proxy_config.default.url}")
+            if self._proxy_config.provider_proxies:
+                proxy_summary.append(
+                    f"providers={list(self._proxy_config.provider_proxies.keys())}"
+                )
+            if self._proxy_config.credential_proxies:
+                proxy_summary.append(
+                    f"credentials={len(self._proxy_config.credential_proxies)}"
+                )
+            if self._proxy_config.rotation_pool:
+                proxy_summary.append(
+                    f"rotation_pool={len(self._proxy_config.rotation_pool)} "
+                    f"({self._proxy_config.rotation_strategy}/{self._proxy_config.rotation_scope})"
+                )
+            lib_logger.info(f"Outbound proxy config: {', '.join(proxy_summary)}")
 
         # Initialize extracted components
         self._credential_filter = CredentialFilter(
@@ -301,6 +324,7 @@ class RotatingClient:
             litellm_provider_params=self.litellm_provider_params,
             litellm_logger_fn=self._litellm_logger_fn,
             provider_instances=self._provider_instances,
+            client_pool=self._client_pool,
         )
 
         self._model_list_cache: Dict[str, List[str]] = {}
@@ -383,10 +407,13 @@ class RotatingClient:
             self._usage_initialized = True
 
     async def close(self):
-        """Close the HTTP client and save usage data."""
+        """Close HTTP clients and save usage data."""
         # Save and shutdown new usage managers
         for manager in self._usage_managers.values():
             await manager.shutdown()
+
+        if hasattr(self, "_client_pool"):
+            await self._client_pool.close_all()
 
         if hasattr(self, "http_client") and self.http_client:
             await self.http_client.aclose()
@@ -544,7 +571,8 @@ class RotatingClient:
 
         for cred in shuffled:
             try:
-                models = await plugin.get_models(cred, self.http_client)
+                client = await self._client_pool.get_client_for_provider(provider)
+                models = await plugin.get_models(cred, client)
 
                 # Apply whitelist/blacklist
                 final = [

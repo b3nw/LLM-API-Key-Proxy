@@ -132,6 +132,7 @@ cache/antigravity/thought_signatures.json
 
 /oauth_creds/
 .antigravity/
+.antigravitycli/
 
 /usage/
 
@@ -150,6 +151,8 @@ docs/ignored/
 .env
 .agent/
 .private/
+.opencode/
+.dev
 
 # Web UI
 webui/node_modules/

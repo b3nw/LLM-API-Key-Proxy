@@ -1,6 +1,38 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 b3nw
 
+[project]
+name = "llm-api-key-proxy"
+version = "2.0.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "python-dotenv",
+    "litellm",
+    "filelock",
+    "httpx",
+    "socksio",
+    "aiofiles",
+    "aiohttp",
+    "colorlog",
+    "rich",
+    "websockets",
+    "rotator-library",
+]
+
+[tool.uv.sources]
+rotator-library = { path = "src/rotator_library", editable = true }
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.14",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

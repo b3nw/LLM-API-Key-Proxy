@@ -107,7 +107,7 @@ _console = Console()
 print("  → Loading FastAPI framework...")
 with _console.status("[dim]Loading FastAPI framework...", spinner="dots"):
     from contextlib import asynccontextmanager
-    from fastapi import FastAPI, Request, HTTPException, Depends
+    from fastapi import FastAPI, Request, HTTPException, Depends, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import StreamingResponse, JSONResponse
     from fastapi.security import APIKeyHeader
@@ -713,6 +713,16 @@ app.add_middleware(
     allow_headers=["*"],  # Allows all headers
 )
 api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
+
+_webui_dist = Path(__file__).resolve().parent.parent.parent / "webui" / "dist"
+
+# --- Admin API Routers ---
+from proxy_app.api.logs import router as logs_router
+from proxy_app.api.config import router as config_router
+from proxy_app.api.oauth import router as oauth_router
+app.include_router(logs_router)
+app.include_router(config_router)
+app.include_router(oauth_router)
 
 
 def get_rotating_client(request: Request) -> RotatingClient:
@@ -1357,7 +1367,11 @@ async def embeddings(
 
 
 @app.get("/")
-def read_root():
+def read_root(request: Request):
+    accept = request.headers.get("accept", "")
+    if "text/html" in accept and _webui_dist.is_dir() and os.environ.get("WEBUI_ENABLED", "true").lower() != "false":
+        from starlette.responses import RedirectResponse
+        return RedirectResponse(url="/ui", status_code=302)
     return {"Status": "API Key Proxy is running"}
 
 
@@ -1535,22 +1549,36 @@ async def health_check(
     active_credentials = 0
     on_cooldown_credentials = 0
     exhausted_credentials = 0
+    error_credentials = 0
     active_providers = []
 
     try:
         full_stats = await client.get_quota_stats()
+        quota_providers = set(full_stats.get("providers", {}).keys())
         for provider_name, pstats in full_stats.get("providers", {}).items():
             active_providers.append(provider_name)
             total_credentials += pstats.get("credential_count", 0)
-            active_credentials += pstats.get("active_count", 0)
-            exhausted_credentials += pstats.get("exhausted_count", 0)
-            cred_count = pstats.get("credential_count", 0)
-            on_cooldown_credentials += max(
-                0,
-                cred_count
-                - pstats.get("active_count", 0)
-                - pstats.get("exhausted_count", 0),
-            )
+            for _cid, cdata in pstats.get("credentials", {}).items():
+                st = cdata.get("status", "active")
+                if st == "active":
+                    active_credentials += 1
+                elif st in ("needs_reauth", "error"):
+                    error_credentials += 1
+                elif st == "exhausted":
+                    exhausted_credentials += 1
+                elif st == "cooldown":
+                    on_cooldown_credentials += 1
+                elif st == "mixed":
+                    active_credentials += 1
+                else:
+                    active_credentials += 1
+        # Include providers loaded by RotatingClient but not in quota stats
+        for pname, cred_list in client.all_credentials.items():
+            if pname not in quota_providers and cred_list:
+                active_providers.append(pname)
+                cred_count = len(cred_list)
+                total_credentials += cred_count
+                active_credentials += cred_count
     except Exception as e:
         logging.error(f"Health endpoint: failed to get quota stats: {e}")
         full_stats = {"providers": {}}
@@ -1574,6 +1602,7 @@ async def health_check(
             "active": active_credentials,
             "on_cooldown": on_cooldown_credentials,
             "exhausted": exhausted_credentials,
+            "error": error_credentials,
         },
     }
 
@@ -1995,6 +2024,71 @@ async def cost_estimate(request: Request, _=Depends(verify_api_key)):
     except Exception as e:
         logging.error(f"Cost estimate failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# --- WebSocket for Real-Time Updates ---
+_ws_connections: set = set()
+
+
+@app.websocket("/v1/ws")
+async def websocket_endpoint(websocket: WebSocket, token: Optional[str] = None):
+    if PROXY_API_KEY:
+        if not token or token != PROXY_API_KEY:
+            await websocket.close(code=4001, reason="Unauthorized")
+            return
+
+    await websocket.accept()
+    _ws_connections.add(websocket)
+    try:
+        client = websocket.app.state.rotating_client
+        while True:
+            try:
+                stats = client.get_quota_stats()
+                await websocket.send_json({"type": "quota_stats", "data": stats})
+            except Exception:
+                pass
+
+            try:
+                from rotator_library.error_tracker import get_error_tracker
+                tracker = get_error_tracker()
+                errors = tracker.get_recent_errors(limit=10)
+                error_dicts = [
+                    {
+                        "timestamp": e.timestamp.isoformat() if hasattr(e.timestamp, "isoformat") else str(e.timestamp),
+                        "provider": e.provider,
+                        "model": e.model,
+                        "error_type": e.error_type,
+                        "status_code": e.status_code,
+                        "error_message": e.error_message,
+                    }
+                    for e in errors
+                ]
+                await websocket.send_json({"type": "error_event", "data": error_dicts})
+            except Exception:
+                pass
+
+            await asyncio.sleep(10)
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        _ws_connections.discard(websocket)
+
+
+# --- Web UI Static File Serving ---
+if _webui_dist.is_dir() and os.environ.get("WEBUI_ENABLED", "true").lower() != "false":
+    from starlette.responses import FileResponse
+    from fastapi.staticfiles import StaticFiles
+
+    @app.get("/ui/{full_path:path}")
+    async def serve_webui(full_path: str):
+        file_path = _webui_dist / full_path
+        if file_path.is_file():
+            return FileResponse(file_path)
+        return FileResponse(_webui_dist / "index.html")
+
+    app.mount("/ui", StaticFiles(directory=str(_webui_dist), html=True), name="webui")
 
 
 if __name__ == "__main__":

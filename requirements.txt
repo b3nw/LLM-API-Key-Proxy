@@ -2,6 +2,7 @@
 fastapi
 # ASGI server for running the FastAPI application
 uvicorn
+websockets
 # For loading environment variables from a .env file
 python-dotenv
 

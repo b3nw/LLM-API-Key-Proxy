@@ -107,7 +107,7 @@ _console = Console()
 print("  → Loading FastAPI framework...")
 with _console.status("[dim]Loading FastAPI framework...", spinner="dots"):
     from contextlib import asynccontextmanager
-    from fastapi import FastAPI, Request, HTTPException, Depends
+    from fastapi import FastAPI, Request, HTTPException, Depends, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import StreamingResponse, JSONResponse
     from fastapi.security import APIKeyHeader
@@ -714,6 +714,13 @@ app.add_middleware(
 )
 api_key_header = APIKeyHeader(name="Authorization", auto_error=False)
 
+_webui_dist = Path(__file__).resolve().parent.parent.parent / "webui" / "dist"
+
+# Admin router imports (included after verify_api_key is defined — see below)
+from proxy_app.api.logs import router as logs_router
+from proxy_app.api.config import router as config_router
+from proxy_app.api.oauth import router as oauth_router
+
 
 def get_rotating_client(request: Request) -> RotatingClient:
     """Dependency to get the rotating client instance from the app state."""
@@ -727,12 +734,16 @@ def get_embedding_batcher(request: Request) -> EmbeddingBatcher:
 
 async def verify_api_key(auth: str = Depends(api_key_header)):
     """Dependency to verify the proxy API key."""
-    # If PROXY_API_KEY is not set or empty, skip verification (open access)
     if not PROXY_API_KEY:
         return auth
     if not auth or auth != f"Bearer {PROXY_API_KEY}":
         raise HTTPException(status_code=401, detail="Invalid or missing API Key")
     return auth
+
+# --- Admin API Routers (auth-protected) ---
+app.include_router(logs_router, dependencies=[Depends(verify_api_key)])
+app.include_router(config_router, dependencies=[Depends(verify_api_key)])
+app.include_router(oauth_router, dependencies=[Depends(verify_api_key)])
 
 
 # --- Anthropic API Key Header ---
@@ -1357,7 +1368,11 @@ async def embeddings(
 
 
 @app.get("/")
-def read_root():
+def read_root(request: Request):
+    accept = request.headers.get("accept", "")
+    if "text/html" in accept and _webui_dist.is_dir() and os.environ.get("WEBUI_ENABLED", "true").lower() != "false":
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url="/ui", status_code=302)
     return {"Status": "API Key Proxy is running"}
 
 
@@ -1535,22 +1550,36 @@ async def health_check(
     active_credentials = 0
     on_cooldown_credentials = 0
     exhausted_credentials = 0
+    error_credentials = 0
     active_providers = []
 
     try:
         full_stats = await client.get_quota_stats()
+        quota_providers = set(full_stats.get("providers", {}).keys())
         for provider_name, pstats in full_stats.get("providers", {}).items():
             active_providers.append(provider_name)
             total_credentials += pstats.get("credential_count", 0)
-            active_credentials += pstats.get("active_count", 0)
-            exhausted_credentials += pstats.get("exhausted_count", 0)
-            cred_count = pstats.get("credential_count", 0)
-            on_cooldown_credentials += max(
-                0,
-                cred_count
-                - pstats.get("active_count", 0)
-                - pstats.get("exhausted_count", 0),
-            )
+            for _cid, cdata in pstats.get("credentials", {}).items():
+                st = cdata.get("status", "active")
+                if st == "active":
+                    active_credentials += 1
+                elif st in ("needs_reauth", "error"):
+                    error_credentials += 1
+                elif st == "exhausted":
+                    exhausted_credentials += 1
+                elif st == "cooldown":
+                    on_cooldown_credentials += 1
+                elif st == "mixed":
+                    active_credentials += 1
+                else:
+                    active_credentials += 1
+        # Include providers loaded by RotatingClient but not in quota stats
+        for pname, cred_list in client.all_credentials.items():
+            if pname not in quota_providers and cred_list:
+                active_providers.append(pname)
+                cred_count = len(cred_list)
+                total_credentials += cred_count
+                active_credentials += cred_count
     except Exception as e:
         logging.error(f"Health endpoint: failed to get quota stats: {e}")
         full_stats = {"providers": {}}
@@ -1574,6 +1603,7 @@ async def health_check(
             "active": active_credentials,
             "on_cooldown": on_cooldown_credentials,
             "exhausted": exhausted_credentials,
+            "error": error_credentials,
         },
     }
 
@@ -1995,6 +2025,86 @@ async def cost_estimate(request: Request, _=Depends(verify_api_key)):
     except Exception as e:
         logging.error(f"Cost estimate failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# --- WebSocket for Real-Time Updates ---
+_ws_connections: set = set()
+_MAX_WS_CONNECTIONS = 10
+
+
+@app.websocket("/v1/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    if len(_ws_connections) >= _MAX_WS_CONNECTIONS:
+        await websocket.close(code=4029, reason="Too many connections")
+        return
+
+    await websocket.accept()
+
+    if PROXY_API_KEY:
+        try:
+            auth_msg = await asyncio.wait_for(websocket.receive_json(), timeout=5.0)
+            if auth_msg.get("type") != "auth" or auth_msg.get("token") != PROXY_API_KEY:
+                await websocket.send_json({"type": "auth_result", "ok": False})
+                await websocket.close(code=4001, reason="Unauthorized")
+                return
+            await websocket.send_json({"type": "auth_result", "ok": True})
+        except (asyncio.TimeoutError, Exception):
+            await websocket.close(code=4001, reason="Auth timeout")
+            return
+
+    _ws_connections.add(websocket)
+    try:
+        client = websocket.app.state.rotating_client
+        while True:
+            try:
+                stats = await client.get_quota_stats()
+                await websocket.send_json({"type": "quota_stats", "data": stats})
+            except Exception as e:
+                logging.debug(f"WebSocket quota_stats error: {e}")
+                try:
+                    await websocket.send_json({"type": "error", "message": str(e)})
+                except Exception:
+                    break
+
+            try:
+                from rotator_library.error_tracker import get_error_tracker
+                tracker = get_error_tracker()
+                records, _total = tracker.get_recent_errors(limit=10)
+                error_dicts = [
+                    {
+                        "timestamp": e.timestamp.isoformat() if hasattr(e.timestamp, "isoformat") else str(e.timestamp),
+                        "provider": e.provider,
+                        "model": e.model,
+                        "error_type": e.error_type,
+                        "status_code": e.status_code,
+                        "error_message": e.error_message,
+                    }
+                    for e in records
+                ]
+                await websocket.send_json({"type": "error_event", "data": error_dicts})
+            except Exception as e:
+                logging.debug(f"WebSocket error_event error: {e}")
+
+            await asyncio.sleep(10)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logging.warning(f"WebSocket error: {e}")
+    finally:
+        _ws_connections.discard(websocket)
+
+
+# --- Web UI Static File Serving ---
+if _webui_dist.is_dir() and os.environ.get("WEBUI_ENABLED", "true").lower() != "false":
+    from fastapi.responses import FileResponse as _FileResponse
+
+    @app.get("/ui/{full_path:path}")
+    async def serve_webui(full_path: str):
+        if full_path:
+            file_path = (_webui_dist / full_path).resolve()
+            if file_path.is_relative_to(_webui_dist.resolve()) and file_path.is_file():
+                return _FileResponse(file_path)
+        return _FileResponse(_webui_dist / "index.html")
 
 
 if __name__ == "__main__":

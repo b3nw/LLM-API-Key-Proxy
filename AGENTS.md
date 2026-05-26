@@ -27,6 +27,16 @@ upstream/dev
 - Each commit has a **topic prefix**: `feat(codex):`, `fix(core):`, `feat(tui):`, etc.
 - There are **no merge commits** — the history is always flat and linear
 
+### Release Notes
+
+The automated build workflow (`build.yml`) generates release changelogs from
+commit messages. It works by comparing topic prefixes between builds — each
+topic prefix is treated as a stable feature identifier.
+
+- **New topics** appear in the "What's New" section of the release
+- **Renamed topics** show as both "removed" (old name) and "new" (new name) — avoid unless intentional
+- **Upstream syncs** are detected and reported when `upstream/dev` advances
+
 ---
 
 ## Making a Change
@@ -162,6 +172,12 @@ commit that touched the affected lines — resolve it there and continue.
    as a manual checklist item too — catching errors before `git add` is faster
    than fixing a broken deployment.
 
+8. **Keep topic prefixes stable.** The automated release changelog uses commit
+   messages as feature identifiers. Renaming a topic prefix (e.g.
+   `feat(codex):` → `feat(openai-codex):`) causes the release notes to show
+   both a "removed" entry and a "new" entry. If a rename is intentional, do it
+   in a single rebase so the changelog shows both sides cleanly.
+
 ---
 
 ## Quick Reference
@@ -190,6 +206,4 @@ git push origin dev --force-with-lease
 
 ## Additional References
 
-- **Deployment & hot-patching**: `.agent/rules/llm-proxy.md`
-- **Development environment**: `.agent/rules/claude.md`
 - **Local Docker testing** (container info, hot-patching, remote folder structure): `.private/README.md`

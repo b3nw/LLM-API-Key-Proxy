@@ -345,130 +345,124 @@ jobs:
         echo "✅ cliff.toml:"
         head -20 .github/cliff.toml
 
+    - name: Generate Incremental Diff
+      id: incremental
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        BRANCH_NAME=${{ github.ref_name }}
+
+        # Resolve upstream merge-base
+        UPSTREAM_REF=$(git merge-base upstream/dev HEAD 2>/dev/null || true)
+
+        # Export current state for the release body markers
+        echo "upstream_ref=${UPSTREAM_REF:-}" >> $GITHUB_OUTPUT
+
+        # Collect current fork topics for state marker
+        CURRENT_TOPICS_SORTED=$(git log "$UPSTREAM_REF"..HEAD --format="%s" 2>/dev/null | sort)
+
+        # Try to fetch the previous release body for incremental diff
+        echo "Fetching previous release for branch '$BRANCH_NAME'..."
+        PREV_RELEASE=$(gh release view --repo "${{ github.repository }}" \
+          --json body,tagName \
+          --jq '.' \
+          "$(gh release list --repo "${{ github.repository }}" --limit 50 --json tagName \
+            | jq -r '.[].tagName' | grep "^$BRANCH_NAME/build-" | head -1)" 2>/dev/null || echo '{}')
+
+        PREV_BODY=$(echo "$PREV_RELEASE" | jq -r '.body // ""')
+
+        if [ -n "$UPSTREAM_REF" ] && [ -n "$PREV_BODY" ]; then
+          # Extract fork_state marker from previous release
+          PREV_TOPICS_MARKER=$(echo "$PREV_BODY" | sed -n 's/.*<!-- fork_state: \(.*\) -->.*/\1/p')
+          if [ -n "$PREV_TOPICS_MARKER" ]; then
+            echo "Found previous fork_state marker. Computing diff..."
+            PREV_TOPICS_SORTED=$(echo "$PREV_TOPICS_MARKER" | tr '|' '\n' | sort)
+
+            # Diff: new topics = in current but not in previous
+            NEW_TOPICS=$(comm -13 <(echo "$PREV_TOPICS_SORTED") <(echo "$CURRENT_TOPICS_SORTED") 2>/dev/null || true)
+
+            # Build incremental section
+            echo "## 📋 What's Changed Since Last Build" > incremental.md
+            echo "" >> incremental.md
+
+            if [ -n "$NEW_TOPICS" ]; then
+              echo "### 🆕 New" >> incremental.md
+              echo "$NEW_TOPICS" | while read -r topic; do
+                [ -n "$topic" ] && echo "- $topic" >> incremental.md
+              done
+              echo "" >> incremental.md
+            fi
+
+            if [ -z "$NEW_TOPICS" ]; then
+              echo "_No topic changes detected since the last build._" >> incremental.md
+              echo "" >> incremental.md
+            fi
+
+            echo "has_incremental=true" >> $GITHUB_OUTPUT
+            echo "✅ Incremental diff generated"
+          else
+            echo "ℹ️ Previous release has no fork_state marker (first build with this format)"
+            echo "has_incremental=false" >> $GITHUB_OUTPUT
+          fi
+        else
+          echo "ℹ️ No previous release or no upstream remote — skipping incremental diff"
+          echo "has_incremental=false" >> $GITHUB_OUTPUT
+        fi
+
+        # Export current topics pipe-delimited for the release body marker
+        FORK_TOPICS_PIPED=$(echo "$CURRENT_TOPICS_SORTED" | tr '\n' '|' | sed 's/|$//')
+        echo "fork_topics=$FORK_TOPICS_PIPED" >> $GITHUB_OUTPUT
+
     - name: Generate Changelog
       id: changelog
       shell: bash
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        BRANCH_NAME=${{ github.ref_name }}
-        if [ -n "${{ github.event.inputs.manual_previous_tag }}" ]; then
-          echo "Manual tag provided: ${{ github.event.inputs.manual_previous_tag }}"
-          LAST_TAG="${{ github.event.inputs.manual_previous_tag }}"
-        else
-          echo "No manual tag, searching for latest tag on branch '$BRANCH_NAME'..."
-          
-          # Prioritize finding the latest tag with the new format (e.g., build-20250707-1-...).
-          echo "Attempting to find latest tag with new format..."
-          LAST_TAG=$(git describe --tags --abbrev=0 --match="$BRANCH_NAME/build-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-*" 2>/dev/null || true)
-          
-          # If no new format tag is found, fall back to the old, more generic pattern.
-          if [ -z "$LAST_TAG" ]; then
-            echo "No new format tag found. Falling back to search for any older build tag..."
-            LAST_TAG=$(git describe --tags --abbrev=0 --match="$BRANCH_NAME/build-*" 2>/dev/null || echo "")
-          fi
-          
-          # ═══════════════════════════════════════════════════════════
-          # PARENT BRANCH FALLBACK: Find closest parent branch's tag
-          # ═══════════════════════════════════════════════════════════
-          if [ -z "$LAST_TAG" ]; then
-            echo ""
-            echo "⚠️ No tag found for '$BRANCH_NAME', searching parent branches..."
-            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            
-            # Use FALLBACK_BRANCHES from config
-            FALLBACK_BRANCHES="${{ env.FALLBACK_BRANCHES }}"
-            BEST_TAG=""
-            BEST_DISTANCE=999999
-            BEST_PARENT=""
-            
-            for PARENT in $FALLBACK_BRANCHES; do
-              # Skip if same as current branch
-              [ "$PARENT" == "$BRANCH_NAME" ] && continue
-              
-              # Check if branch exists (remote first, then local)
-              if git rev-parse --verify "origin/$PARENT" >/dev/null 2>&1; then
-                BRANCH_REF="origin/$PARENT"
-              elif git rev-parse --verify "$PARENT" >/dev/null 2>&1; then
-                BRANCH_REF="$PARENT"
-              else
-                echo "   $PARENT: doesn't exist, skipping"
-                continue
-              fi
-              
-              # Find merge-base (common ancestor)
-              MERGE_BASE=$(git merge-base HEAD "$BRANCH_REF" 2>/dev/null || true)
-              if [ -z "$MERGE_BASE" ]; then
-                echo "   $PARENT: no common ancestor, skipping"
-                continue
-              fi
-              
-              # Count commits from merge-base to HEAD (distance = how far we've diverged)
-              DISTANCE=$(git rev-list --count "$MERGE_BASE"..HEAD 2>/dev/null || echo "999999")
-              
-              # Find tag at or before merge-base
-              PARENT_TAG=$(git describe --tags --abbrev=0 --match="$PARENT/build-*" "$MERGE_BASE" 2>/dev/null || true)
-              
-              if [ -n "$PARENT_TAG" ]; then
-                echo "   $PARENT: found $PARENT_TAG (distance: $DISTANCE commits)"
-                if [ "$DISTANCE" -lt "$BEST_DISTANCE" ]; then
-                  BEST_DISTANCE=$DISTANCE
-                  BEST_TAG=$PARENT_TAG
-                  BEST_PARENT=$PARENT
-                fi
-              else
-                echo "   $PARENT: no build tag found at merge-base"
-              fi
-            done
-            
-            if [ -n "$BEST_TAG" ]; then
-              LAST_TAG="$BEST_TAG"
-              echo ""
-              echo "✅ Using parent tag: $LAST_TAG (from '$BEST_PARENT', $BEST_DISTANCE commits ago)"
-            fi
-          fi
-          
-          # ═══════════════════════════════════════════════════════════
-          # ULTIMATE FALLBACK: Any ancestor tag
-          # ═══════════════════════════════════════════════════════════
-          if [ -z "$LAST_TAG" ]; then
-            echo ""
-            echo "🔍 No parent branch tag found, trying any ancestor tag..."
-            LAST_TAG=$(git describe --tags --abbrev=0 --match="*/build-*" HEAD 2>/dev/null || true)
-            if [ -n "$LAST_TAG" ]; then
-              echo "✅ Found ancestor tag: $LAST_TAG"
-            fi
-          fi
-        fi
-        
-        echo "✅ Using tag: $LAST_TAG"
-        
-        if [ -n "$LAST_TAG" ]; then
-          # Standard run: A previous tag was found.
-          echo "🔍 Generating changelog for range: $LAST_TAG..HEAD"
+        UPSTREAM_REF="${{ steps.incremental.outputs.upstream_ref }}"
+
+        if [ -n "$UPSTREAM_REF" ]; then
+          echo "Generating fork changelog against upstream/dev ($UPSTREAM_REF)"
           git-cliff \
             --config .github/cliff.toml \
             --github-repo "${{ github.repository }}" \
             --strip all \
             --output changelog.md \
-            "$LAST_TAG..HEAD"
+            "$UPSTREAM_REF..HEAD"
         else
-          # First run: No previous tag found.
-          echo "⚠️ No previous build tag found. Generating initial release changelog."
-          echo "## Initial Release" > changelog.md
-          echo "" >> changelog.md
-          echo "This is the first automated build release using this format. Future releases will contain a detailed list of changes." >> changelog.md
+          # Fallback: no upstream remote (first-party builds on upstream repo)
+          echo "No upstream remote. Using previous tag."
+          BRANCH_NAME=${{ github.ref_name }}
+          LAST_TAG=$(git describe --tags --abbrev=0 --match="$BRANCH_NAME/build-*" 2>/dev/null || true)
+          if [ -n "$LAST_TAG" ]; then
+            git-cliff \
+              --config .github/cliff.toml \
+              --github-repo "${{ github.repository }}" \
+              --strip all \
+              --output changelog.md \
+              "$LAST_TAG..HEAD"
+          else
+            echo "## Initial Release" > changelog.md
+            echo "" >> changelog.md
+            echo "This is the first automated build release using this format." >> changelog.md
+          fi
         fi
 
-        # This part of the script remains to handle the output
+        # Prepend incremental diff if available
+        if [ "${{ steps.incremental.outputs.has_incremental }}" = "true" ] && [ -s incremental.md ]; then
+          cat incremental.md changelog.md > changelog_combined.md
+          mv changelog_combined.md changelog.md
+        fi
+
         if [ -s changelog.md ]; then
           echo "✅ Changelog generated successfully"
           CHANGELOG_B64=$(base64 -w 0 changelog.md)
           echo "changelog_b64=$CHANGELOG_B64" >> $GITHUB_OUTPUT
           echo "has_changelog=true" >> $GITHUB_OUTPUT
-          echo "previous_tag=$LAST_TAG" >> $GITHUB_OUTPUT
+          echo "previous_tag=${UPSTREAM_REF:-}" >> $GITHUB_OUTPUT
+          echo "upstream_ref_short=$(echo "$UPSTREAM_REF" | cut -c1-7)" >> $GITHUB_OUTPUT
         else
-          # This is now a true error condition
           echo "❌ Critical error: Changelog is empty after generation."
           echo "has_changelog=false" >> $GITHUB_OUTPUT
         fi
@@ -849,6 +843,13 @@ jobs:
         - **Linux**: \`$LINUX_ARCHIVE\`
         - **macOS**: \`$MACOS_ARCHIVE\`"
 
+        # Build upstream reference line (empty if no upstream remote)
+        UPSTREAM_REF_LINE=""
+        if [ -n "${{ steps.incremental.outputs.upstream_ref }}" ]; then
+          UPSTREAM_REF_SHORT=$(echo "${{ steps.incremental.outputs.upstream_ref }}" | cut -c1-7)
+          UPSTREAM_REF_LINE="> Based on upstream \`dev\` @ [\`$UPSTREAM_REF_SHORT\`](https://github.com/Mirrowel/LLM-API-Key-Proxy/commit/${{ steps.incremental.outputs.upstream_ref }})"
+        fi
+
         cat > releasenotes.md <<-EOF
         ## Build Information
         | Field | Value |
@@ -861,6 +862,7 @@ jobs:
 
         ## 📋 What's Changed
 
+        $UPSTREAM_REF_LINE
         $CHANGELOG_CONTENT
 
         ### 📁 Included Files
@@ -881,6 +883,8 @@ jobs:
         > **Note**: This is an automated build release.
 
         $CHANGELOG_URL
+        <!-- fork_state: ${{ steps.incremental.outputs.fork_topics }} -->
+        <!-- upstream_base: ${{ steps.incremental.outputs.upstream_ref }} -->
         EOF
 
         # Set release flags and notes based on the branch

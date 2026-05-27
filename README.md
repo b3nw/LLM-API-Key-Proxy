@@ -52,10 +52,16 @@ MODEL_LATEST_nanogpt=nanogpt/glm-5  # "latest" resolves to current best GLM-5
 - `GET /v1/health/errors` — recent errors with optional `?provider=` and `?model=` filters
 - Both endpoints are gated by `PROXY_API_KEY`
 
+### High-Throughput Embedding Support
+
+The proxy fully supports text embeddings under the `/v1/embeddings` OpenAI-compatible endpoint. Features include:
+- **Resilient Key Rotation & Cooldowns**: Embedding requests leverage the exact same key management, error tracking, and rotation mechanics as chat completions.
+- **Server-Side Batching**: Enable `USE_EMBEDDING_BATCHER=true` in `.env` to transparently queue and batch individual incoming embedding requests at the proxy layer, maximizing API throughput and key efficiency.
+- **Multi-Provider Support**: Fully compatible with Google AI Studio (`google/gemini-embedding-2`, `google/gemini-embedding-001`), OpenAI, Voyage, Cohere, and other major providers.
+
 ### Tooling
 
 - **Transaction Log Viewer TUI** — Browse and inspect API request/response logs
-- **Embedding Support** — Dispatch embeddings to appropriate providers
 
 ---
 

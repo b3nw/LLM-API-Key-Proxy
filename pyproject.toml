@@ -17,7 +17,7 @@ dependencies = [
     "aiohttp",
     "colorlog",
     "rich",
-    "websockets",
+    "websockets>=14.0,<15.0",
     "rotator-library",
 ]
 

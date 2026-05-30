@@ -37,6 +37,7 @@ import litellm
 from .provider_interface import ProviderInterface, UsageResetConfigDef, QuotaGroupMap
 from .openai_oauth_base import OpenAIOAuthBase
 from .utilities.codex_quota_tracker import CodexQuotaTracker
+from .utilities.codex_ws_transport import CodexWebSocketPool
 from ..model_definitions import ModelDefinitions
 from ..timeout_config import TimeoutConfig
 from ..core.errors import StreamedAPIError
@@ -81,6 +82,28 @@ else:
     # Default: ChatGPT backend API (requires OAuth + account_id)
     CODEX_API_BASE = os.getenv("CODEX_API_BASE", "https://chatgpt.com/backend-api/codex")
     CODEX_RESPONSES_ENDPOINT = f"{CODEX_API_BASE}/responses"
+
+# =============================================================================
+# WEBSOCKET TRANSPORT CONFIGURATION
+# =============================================================================
+USE_WEBSOCKET = env_bool("CODEX_USE_WEBSOCKET", False)
+WS_POOL_SIZE = env_int("CODEX_WS_POOL_SIZE", 3)
+WS_SESSION_TTL = env_int("CODEX_WS_SESSION_TTL", 3300)  # 55 min default
+
+def _derive_ws_endpoint() -> str:
+    """Derive the WebSocket endpoint from the HTTP endpoint."""
+    override = os.getenv("CODEX_WS_ENDPOINT")
+    if override:
+        return override
+    # Convert https:// → wss:// for the responses endpoint
+    base = CODEX_API_BASE
+    if base.startswith("https://"):
+        return "wss://" + base[8:] + "/responses"
+    elif base.startswith("http://"):
+        return "ws://" + base[7:] + "/responses"
+    return base.replace("https://", "wss://").replace("http://", "ws://") + "/responses"
+
+CODEX_WS_ENDPOINT = _derive_ws_endpoint()
 
 # Reasoning effort levels (superset of all known levels)
 REASONING_EFFORTS = {"minimal", "low", "medium", "high", "xhigh"}
@@ -811,6 +834,233 @@ def _apply_reasoning_to_message(
 
 
 # =============================================================================
+# SHARED EVENT PARSER (used by both HTTP+SSE and WebSocket transports)
+# =============================================================================
+
+async def _parse_response_events(
+    events: AsyncGenerator[Dict[str, Any], None],
+    model: str,
+) -> AsyncGenerator[litellm.ModelResponse, None]:
+    """
+    Convert Responses API streaming events into litellm ModelResponse chunks.
+
+    This is transport-agnostic: it accepts an async generator of parsed JSON event
+    dicts (from SSE or WebSocket) and yields Chat Completions-formatted chunks.
+    """
+    created = int(time.time())
+    response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+
+    current_tool_calls: Dict[int, Dict[str, Any]] = {}
+    reasoning_summary_text = ""
+    reasoning_full_text = ""
+    sent_reasoning = False
+    streaming_reasoning = False
+
+    async for evt in events:
+        kind = evt.get("type")
+
+        # Track response ID
+        if isinstance(evt.get("response"), dict):
+            resp_id = evt["response"].get("id")
+            if resp_id:
+                response_id = resp_id
+
+        # Text delta
+        if kind == "response.output_text.delta":
+            delta_text = evt.get("delta", "")
+            if delta_text:
+                sent_reasoning = True
+                yield litellm.ModelResponse(
+                    id=response_id,
+                    created=created,
+                    model=model,
+                    object="chat.completion.chunk",
+                    choices=[{
+                        "index": 0,
+                        "delta": {"content": delta_text, "role": "assistant"},
+                        "finish_reason": None,
+                    }],
+                )
+
+        # Reasoning summary delta
+        elif kind == "response.reasoning_summary_text.delta":
+            rdelta = evt.get("delta", "")
+            reasoning_summary_text += rdelta
+            if rdelta:
+                streaming_reasoning = True
+                yield litellm.ModelResponse(
+                    id=response_id,
+                    created=created,
+                    model=model,
+                    object="chat.completion.chunk",
+                    choices=[{
+                        "index": 0,
+                        "delta": {"reasoning_content": rdelta, "role": "assistant"},
+                        "finish_reason": None,
+                    }],
+                )
+
+        # Reasoning full text delta
+        elif kind == "response.reasoning_text.delta":
+            rdelta = evt.get("delta", "")
+            reasoning_full_text += rdelta
+            if rdelta:
+                streaming_reasoning = True
+                yield litellm.ModelResponse(
+                    id=response_id,
+                    created=created,
+                    model=model,
+                    object="chat.completion.chunk",
+                    choices=[{
+                        "index": 0,
+                        "delta": {"reasoning_content": rdelta, "role": "assistant"},
+                        "finish_reason": None,
+                    }],
+                )
+
+        # Function call arguments delta
+        elif kind == "response.function_call_arguments.delta":
+            output_index = evt.get("output_index", 0)
+            delta = evt.get("delta", "")
+            if output_index not in current_tool_calls:
+                current_tool_calls[output_index] = {
+                    "id": "",
+                    "name": "",
+                    "arguments": "",
+                }
+            current_tool_calls[output_index]["arguments"] += delta
+
+        # Output item added (start of tool call)
+        elif kind == "response.output_item.added":
+            item = evt.get("item", {})
+            output_index = evt.get("output_index", 0)
+            if item.get("type") == "function_call":
+                current_tool_calls[output_index] = {
+                    "id": item.get("call_id", ""),
+                    "name": item.get("name", ""),
+                    "arguments": "",
+                }
+
+        # Output item done (complete tool call)
+        elif kind == "response.output_item.done":
+            item = evt.get("item", {})
+            output_index = evt.get("output_index", 0)
+            if item.get("type") == "function_call":
+                call_id = item.get("call_id") or item.get("id", "")
+                name = item.get("name", "")
+                arguments = item.get("arguments", "")
+                if output_index in current_tool_calls:
+                    tc = current_tool_calls[output_index]
+                    if not call_id:
+                        call_id = tc["id"]
+                    if not name:
+                        name = tc["name"]
+                    if not arguments:
+                        arguments = tc["arguments"]
+
+                yield litellm.ModelResponse(
+                    id=response_id,
+                    created=created,
+                    model=model,
+                    object="chat.completion.chunk",
+                    choices=[{
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [{
+                                "index": output_index,
+                                "id": call_id,
+                                "type": "function",
+                                "function": {
+                                    "name": name,
+                                    "arguments": arguments,
+                                },
+                            }],
+                        },
+                        "finish_reason": None,
+                    }],
+                )
+
+        # Completion (completed or incomplete)
+        elif kind in ("response.completed", "response.incomplete"):
+            resp_data = evt.get("response", {})
+
+            finish_reason = "stop"
+            if current_tool_calls:
+                finish_reason = "tool_calls"
+            elif kind == "response.incomplete":
+                finish_reason = "length"
+
+            if kind == "response.incomplete":
+                lib_logger.info(
+                    f"[Codex] Response incomplete for {model}, "
+                    f"delivering partial content with finish_reason=length"
+                )
+
+            # Flush un-streamed reasoning as a single chunk
+            if not sent_reasoning and not streaming_reasoning and (reasoning_summary_text or reasoning_full_text):
+                rtxt = "\n\n".join(filter(None, [reasoning_summary_text, reasoning_full_text]))
+                if rtxt:
+                    yield litellm.ModelResponse(
+                        id=response_id,
+                        created=created,
+                        model=model,
+                        object="chat.completion.chunk",
+                        choices=[{
+                            "index": 0,
+                            "delta": {"reasoning_content": rtxt, "role": "assistant"},
+                            "finish_reason": None,
+                        }],
+                    )
+
+            # Usage
+            usage = None
+            if isinstance(resp_data.get("usage"), dict):
+                u = resp_data["usage"]
+                usage = litellm.Usage(
+                    prompt_tokens=u.get("input_tokens", 0),
+                    completion_tokens=u.get("output_tokens", 0),
+                    total_tokens=u.get("total_tokens", 0),
+                )
+                input_details = u.get("input_tokens_details") or {}
+                cached = input_details.get("cached_tokens", 0) or 0
+                if cached:
+                    usage.prompt_tokens_details = {
+                        "cached_tokens": cached,
+                    }
+
+            final_chunk = litellm.ModelResponse(
+                id=response_id,
+                created=created,
+                model=model,
+                object="chat.completion.chunk",
+                choices=[{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": finish_reason,
+                }],
+            )
+            if usage:
+                final_chunk.usage = usage
+            yield final_chunk
+            return
+
+        # Error
+        elif kind == "response.failed":
+            error = evt.get("response", {}).get("error", {})
+            error_msg = error.get("message", "Response failed")
+            lib_logger.error(f"Codex response failed: {error_msg}")
+            raise StreamedAPIError(f"Codex response failed: {error_msg}")
+
+        # WS-specific error event
+        elif kind == "error":
+            error_data = evt.get("error", {})
+            error_msg = error_data.get("message", "Unknown error")
+            error_code = error_data.get("code", "")
+            lib_logger.error(f"Codex WS error ({error_code}): {error_msg}")
+            raise StreamedAPIError(f"Codex error ({error_code}): {error_msg}")
+
+
+# =============================================================================
 # PROVIDER IMPLEMENTATION
 # =============================================================================
 
@@ -888,6 +1138,19 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
 
         self.model_definitions = ModelDefinitions()
         self._session_cache: Dict[str, str] = {}  # Cache session IDs per credential
+
+        # WebSocket pool (lazily connected; only used when CODEX_USE_WEBSOCKET=true)
+        self._ws_pool: Optional[CodexWebSocketPool] = None
+        if USE_WEBSOCKET:
+            self._ws_pool = CodexWebSocketPool(
+                ws_endpoint=CODEX_WS_ENDPOINT,
+                max_per_credential=WS_POOL_SIZE,
+                connection_ttl=float(WS_SESSION_TTL),
+            )
+            lib_logger.info(
+                f"[Codex] WebSocket transport enabled: endpoint={CODEX_WS_ENDPOINT}, "
+                f"pool_size={WS_POOL_SIZE}, ttl={WS_SESSION_TTL}s"
+            )
 
         # Refresh available models from GitHub (updates module-level cache)
         current_models = get_available_models()
@@ -1114,7 +1377,7 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
         if stream:
             return self._stream_with_retry(
                 client, headers, payload, requested_model, kwargs.get("reasoning_compat", DEFAULT_REASONING_COMPAT),
-                credential_path
+                credential_path, session_id=session_id
             )
         else:
             return await self._non_stream_with_retry(
@@ -1158,6 +1421,7 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
         model: str,
         reasoning_compat: str,
         credential_path: str = "",
+        session_id: str = "",
     ) -> AsyncGenerator[litellm.ModelResponse, None]:
         """
         Wrapper around _stream_response that retries on garbled tool calls.
@@ -1182,7 +1446,8 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
 
             try:
                 async for chunk in self._stream_response(
-                    client, headers, payload, model, reasoning_compat, credential_path
+                    client, headers, payload, model, reasoning_compat,
+                    credential_path, session_id=session_id
                 ):
                     # Extract content from this chunk for garble detection
                     # NOTE: delta is a dict (not an object), so use dict access
@@ -1309,8 +1574,28 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
         model: str,
         reasoning_compat: str,
         credential_path: str = "",
+        session_id: str = "",
     ) -> AsyncGenerator[litellm.ModelResponse, None]:
-        """Handle streaming response from Responses API with HTTP-level retries."""
+        """Handle streaming response from Responses API with HTTP-level retries.
+
+        If WebSocket transport is enabled, tries WS first and falls back to HTTP+SSE.
+        Note: WS→HTTP fallback loses previous_response_id continuity for the session
+        because the HTTP path does not support response chaining.
+        """
+        if self._ws_pool is not None:
+            try:
+                async for chunk in self._stream_response_ws(
+                    headers, payload, model, credential_path, session_id
+                ):
+                    yield chunk
+                return
+            except Exception as e:
+                lib_logger.warning(
+                    f"[Codex-WS] WebSocket transport failed for {model}, "
+                    f"falling back to HTTP+SSE (previous_response_id continuity lost): {e!r}"
+                )
+
+        # HTTP+SSE path (original behavior)
         last_http_error: Optional[Exception] = None
 
         for http_attempt in range(HTTP_RETRY_MAX_ATTEMPTS):
@@ -1352,6 +1637,59 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
         if last_http_error is not None:
             raise last_http_error
 
+    async def _stream_response_ws(
+        self,
+        headers: Dict[str, str],
+        payload: Dict[str, Any],
+        model: str,
+        credential_path: str = "",
+        session_id: str = "",
+    ) -> AsyncGenerator[litellm.ModelResponse, None]:
+        """Stream a response via WebSocket transport with session affinity.
+
+        NOTE: If this method fails and the caller falls back to HTTP+SSE,
+        previous_response_id continuity is lost for this session because
+        the HTTP path does not support response chaining.
+        """
+        import websockets.exceptions
+
+        ws_keys = {"authorization", "chatgpt-account-id", "openai-beta", "session_id", "x-client-request-id"}
+        ws_headers = {k: v for k, v in headers.items() if k.lower() in ws_keys}
+
+        conn, previous_response_id = await self._ws_pool.acquire(
+            credential_path, ws_headers, session_id=session_id or None
+        )
+
+        try:
+            events = conn.send_response_create(payload, previous_response_id)
+            async for chunk in _parse_response_events(events, model):
+                yield chunk
+        except StreamedAPIError as e:
+            if "previous_response_not_found" in str(e) and previous_response_id:
+                lib_logger.info(
+                    f"[Codex-WS] previous_response_not_found for session={session_id[:8] if session_id else '?'}..., "
+                    f"retrying without previous_response_id"
+                )
+                if session_id:
+                    await self._ws_pool.clear_session(session_id)
+                # Reconnect to avoid desynchronized receive buffer
+                await conn.close()
+                await conn.connect()
+                events = conn.send_response_create(payload, previous_response_id=None)
+                async for chunk in _parse_response_events(events, model):
+                    yield chunk
+            else:
+                raise
+        except (ConnectionError, OSError, websockets.exceptions.ConnectionClosed) as e:
+            lib_logger.warning(
+                f"[Codex-WS] Connection {conn.id} died during stream for {model}: {e!r}"
+            )
+            await self._ws_pool.mark_dead_and_evict(conn)
+            raise
+        finally:
+            if conn.in_use and not conn.is_dead:
+                await self._ws_pool.release(conn, session_id=session_id or None)
+
     async def _stream_response_inner(
         self,
         client: httpx.AsyncClient,
@@ -1362,16 +1700,6 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
         credential_path: str = "",
     ) -> AsyncGenerator[litellm.ModelResponse, None]:
         """Inner streaming handler (single attempt, no HTTP retry)."""
-        created = int(time.time())
-        response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
-
-        # Track state for tool calls
-        current_tool_calls: Dict[int, Dict[str, Any]] = {}
-        reasoning_summary_text = ""
-        reasoning_full_text = ""
-        sent_reasoning = False
-        streaming_reasoning = False  # True once we start streaming reasoning_content
-
         async with client.stream(
             "POST",
             CODEX_RESPONSES_ENDPOINT,
@@ -1395,231 +1723,22 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
                     response=response,
                 )
 
-            async for line in response.aiter_lines():
-                if not line:
-                    continue
+            async def _sse_events() -> AsyncGenerator[Dict[str, Any], None]:
+                async for line in response.aiter_lines():
+                    if not line:
+                        continue
+                    if not line.startswith("data: "):
+                        continue
+                    data = line[6:].strip()
+                    if not data or data == "[DONE]":
+                        continue
+                    try:
+                        yield json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
 
-                if not line.startswith("data: "):
-                    continue
-
-                data = line[6:].strip()
-                if not data or data == "[DONE]":
-                    continue
-
-                try:
-                    evt = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-
-                kind = evt.get("type")
-
-                # Handle response ID
-                if isinstance(evt.get("response"), dict):
-                    resp_id = evt["response"].get("id")
-                    if resp_id:
-                        response_id = resp_id
-
-                # Handle text delta
-                if kind == "response.output_text.delta":
-                    delta_text = evt.get("delta", "")
-                    if delta_text:
-                        sent_reasoning = True  # Content has started, reasoning phase is over
-
-                        chunk = litellm.ModelResponse(
-                            id=response_id,
-                            created=created,
-                            model=model,
-                            object="chat.completion.chunk",
-                            choices=[{
-                                "index": 0,
-                                "delta": {"content": delta_text, "role": "assistant"},
-                                "finish_reason": None,
-                            }],
-                        )
-                        yield chunk
-
-                # Handle reasoning deltas - stream as reasoning_content in real-time
-                elif kind == "response.reasoning_summary_text.delta":
-                    rdelta = evt.get("delta", "")
-                    reasoning_summary_text += rdelta
-                    if rdelta:
-                        streaming_reasoning = True
-                        chunk = litellm.ModelResponse(
-                            id=response_id,
-                            created=created,
-                            model=model,
-                            object="chat.completion.chunk",
-                            choices=[{
-                                "index": 0,
-                                "delta": {"reasoning_content": rdelta, "role": "assistant"},
-                                "finish_reason": None,
-                            }],
-                        )
-                        yield chunk
-
-                elif kind == "response.reasoning_text.delta":
-                    rdelta = evt.get("delta", "")
-                    reasoning_full_text += rdelta
-                    if rdelta:
-                        streaming_reasoning = True
-                        chunk = litellm.ModelResponse(
-                            id=response_id,
-                            created=created,
-                            model=model,
-                            object="chat.completion.chunk",
-                            choices=[{
-                                "index": 0,
-                                "delta": {"reasoning_content": rdelta, "role": "assistant"},
-                                "finish_reason": None,
-                            }],
-                        )
-                        yield chunk
-
-                # Handle function call arguments delta
-                elif kind == "response.function_call_arguments.delta":
-                    output_index = evt.get("output_index", 0)
-                    delta = evt.get("delta", "")
-
-                    if output_index not in current_tool_calls:
-                        current_tool_calls[output_index] = {
-                            "id": "",
-                            "name": "",
-                            "arguments": "",
-                        }
-
-                    current_tool_calls[output_index]["arguments"] += delta
-
-                # Handle output item added (start of tool call)
-                elif kind == "response.output_item.added":
-                    item = evt.get("item", {})
-                    output_index = evt.get("output_index", 0)
-
-                    if item.get("type") == "function_call":
-                        current_tool_calls[output_index] = {
-                            "id": item.get("call_id", ""),
-                            "name": item.get("name", ""),
-                            "arguments": "",
-                        }
-
-                # Handle output item done (complete tool call)
-                elif kind == "response.output_item.done":
-                    item = evt.get("item", {})
-                    output_index = evt.get("output_index", 0)
-
-                    if item.get("type") == "function_call":
-                        call_id = item.get("call_id") or item.get("id", "")
-                        name = item.get("name", "")
-                        arguments = item.get("arguments", "")
-
-                        # Update from tracked state
-                        if output_index in current_tool_calls:
-                            tc = current_tool_calls[output_index]
-                            if not call_id:
-                                call_id = tc["id"]
-                            if not name:
-                                name = tc["name"]
-                            if not arguments:
-                                arguments = tc["arguments"]
-
-                        chunk = litellm.ModelResponse(
-                            id=response_id,
-                            created=created,
-                            model=model,
-                            object="chat.completion.chunk",
-                            choices=[{
-                                "index": 0,
-                                "delta": {
-                                    "tool_calls": [{
-                                        "index": output_index,
-                                        "id": call_id,
-                                        "type": "function",
-                                        "function": {
-                                            "name": name,
-                                            "arguments": arguments,
-                                        },
-                                    }],
-                                },
-                                "finish_reason": None,
-                            }],
-                        )
-                        yield chunk
-
-                # Handle completion (completed or incomplete)
-                elif kind in ("response.completed", "response.incomplete"):
-                    resp_data = evt.get("response", {})
-
-                    # Determine finish reason
-                    finish_reason = "stop"
-                    if current_tool_calls:
-                        finish_reason = "tool_calls"
-                    elif kind == "response.incomplete":
-                        finish_reason = "length"
-
-                    if kind == "response.incomplete":
-                        lib_logger.info(
-                            f"[Codex] Response incomplete for {model}, "
-                            f"delivering partial content with finish_reason=length"
-                        )
-
-                    # If reasoning was NOT streamed incrementally (edge case),
-                    # send it as a single reasoning_content chunk now
-                    if not sent_reasoning and not streaming_reasoning and (reasoning_summary_text or reasoning_full_text):
-                        rtxt = "\n\n".join(filter(None, [reasoning_summary_text, reasoning_full_text]))
-                        if rtxt:
-                            chunk = litellm.ModelResponse(
-                                id=response_id,
-                                created=created,
-                                model=model,
-                                object="chat.completion.chunk",
-                                choices=[{
-                                    "index": 0,
-                                    "delta": {"reasoning_content": rtxt, "role": "assistant"},
-                                    "finish_reason": None,
-                                }],
-                            )
-                            yield chunk
-
-                    # Extract usage if available
-                    usage = None
-                    if isinstance(resp_data.get("usage"), dict):
-                        u = resp_data["usage"]
-                        usage = litellm.Usage(
-                            prompt_tokens=u.get("input_tokens", 0),
-                            completion_tokens=u.get("output_tokens", 0),
-                            total_tokens=u.get("total_tokens", 0),
-                        )
-                        # Map Responses API input_tokens_details to prompt_tokens_details
-                        # so downstream _extract_usage_tokens picks up cached_tokens
-                        input_details = u.get("input_tokens_details") or {}
-                        cached = input_details.get("cached_tokens", 0) or 0
-                        if cached:
-                            usage.prompt_tokens_details = {
-                                "cached_tokens": cached,
-                            }
-
-                    # Send final chunk
-                    final_chunk = litellm.ModelResponse(
-                        id=response_id,
-                        created=created,
-                        model=model,
-                        object="chat.completion.chunk",
-                        choices=[{
-                            "index": 0,
-                            "delta": {},
-                            "finish_reason": finish_reason,
-                        }],
-                    )
-                    if usage:
-                        final_chunk.usage = usage
-                    yield final_chunk
-                    break
-
-                # Handle errors
-                elif kind == "response.failed":
-                    error = evt.get("response", {}).get("error", {})
-                    error_msg = error.get("message", "Response failed")
-                    lib_logger.error(f"Codex response failed: {error_msg}")
-                    raise StreamedAPIError(f"Codex response failed: {error_msg}")
+            async for chunk in _parse_response_events(_sse_events(), model):
+                yield chunk
 
     async def _non_stream_response(
         self,

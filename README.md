@@ -26,6 +26,7 @@ A personal fork of [Mirrowel/LLM-API-Key-Proxy](https://github.com/Mirrowel/LLM-
 | **Lightning AI** | Dollar credit quotas with date-based parsing |
 | **Vertex AI** | Express Mode API key auth via `x-goog-api-key`, curated model list (Vertex has no `/v1/models` endpoint) |
 | **Opencode Go** | 3-window quota tracking (`5hr`, `weekly`, `monthly`) via SolidJS scraping, custom OpenAI routing |
+| **Command Code** | Bypasses standard subscription tier limits on chat completions by routing to the CLI endpoint (`/alpha/generate`). Supports dollar credits tracking mapped to cents baseline, 5-minute background refresh, and reasoning/thinking stream translation for `deepseek-v4-pro` and `mimo-v2.5-pro` |
 
 ### Smart "Latest" Model Aliases
 
@@ -588,6 +589,9 @@ VERTEX_API_KEY_2=other-project:your-other-key        # project embedded in key
 # Format: sk-key (required) or api_key:workspace_id:auth_cookie (workspace and cookie optional)
 OPENCODE_GO_API_KEY_1=sk-...
 OPENCODE_GO_API_KEY_2=sk-...:wrk_...:auth=...
+
+# Command Code
+COMMAND_API_KEY_1=user_...  # Long-lived API key from CLI authentication
 
 # Per-provider retry overrides
 MAX_RETRIES_NANOGPT=2

@@ -150,3 +150,7 @@ docs/ignored/
 # Web UI
 webui/node_modules/
 webui/dist/
+
+# Command Code session files
+command_code_cookies.json
+

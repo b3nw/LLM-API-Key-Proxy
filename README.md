@@ -21,7 +21,7 @@ A personal fork of [Mirrowel/LLM-API-Key-Proxy](https://github.com/Mirrowel/LLM-
 |----------|-------------|
 | **GitHub Copilot** | OAuth Device Flow with plan-based model filtering (free/pro/business/enterprise), premium interaction quota tracking |
 | **NanoGPT** | Native Anthropic message routing, streaming fallback, embedding dispatch |
-| **Kilocode** | OpenAI-compatible provider with frequent free model offerings |
+| **Kilocode** | OpenAI-compatible provider with credit balance tracking via web session cookie |
 | **Chutes** | Dollar credit quota tracking with sliding window, tool-calling support |
 | **Lightning AI** | Dollar credit quotas with date-based parsing |
 | **Vertex AI** | Express Mode API key auth via `x-goog-api-key`, curated model list (Vertex has no `/v1/models` endpoint) |
@@ -566,9 +566,6 @@ Customize OAuth callback ports if defaults conflict:
 # NanoGPT
 NANOGPT_API_KEY_1=your-nanogpt-key
 
-# Cursor provider
-CURSOR_API_KEY_1=your-cursor-key
-
 # Global concurrency default (max concurrent requests per key across all providers)
 # Per-provider override: MAX_CONCURRENT_REQUESTS_PER_KEY_<PROVIDER>=N
 MAX_CONCURRENT_REQUESTS_PER_KEY=1
@@ -592,6 +589,11 @@ OPENCODE_GO_API_KEY_2=sk-...:wrk_...:auth=...
 
 # Command Code
 COMMAND_API_KEY_1=user_...  # Long-lived API key from CLI authentication
+
+# KiloCode credit balance tracking (optional — proxy still works without it)
+# Get token from browser cookie __Secure-next-auth.session-token on app.kilo.ai
+KILO_SESSION_TOKEN=...  # Auto-refreshes on use, ~30-day TTL
+KILO_QUOTA_REFRESH_INTERVAL=600  # optional, default 600s
 
 # Per-provider retry overrides
 MAX_RETRIES_NANOGPT=2

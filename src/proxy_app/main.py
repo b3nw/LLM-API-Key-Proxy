@@ -154,6 +154,12 @@ with _console.status("[dim]Initializing proxy core...", spinner="dots"):
     from proxy_app.request_logger import log_request_to_console
     from proxy_app.batch_manager import EmbeddingBatcher
     from proxy_app.detailed_logger import RawIOLogger
+    from proxy_app.responses_compat import (
+        convert_responses_request_to_chat,
+        convert_chat_response_to_responses,
+        build_response_id,
+        ResponsesStreamConverter,
+    )
 
 print("  → Discovering provider plugins...")
 # Provider lazy loading happens during import, so time it here
@@ -1103,6 +1109,141 @@ async def chat_completions(
                 raw_logger.log_final_response(
                     status_code=500, headers=None, body={"error": str(e)}
                 )
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# --- OpenAI Responses API Endpoint ---
+@app.post("/v1/responses")
+async def responses_api(
+    request: Request,
+    client: RotatingClient = Depends(get_rotating_client),
+    _=Depends(verify_api_key),
+):
+    """
+    OpenAI Responses API endpoint.
+
+    Accepts requests in the Responses API format (used by codex-cli, OpenAI SDK)
+    and internally converts to Chat Completions for processing via the proxy pipeline.
+    Returns responses in the Responses API format.
+    """
+    raw_logger = RawIOLogger() if ENABLE_RAW_LOGGING else None
+    try:
+        try:
+            request_data = await request.json()
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid JSON in request body.")
+
+        if raw_logger:
+            raw_logger.log_request(headers=request.headers, body=request_data)
+
+        response_id = build_response_id()
+        is_streaming = request_data.get("stream", False)
+
+        # Convert Responses API request -> Chat Completions request
+        cc_request = convert_responses_request_to_chat(request_data)
+
+        # Apply model alias rewriting
+        if "model" in cc_request:
+            cc_request["model"] = apply_model_alias(cc_request["model"])
+            resolved = await client.resolve_latest_async(cc_request["model"])
+            if resolved:
+                logging.info(f"Latest alias: {cc_request['model']} → {resolved}")
+                cc_request["model"] = resolved
+
+        log_request_to_console(
+            url=str(request.url),
+            headers=dict(request.headers),
+            client_info=(request.client.host, request.client.port),
+            request_data=cc_request,
+        )
+
+        if is_streaming:
+            cc_request["stream"] = True
+            cc_request.setdefault("stream_options", {})["include_usage"] = True
+            response_generator = await client.acompletion(
+                request=request, **cc_request
+            )
+
+            converter = ResponsesStreamConverter(
+                response_id=response_id,
+                model=cc_request.get("model", ""),
+            )
+
+            async def responses_stream_wrapper():
+                try:
+                    async for chunk_str in response_generator:
+                        if await request.is_disconnected():
+                            logging.warning("Client disconnected, stopping stream.")
+                            break
+                        events = converter.convert_chunk(chunk_str)
+                        if events:
+                            yield events
+                except Exception as e:
+                    logging.error(f"Error during responses stream: {e}")
+                    error_event = {
+                        "type": "error",
+                        "error": {
+                            "type": "server_error",
+                            "message": str(e),
+                        },
+                    }
+                    yield f"event: error\ndata: {json.dumps(error_event)}\n\n"
+
+            return StreamingResponse(
+                responses_stream_wrapper(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+        else:
+            cc_request["stream"] = False
+            response = await client.acompletion(request=request, **cc_request)
+
+            if isinstance(response, dict):
+                if raw_logger:
+                    raw_logger.log_final_response(
+                        status_code=429, headers=None, body=response
+                    )
+                error_detail = response.get("error", {}).get("message", str(response))
+                raise HTTPException(status_code=429, detail=error_detail)
+
+            responses_result = convert_chat_response_to_responses(
+                response, response_id, request_data
+            )
+
+            if raw_logger:
+                raw_logger.log_final_response(
+                    status_code=200, headers=None, body=responses_result
+                )
+            return JSONResponse(content=responses_result)
+
+    except ProxyExhaustionError as e:
+        return JSONResponse(status_code=e.http_status, content=e.error_response)
+    except (
+        litellm.InvalidRequestError,
+        ValueError,
+        litellm.ContextWindowExceededError,
+    ) as e:
+        raise HTTPException(status_code=400, detail=f"Invalid Request: {str(e)}")
+    except litellm.AuthenticationError as e:
+        raise HTTPException(status_code=401, detail=f"Authentication Error: {str(e)}")
+    except litellm.RateLimitError as e:
+        raise HTTPException(status_code=429, detail=f"Rate Limit Exceeded: {str(e)}")
+    except (litellm.ServiceUnavailableError, litellm.APIConnectionError) as e:
+        raise HTTPException(status_code=503, detail=f"Service Unavailable: {str(e)}")
+    except litellm.Timeout as e:
+        raise HTTPException(status_code=504, detail=f"Gateway Timeout: {str(e)}")
+    except (litellm.InternalServerError, litellm.OpenAIError) as e:
+        raise HTTPException(status_code=502, detail=f"Bad Gateway: {str(e)}")
+    except Exception as e:
+        logging.error(f"Responses API request failed: {e}")
+        if raw_logger:
+            raw_logger.log_final_response(
+                status_code=500, headers=None, body={"error": str(e)}
+            )
         raise HTTPException(status_code=500, detail=str(e))
 
 

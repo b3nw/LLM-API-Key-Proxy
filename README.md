@@ -47,6 +47,10 @@ MODEL_LATEST_nanogpt=nanogpt/glm-5  # "latest" resolves to current best GLM-5
 - **Cached token pricing** — correct discounted rates for cached input tokens in streaming cost calculations
 - **Identity-based deduplication** — OAuth credential dedup handles GitHub login (not just email)
 
+### OpenAI Responses API Compatibility
+
+`POST /v1/responses` — accepts the Responses API format used by codex-cli and the OpenAI Python SDK, and transparently converts it to/from Chat Completions internally. Supports streaming, tool calling, and multi-turn conversations.
+
 ### Monitoring & Health Endpoints
 
 - `GET /v1/health` — status, uptime, provider/credential counts (add `?detail=full` for per-model window stats and error summary)

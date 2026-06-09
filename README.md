@@ -64,6 +64,45 @@ The proxy fully supports text embeddings under the `/v1/embeddings` OpenAI-compa
 - **Server-Side Batching**: Enable `USE_EMBEDDING_BATCHER=true` in `.env` to transparently queue and batch individual incoming embedding requests at the proxy layer, maximizing API throughput and key efficiency.
 - **Multi-Provider Support**: Fully compatible with Google AI Studio (`google/gemini-embedding-2`, `google/gemini-embedding-001`), OpenAI, Voyage, Cohere, and other major providers.
 
+### Quota Guards
+
+#### Monthly Budget
+
+Per-credential monthly spending cap. Tracks cumulative `approx_cost` across all models and blocks the credential once the budget is reached. Resets on a configurable day of the month.
+
+Activated by setting the environment variable — **no defaults are applied**:
+
+```bash
+MONTHLY_BUDGET_VERTEX=200          # $200/month cap for all Vertex credentials
+MONTHLY_BUDGET_RESET_DAY_VERTEX=1  # reset on the 1st (default, range 1-28)
+```
+
+The budget and remaining spend appear in `/v1/quota-stats` under each credential's `monthly_budget` field.
+
+#### RPD (Requests Per Day) Limits
+
+Per-model daily request caps, tracked per-credential. Fully configured via environment variables — no defaults are hardcoded. Counters reset at a configurable time (default: midnight Pacific).
+
+```bash
+# Per-model limits: RPD_LIMIT_{PROVIDER}_{MODEL}=limit
+# Model name: uppercase, hyphens become underscores
+RPD_LIMIT_GOOGLE_GEMINI_FLASH_LATEST=20
+RPD_LIMIT_GOOGLE_GEMINI_FLASH_LITE_LATEST=500
+RPD_LIMIT_GOOGLE_GEMINI_EMBEDDING_2=1000
+RPD_LIMIT_GOOGLE_GEMMA_4_31B_IT=1500
+
+# Model aliases: RPD_ALIAS_{PROVIDER}_{ALIAS}=canonical_name
+# Aliases let "latest" model names share a counter with their resolved name
+RPD_ALIAS_GOOGLE_GEMINI_FLASH_LATEST=gemini-3.5-flash
+RPD_ALIAS_GOOGLE_GEMINI_FLASH_LITE_LATEST=gemini-3.1-flash-lite
+
+# Reset settings (optional, defaults shown)
+RPD_RESET_TZ_GOOGLE=America/Los_Angeles
+RPD_RESET_HOUR_GOOGLE=0
+```
+
+RPD status appears in `/v1/quota-stats` under each credential's `rpd_limits` field, in the TUI summary page, and in the WebUI credential cards.
+
 ### Tooling
 
 - **Transaction Log Viewer TUI** — Browse and inspect API request/response logs

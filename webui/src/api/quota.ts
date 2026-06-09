@@ -98,6 +98,21 @@ export interface CredentialStats {
     fair_cycle_reason?: string | null
     cooldown_remaining?: number | null
   }>
+  monthly_budget?: {
+    budget: number
+    spent: number
+    remaining: number
+    percent_used: number
+    period_start: number
+    reset_at: number
+    reset_day: number
+  }
+  rpd_limits?: Record<string, {
+    limit: number
+    used: number
+    remaining: number
+    reset_at: number
+  }>
   cooldowns?: Record<string, unknown>
   fair_cycle?: Record<string, unknown>
   current_period?: {

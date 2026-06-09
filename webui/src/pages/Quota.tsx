@@ -1,5 +1,5 @@
 import { useState, useCallback, useMemo } from "react"
-import { RefreshCw, ChevronDown, ChevronRight, ArrowLeft, ArrowUpDown } from "lucide-react"
+import { RefreshCw, ChevronDown, ChevronRight, ArrowLeft, ArrowUpDown, DollarSign, Clock } from "lucide-react"
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -19,6 +19,23 @@ import {
   type ModelUsageEntry,
 } from "@/api/quota"
 import { formatNumber, formatCost, getQuotaColor, formatWindowLabel, formatQuotaValue, formatTimeRemaining } from "@/lib/utils"
+
+function shortenModelName(model: string): string {
+  const m = model.toLowerCase().replace(/^(models\/|publishers\/google\/models\/)/, "")
+  const stripped = m.replace(/^gemini-|^gemma-/, "")
+  if (stripped.startsWith("flash-lite") || stripped.startsWith("3.5-flash-lite") || stripped.startsWith("3.1-flash-lite")) return "flash-lite"
+  if (stripped.includes("flash")) return "flash"
+  if (stripped.includes("pro")) return "pro"
+  if (m.startsWith("gemma-")) {
+    const rest = m.replace(/^gemma-/, "").replace(/-it$/, "")
+    return `gemma-${rest}`
+  }
+  if (stripped.startsWith("embedding")) {
+    const ver = stripped.match(/embedding-?(\d+)/)?.[1]
+    return ver ? `embedding-${ver}` : "embedding"
+  }
+  return stripped.length > 12 ? stripped.slice(0, 12) : stripped
+}
 
 export function Quota() {
   const [viewMode, setViewMode] = useState<"current" | "global">("current")
@@ -201,7 +218,7 @@ export function Quota() {
                       </div>
                     </TableCell>
                     <TableCell>
-                      <QuotaSummaryBars quotaGroups={p.quota_groups} />
+                      <QuotaSummaryBars quotaGroups={p.quota_groups} credentials={p.credentials} />
                     </TableCell>
                     <TableCell className="text-right">{formatNumber(requests)}</TableCell>
                     <TableCell className="text-right">
@@ -243,30 +260,72 @@ function SummaryCard({ label, value }: { label: string; value: string | number }
   )
 }
 
-function QuotaSummaryBars({ quotaGroups }: { quotaGroups?: Record<string, QuotaGroup> }) {
-  if (!quotaGroups) return <span className="text-muted-foreground text-xs">No quota</span>
+function QuotaSummaryBars({ quotaGroups, credentials }: { quotaGroups?: Record<string, QuotaGroup>; credentials?: Record<string, CredentialStats> }) {
+  const bars: { label: string; key: string; pct: number; valueStr: string }[] = []
 
-  const windows: { label: string; key: string; pct: number; remaining: number; max: number; groupName: string }[] = []
-  for (const [groupName, group] of Object.entries(quotaGroups)) {
-    const hasAnyLimit = Object.values(group.windows).some(w => (w.total_max ?? 0) > 0)
-    if (!hasAnyLimit) continue
-    const windowEntries = Object.entries(group.windows)
-    for (const [windowName, win] of windowEntries) {
-      if ((win.total_max ?? 0) === 0) continue
-      const label = windowEntries.length > 1 ? `${groupName}/${formatWindowLabel(windowName)}` : groupName
-      windows.push({ label, key: `${groupName}-${windowName}`, pct: win.remaining_pct ?? 0, remaining: win.total_remaining ?? 0, max: win.total_max ?? 0, groupName })
+  if (quotaGroups) {
+    for (const [groupName, group] of Object.entries(quotaGroups)) {
+      const hasAnyLimit = Object.values(group.windows).some(w => (w.total_max ?? 0) > 0)
+      if (!hasAnyLimit) continue
+      const windowEntries = Object.entries(group.windows)
+      for (const [windowName, win] of windowEntries) {
+        if ((win.total_max ?? 0) === 0) continue
+        const label = windowEntries.length > 1 ? `${groupName}/${formatWindowLabel(windowName)}` : groupName
+        bars.push({
+          label, key: `${groupName}-${windowName}`, pct: win.remaining_pct ?? 0,
+          valueStr: `${formatQuotaValue(win.total_remaining, groupName)}/${formatQuotaValue(win.total_max, groupName)}`,
+        })
+      }
     }
   }
 
-  if (!windows.length) return <span className="text-muted-foreground text-xs">No windows</span>
+  if (!bars.length && credentials) {
+    const creds = Object.values(credentials)
+    let budgetTotal = 0, budgetSpent = 0, hasBudget = false
+    for (const c of creds) {
+      if (c.monthly_budget) {
+        hasBudget = true
+        budgetTotal += c.monthly_budget.budget
+        budgetSpent += c.monthly_budget.spent
+      }
+    }
+    if (hasBudget && budgetTotal > 0) {
+      const remaining = budgetTotal - budgetSpent
+      const pct = (remaining / budgetTotal) * 100
+      bars.push({ label: "monthly($)", key: "budget", pct, valueStr: `${formatCost(remaining)}/${formatCost(budgetTotal)}` })
+    }
+
+    const rpdAgg: Record<string, { used: number; limit: number }> = {}
+    for (const c of creds) {
+      if (!c.rpd_limits) continue
+      for (const [model, info] of Object.entries(c.rpd_limits)) {
+        if (!rpdAgg[model]) rpdAgg[model] = { used: 0, limit: 0 }
+        rpdAgg[model].used += info.used
+        rpdAgg[model].limit += info.limit
+      }
+    }
+    const rpdModels = Object.entries(rpdAgg).sort(
+      ([, a], [, b]) => (a.limit - a.used) / Math.max(a.limit, 1) - (b.limit - b.used) / Math.max(b.limit, 1)
+    )
+    for (const [model, agg] of rpdModels) {
+      const remaining = Math.max(0, agg.limit - agg.used)
+      const pct = agg.limit > 0 ? (remaining / agg.limit) * 100 : 0
+      bars.push({
+        label: shortenModelName(model), key: `rpd-${model}`, pct,
+        valueStr: `${formatNumber(remaining)}/${formatNumber(agg.limit)}`,
+      })
+    }
+  }
+
+  if (!bars.length) return <span className="text-muted-foreground text-xs">—</span>
 
   return (
     <div className="space-y-1.5 max-w-[250px]">
-      {windows.slice(0, 3).map((w) => (
+      {bars.slice(0, 6).map((w) => (
         <div key={w.key}>
           <div className="flex justify-between text-[10px] text-muted-foreground mb-0.5">
             <span className="truncate">{w.label}</span>
-            <span className="whitespace-nowrap ml-1">{formatQuotaValue(w.remaining, w.groupName)}/{formatQuotaValue(w.max, w.groupName)}</span>
+            <span className="whitespace-nowrap ml-1">{w.valueStr}</span>
           </div>
           <div className="flex items-center gap-1.5">
             <Progress
@@ -278,8 +337,8 @@ function QuotaSummaryBars({ quotaGroups }: { quotaGroups?: Record<string, QuotaG
           </div>
         </div>
       ))}
-      {windows.length > 3 && (
-        <span className="text-[10px] text-muted-foreground">+{windows.length - 3} more</span>
+      {bars.length > 6 && (
+        <span className="text-[10px] text-muted-foreground">+{bars.length - 6} more</span>
       )}
     </div>
   )
@@ -522,6 +581,79 @@ function CredentialCard({
                 })
               )}
             </div>
+          </div>
+        )}
+
+        {cred.monthly_budget && (
+          <div className="mb-3">
+            <h4 className="text-xs font-medium mb-2 flex items-center gap-1">
+              <DollarSign className="h-3 w-3" /> Monthly Budget
+            </h4>
+            <div className="space-y-1">
+              <div className="flex justify-between text-[11px]">
+                <span>
+                  {formatCost(cred.monthly_budget.spent)} / {formatCost(cred.monthly_budget.budget)}
+                </span>
+                <span className="text-muted-foreground">
+                  {cred.monthly_budget.remaining > 0
+                    ? `${formatCost(cred.monthly_budget.remaining)} remaining`
+                    : "Budget exhausted"}
+                </span>
+              </div>
+              <Progress
+                value={100 - cred.monthly_budget.percent_used}
+                className="h-1.5"
+                indicatorClassName={getQuotaColor(100 - cred.monthly_budget.percent_used)}
+              />
+              <div className="text-[10px] text-muted-foreground">
+                Resets {formatTimeRemaining(cred.monthly_budget.reset_at) === "now"
+                  ? "now"
+                  : `in ${formatTimeRemaining(cred.monthly_budget.reset_at)}`}
+                {" "}(day {cred.monthly_budget.reset_day})
+              </div>
+            </div>
+          </div>
+        )}
+
+        {cred.rpd_limits && Object.keys(cred.rpd_limits).length > 0 && (
+          <div className="mb-3">
+            <h4 className="text-xs font-medium mb-2 flex items-center gap-1">
+              <Clock className="h-3 w-3" /> RPD Limits ({Object.keys(cred.rpd_limits).length} models)
+            </h4>
+            <div className="grid gap-1.5 sm:grid-cols-2 lg:grid-cols-3">
+              {Object.entries(cred.rpd_limits)
+                .sort(([, a], [, b]) => (a.remaining / Math.max(a.limit, 1)) - (b.remaining / Math.max(b.limit, 1)))
+                .map(([model, info]) => {
+                const pct = info.limit > 0 ? (info.remaining / info.limit) * 100 : 0
+                return (
+                  <div key={model} className="space-y-0.5">
+                    <div className="flex justify-between text-[10px]">
+                      <span className="font-mono truncate">{model}</span>
+                      <span className="ml-1 whitespace-nowrap">
+                        {info.limit === 0
+                          ? "blocked"
+                          : `${info.used}/${info.limit}`}
+                      </span>
+                    </div>
+                    <Progress
+                      value={pct}
+                      className="h-1"
+                      indicatorClassName={getQuotaColor(pct)}
+                    />
+                  </div>
+                )
+              })}
+            </div>
+            {(() => {
+              const firstReset = Object.values(cred.rpd_limits)[0]?.reset_at
+              if (!firstReset) return null
+              const resetStr = formatTimeRemaining(firstReset)
+              return (
+                <div className="text-[10px] text-muted-foreground mt-1">
+                  Resets {resetStr === "now" ? "now" : `in ${resetStr}`}
+                </div>
+              )
+            })()}
           </div>
         )}
 

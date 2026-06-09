@@ -644,37 +644,128 @@ class RotatingClient:
         )
 
         try:
-            return await self._executor.execute(context)
+            result = await self._executor.execute(context)
         except ProxyExhaustionError as primary_error:
-            if primary_error.dominant_code in self._NON_FALLBACK_ERROR_CODES:
-                raise
-
-            model_name = model.split("/", 1)[1] if "/" in model else model
-
-            fallback_targets = self._fallback_registry.resolve(model_name)
-            if not fallback_targets:
-                raise
-
-            fallback_targets = [
-                t for t in fallback_targets if t.provider != provider
-            ]
-            if not fallback_targets:
-                raise
-
-            lib_logger.info(
-                f"Primary provider '{provider}' exhausted for '{model_name}' "
-                f"({primary_error.dominant_code}). Falling back to "
-                f"{len(fallback_targets)} alternative provider(s): "
-                f"{', '.join(t.provider for t in fallback_targets)}"
+            result = None
+            return await self._attempt_fallback(
+                primary_error.dominant_code, model, provider,
+                request, pre_request_callback, kwargs,
             )
 
-            return await self._cross_provider_executor.execute(
-                canonical_model=model_name,
-                targets=fallback_targets,
-                request=request,
-                pre_request_callback=pre_request_callback,
-                **kwargs,
+        if not context.streaming:
+            return result
+
+        # Streaming: the executor returns a generator immediately; exhaustion
+        # surfaces as an error SSE chunk when the generator is consumed.
+        # Wrap the generator so we can intercept first-chunk exhaustion and
+        # fall back before the client sees the error.
+        return self._wrap_streaming_with_fallback(
+            result, model, provider, request, pre_request_callback, kwargs,
+        )  # returns async generator directly (not a coroutine)
+
+    _STREAMING_EXHAUSTION_TYPES = frozenset({
+        "proxy_all_credentials_exhausted",
+        "proxy_timeout",
+        "proxy_error",
+        "no_available_keys",
+    })
+
+    async def _attempt_fallback(
+        self,
+        dominant_code: str,
+        model: str,
+        provider: str,
+        request: Optional[Any],
+        pre_request_callback: Optional[callable],
+        request_kwargs: dict,
+    ) -> Union[Any, AsyncGenerator[str, None]]:
+        """Shared fallback resolution for both streaming and non-streaming."""
+        from ..core.errors import ProxyExhaustionError
+
+        if dominant_code in self._NON_FALLBACK_ERROR_CODES:
+            raise ProxyExhaustionError(
+                {"error": {"message": "Non-fallback error", "type": dominant_code}},
+                dominant_code=dominant_code,
             )
+
+        model_name = model.split("/", 1)[1] if "/" in model else model
+
+        fallback_targets = self._fallback_registry.resolve(model_name)
+        if not fallback_targets:
+            raise ProxyExhaustionError(
+                {"error": {"message": "No fallback configured", "type": dominant_code}},
+                dominant_code=dominant_code,
+            )
+
+        fallback_targets = [
+            t for t in fallback_targets if t.provider != provider
+        ]
+        if not fallback_targets:
+            raise ProxyExhaustionError(
+                {"error": {"message": "All fallback targets same provider", "type": dominant_code}},
+                dominant_code=dominant_code,
+            )
+
+        lib_logger.info(
+            f"Primary provider '{provider}' exhausted for '{model_name}' "
+            f"({dominant_code}). Falling back to "
+            f"{len(fallback_targets)} alternative provider(s): "
+            f"{', '.join(t.provider for t in fallback_targets)}"
+        )
+
+        return await self._cross_provider_executor.execute(
+            canonical_model=model_name,
+            targets=fallback_targets,
+            request=request,
+            pre_request_callback=pre_request_callback,
+            **request_kwargs,
+        )
+
+    def _wrap_streaming_with_fallback(
+        self,
+        primary_gen: AsyncGenerator[str, None],
+        model: str,
+        provider: str,
+        request: Optional[Any],
+        pre_request_callback: Optional[callable],
+        request_kwargs: dict,
+    ) -> AsyncGenerator[str, None]:
+        parent = self
+
+        async def _inner():
+            first_chunk = None
+            async for chunk in primary_gen:
+                if first_chunk is None:
+                    first_chunk = chunk
+                    if isinstance(chunk, str) and chunk.startswith("data: "):
+                        content = chunk[len("data: "):].strip()
+                        if content != "[DONE]":
+                            try:
+                                parsed = json.loads(content)
+                                error_info = parsed.get("error")
+                                if error_info and error_info.get("type") in parent._STREAMING_EXHAUSTION_TYPES:
+                                    dominant_code = error_info.get("code") or error_info.get("type")
+                                    lib_logger.info(
+                                        f"Streaming exhaustion detected for {model} "
+                                        f"({dominant_code}), attempting fallback"
+                                    )
+                                    try:
+                                        fallback = await parent._attempt_fallback(
+                                            dominant_code, model, provider,
+                                            request, pre_request_callback,
+                                            request_kwargs,
+                                        )
+                                        async for fb_chunk in fallback:
+                                            yield fb_chunk
+                                        return
+                                    except Exception:
+                                        pass
+                            except json.JSONDecodeError:
+                                pass
+
+                yield chunk
+
+        return _inner()
 
     async def aembedding(
         self,

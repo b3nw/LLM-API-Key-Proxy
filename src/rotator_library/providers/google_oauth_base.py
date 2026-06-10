@@ -23,7 +23,6 @@ from rich.text import Text
 from rich.markup import escape as rich_escape
 
 from ..utils.headless_detection import is_headless_environment
-from ..utils.reauth_coordinator import get_reauth_coordinator
 from ..utils.resilient_io import safe_write_json
 from ..error_handler import CredentialNeedsReauthError
 
@@ -569,7 +568,6 @@ class GoogleOAuthBase:
                 creds["scopes"] = self.OAUTH_SCOPES
 
             # [FIX 4b] Add type field for google-auth-library compatibility
-            # Required by the A2A sidecar server's credential loading
             if "type" not in creds:
                 creds["type"] = "authorized_user"
 

@@ -88,6 +88,7 @@ PROVIDER_ALIASES = {
     "z-ai": ["zai", "zhipuai"],
     "qwen": ["alibaba"],
     "opencode_go": ["opencode"],
+    "x-ai": ["xai"],
 }
 
 
@@ -1000,6 +1001,10 @@ class ModelRegistry:
                 pass
             self._worker = None
             logger.info("ModelRegistry stopped")
+
+    async def refresh(self):
+        """Force a manual refresh of all sources."""
+        await self._load_all_sources()
 
     async def await_ready(self, timeout_secs: float = 30.0) -> bool:
         """Block until initial data load completes."""

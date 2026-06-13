@@ -17,6 +17,7 @@ DEFAULT_OAUTH_DIRS = {
     "codex": Path.home() / ".codex",
     "anthropic": Path.home() / ".claude",
     "copilot": Path.home() / ".copilot",
+    "xai": Path.home() / ".xai",
 }
 
 # OAuth providers that support environment variable-based credentials
@@ -26,6 +27,7 @@ ENV_OAUTH_PROVIDERS = {
     "codex": "CODEX",
     "anthropic": "ANTHROPIC_OAUTH",
     "copilot": "COPILOT",
+    "xai": "XAI_OAUTH",
 }
 
 

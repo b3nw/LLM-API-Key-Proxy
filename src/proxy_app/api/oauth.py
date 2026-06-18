@@ -49,6 +49,11 @@ PROVIDER_META = {
         "flow_type": "device_code",
         "description": "GitHub Copilot via device flow. Enter code at GitHub.",
     },
+    "x-ai": {
+        "name": "xAI Grok",
+        "flow_type": "device_code",
+        "description": "xAI Grok via device flow. Enter code at auth.x.ai.",
+    },
 }
 
 
@@ -109,6 +114,8 @@ async def start_oauth_flow(req: OAuthStartRequest):
 
     if provider == "copilot":
         return await _start_copilot_device_flow(flow_id, flow)
+    elif provider == "x-ai":
+        return await _start_xai_device_flow(flow_id, flow)
     elif provider in ("codex", "gemini_cli", "anthropic"):
         return _start_paste_flow(flow_id, flow, provider)
     else:
@@ -265,6 +272,162 @@ async def _finalize_copilot(flow_id: str, flow: dict, github_token: str, client:
         "login": new_creds["_proxy_metadata"].get("login", "unknown"),
         "provider": "copilot",
     }
+
+
+# ---------------------------------------------------------------------------
+# xAI Grok: device flow
+# ---------------------------------------------------------------------------
+async def _start_xai_device_flow(flow_id: str, flow: dict):
+    # Reuse xAI provider constants — public client, no client_secret.
+    from rotator_library.providers.x_ai_auth_base import (
+        XAI_CLIENT_ID,
+        XAI_OAUTH_SCOPES,
+        XAI_DEVICE_CODE_URL,
+    )
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            XAI_DEVICE_CODE_URL,
+            data={
+                "client_id": XAI_CLIENT_ID,
+                "scope": " ".join(XAI_OAUTH_SCOPES),
+            },
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+            },
+            timeout=30.0,
+        )
+        if not resp.is_success:
+            raise HTTPException(
+                502, f"xAI device code request failed: {resp.text}"
+            )
+
+        data = resp.json()
+
+    flow["device_code"] = data["device_code"]
+    flow["interval"] = data.get("interval", 5)
+    flow["expires_in"] = data.get("expires_in", 600)
+    flow["client_id"] = XAI_CLIENT_ID
+    _pending_flows[flow_id] = flow
+
+    # Start background polling
+    asyncio.create_task(_poll_xai_device(flow_id))
+
+    return {
+        "flow_id": flow_id,
+        "flow_type": "device_code",
+        "verification_uri": data.get("verification_uri", "https://auth.x.ai/device"),
+        "user_code": data.get("user_code", ""),
+        "expires_in": data.get("expires_in", 600),
+    }
+
+
+async def _poll_xai_device(flow_id: str):
+    flow = _pending_flows.get(flow_id)
+    if not flow:
+        return
+
+    from rotator_library.providers.x_ai_auth_base import XAI_TOKEN_URL
+
+    client_id = flow["client_id"]
+    device_code = flow["device_code"]
+    interval = flow["interval"]
+    max_polls = flow["expires_in"] // interval
+
+    async with httpx.AsyncClient() as client:
+        for _ in range(max_polls):
+            await asyncio.sleep(interval)
+            if flow_id not in _pending_flows:
+                return
+
+            try:
+                resp = await client.post(
+                    XAI_TOKEN_URL,
+                    data={
+                        "client_id": client_id,
+                        "device_code": device_code,
+                        "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                    },
+                    headers={
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "Accept": "application/json",
+                    },
+                    timeout=30.0,
+                )
+                if not resp.is_success:
+                    continue
+
+                token_data = resp.json()
+                if "access_token" in token_data:
+                    await _finalize_xai(flow_id, flow, token_data, client)
+                    return
+
+                error = token_data.get("error", "")
+                if error == "expired_token":
+                    flow["status"] = "error"
+                    flow["error"] = "Device code expired. Please try again."
+                    return
+            except Exception as e:
+                lib_logger.debug(f"xAI poll error: {e}")
+                continue
+
+    flow["status"] = "error"
+    flow["error"] = "Device flow timed out."
+
+
+async def _finalize_xai(
+    flow_id: str, flow: dict, token_data: dict, client: httpx.AsyncClient
+):
+    """Persist xAI credentials and mark flow complete.
+
+    Credential shape mirrors XAiAuthBase._build_credentials_from_token_data
+    so the existing provider loader picks them up unchanged.
+    """
+    from rotator_library.providers.x_ai_auth_base import XAI_USERINFO_URL
+
+    access_token = token_data.get("access_token", "")
+    refresh_token = token_data.get("refresh_token", "")
+
+    # Email discovery: id_token JWT → userinfo → sub fallback
+    id_claims = _decode_jwt_payload(token_data.get("id_token", "")) or {}
+    email = id_claims.get("email", "")
+    sub = id_claims.get("sub", "")
+
+    if not email and access_token:
+        try:
+            userinfo_resp = await client.get(
+                XAI_USERINFO_URL,
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=10.0,
+            )
+            if userinfo_resp.is_success:
+                userinfo = userinfo_resp.json()
+                email = userinfo.get("email", "") or email
+                sub = sub or userinfo.get("sub", "")
+        except Exception as e:
+            lib_logger.debug(f"xAI userinfo fetch failed: {e}")
+
+    if not email:
+        email = sub or f"xai-user-{int(time.time())}"
+
+    expires_in = token_data.get("expires_in", 3600)
+
+    new_creds: Dict[str, Any] = {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "expiry_date": time.time() + expires_in,
+        "account_id": sub or email,
+        "_proxy_metadata": {
+            "email": email,
+            "account_id": sub or email,
+            "last_check_timestamp": time.time(),
+        },
+    }
+
+    _save_credential_file(flow, new_creds)
+    flow["status"] = "complete"
+    flow["result"] = {"login": email, "provider": "x-ai"}
 
 
 # ---------------------------------------------------------------------------

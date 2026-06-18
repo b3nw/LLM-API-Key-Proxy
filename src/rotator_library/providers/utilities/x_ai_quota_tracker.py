@@ -81,22 +81,51 @@ def _as_billing_int(v: Any) -> Optional[int]:
     return None
 
 
+def _normalize_billing_root(data: dict) -> dict:
+    """Unwrap common envelopes (CLI proxy / x.ai/billing RPC shape)."""
+    for key in ("billing", "result", "data", "payload"):
+        inner = data.get(key)
+        if isinstance(inner, dict) and inner:
+            return inner
+    return data
+
+
 def parse_billing_payload(data: dict) -> Dict[str, Any]:
-    """Parse billing JSON with optional nested {val: ...} wrappers."""
+    """Parse billing JSON (flat, {val:}, billingCycle, usage.totalUsed)."""
+    root = _normalize_billing_root(data if isinstance(data, dict) else {})
+
     monthly_limit = _first_billing_val(
-        data, "monthlyLimit", "monthly_limit", "monthly_limit_usd"
+        root, "monthlyLimit", "monthly_limit", "monthly_limit_usd"
     )
-    used = _first_billing_val(data, "used", "used_amount", "monthly_used")
+    used = _first_billing_val(root, "used", "used_amount", "monthly_used")
     on_demand_cap = _first_billing_val(
-        data, "onDemandCap", "on_demand_cap", "on_demand_balance"
+        root, "onDemandCap", "on_demand_cap", "on_demand_balance"
     )
-    period_start = _first_billing_val(
-        data, "billingPeriodStart", "billing_period_start", "period_start"
-    )
-    period_end = _first_billing_val(
-        data, "billingPeriodEnd", "billing_period_end", "period_end"
-    )
-    tier = _first_billing_val(data, "tier", "subscription_tier")
+
+    usage = root.get("usage")
+    if isinstance(usage, dict):
+        if used is None:
+            used = _first_billing_val(
+                usage, "totalUsed", "total_used", "used", "monthly_used"
+            )
+
+    cycle = root.get("billingCycle") or root.get("billing_cycle")
+    if isinstance(cycle, dict):
+        period_start = _first_billing_val(
+            cycle, "billingPeriodStart", "billing_period_start", "period_start"
+        )
+        period_end = _first_billing_val(
+            cycle, "billingPeriodEnd", "billing_period_end", "period_end"
+        )
+    else:
+        period_start = _first_billing_val(
+            root, "billingPeriodStart", "billing_period_start", "period_start"
+        )
+        period_end = _first_billing_val(
+            root, "billingPeriodEnd", "billing_period_end", "period_end"
+        )
+
+    tier = _first_billing_val(root, "tier", "subscription_tier")
 
     def _as_int(v: Any) -> Optional[int]:
         return _as_billing_int(v)

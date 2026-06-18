@@ -59,6 +59,22 @@ def test_parse_billing_payload_float_dollars():
     assert parsed["on_demand_cap"] == 50
 
 
+def test_parse_billing_payload_grok_billing_cycle_shape():
+    """CodexBar / x.ai/billing RPC documented shape."""
+    data = {
+        "billingCycle": {
+            "billingPeriodStart": "2026-06-01T00:00:00.000Z",
+            "billingPeriodEnd": "2026-07-01T00:00:00.000Z",
+        },
+        "monthlyLimit": {"val": 99900},
+        "usage": {"totalUsed": {"val": 12345}},
+    }
+    parsed = parse_billing_payload(data)
+    assert parsed["monthly_limit"] == 99900
+    assert parsed["used"] == 12345
+    assert parsed["period_end"] == "2026-07-01T00:00:00.000Z"
+
+
 def test_resolve_user_id_prefers_jwt_principal():
     async def _run():
         host = _TrackerHost()

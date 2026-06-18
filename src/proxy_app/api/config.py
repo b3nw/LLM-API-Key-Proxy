@@ -266,8 +266,9 @@ async def get_credentials(request: Request):
     env_vars = _get_env_vars()
     oauth_dir = _oauth_dir()
 
-    # Build a lookup of runtime credential status from the proxy's quota stats
+    # Build lookups of runtime credential status and tier from quota stats
     runtime_status: dict[str, str] = {}
+    runtime_tiers: dict[str, str] = {}
     loaded_providers: set[str] = set()
     try:
         client = request.app.state.rotating_client
@@ -277,7 +278,11 @@ async def get_credentials(request: Request):
             for cred_data in pstats.get("credentials", {}).values():
                 full_path = cred_data.get("full_path", "")
                 if full_path:
-                    runtime_status[Path(full_path).name] = cred_data.get("status", "unknown")
+                    fname = Path(full_path).name
+                    runtime_status[fname] = cred_data.get("status", "unknown")
+                    tier = cred_data.get("tier")
+                    if tier:
+                        runtime_tiers[fname] = tier
     except Exception:
         pass
 
@@ -326,7 +331,12 @@ async def get_credentials(request: Request):
                     data = await asyncio.to_thread(_read_json, f)
                     meta = data.get("_proxy_metadata", {})
                     info["email"] = meta.get("email") or meta.get("login") or data.get("email")
-                    info["tier"] = meta.get("tier") or meta.get("plan_type") or meta.get("sku")
+                    info["tier"] = (
+                        meta.get("tier")
+                        or meta.get("plan_type")
+                        or meta.get("sku")
+                        or runtime_tiers.get(f.name)
+                    )
                     file_status = meta.get("status", "unknown")
                     # Runtime status takes precedence, then file metadata,
                     # then infer "active" if the provider is loaded in the proxy
@@ -354,31 +364,101 @@ class AddApiKeyRequest(BaseModel):
     key: str = Field(min_length=1, max_length=500)
 
 
+async def _ensure_usage_manager(client, provider: str, credentials: list) -> None:
+    """Create a usage manager if missing, then (re-)initialize with current credentials."""
+    from rotator_library.usage.config import load_provider_usage_config
+    from rotator_library.usage import UsageManager as NewUsageManager
+
+    usage_manager = client.get_usage_manager(provider)
+    if usage_manager is None:
+        reg = client._usage_registry
+        config = load_provider_usage_config(provider, client._provider_plugins)
+        config.rotation_tolerance = reg._rotation_tolerance
+        reg.apply_usage_reset_config(provider, credentials, config)
+        mode = config.rotation_mode.value
+        max_c, opt_c = reg.get_concurrency_settings(provider, mode)
+        usage_manager = NewUsageManager(
+            provider=provider,
+            file_path=client._usage_base_path / f"usage_{provider}.json",
+            provider_plugins=client._provider_plugins,
+            config=config,
+            max_concurrent_per_key=max_c,
+            optimal_concurrent_per_key=opt_c,
+            get_provider_instance=client._get_provider_instance,
+        )
+        reg.managers[provider] = usage_manager
+
+    priorities, tiers = client._usage_registry.get_credential_metadata(
+        provider, credentials
+    )
+    await usage_manager.initialize(
+        credentials, priorities=priorities, tiers=tiers
+    )
+
+    plugin = client._get_provider_instance(provider)
+    if plugin and hasattr(plugin, "set_usage_manager"):
+        plugin.set_usage_manager(usage_manager)
+
+
+async def _hot_load_api_key(client, provider: str, api_key: str) -> bool:
+    """Hot-load a new API key into the running client's credential maps.
+
+    Returns True if the credential was newly added, False if it was already present.
+    """
+    provider = provider.lower()
+    added = False
+
+    client.api_keys.setdefault(provider, [])
+    if api_key not in client.api_keys[provider]:
+        client.api_keys[provider].append(api_key)
+        added = True
+
+    client.all_credentials.setdefault(provider, [])
+    if api_key not in client.all_credentials[provider]:
+        client.all_credentials[provider].append(api_key)
+        added = True
+
+    if added:
+        await _ensure_usage_manager(client, provider, client.all_credentials[provider])
+
+    return added
+
+
 @router.post("/credentials/api-key")
-async def add_api_key(req: AddApiKeyRequest):
-    env_file = str(_env_path())
-    env_vars = _get_env_vars()
+async def add_api_key(req: AddApiKeyRequest, request: Request):
+    async with _credential_lock:
+        env_file = str(_env_path())
+        env_vars = _get_env_vars()
 
-    provider_upper = req.provider.upper()
-    existing = [k for k in env_vars if k.startswith(f"{provider_upper}_API_KEY")]
-    if existing:
-        nums = []
-        for k in existing:
-            suffix = k.replace(f"{provider_upper}_API_KEY", "")
-            if suffix.startswith("_") and suffix[1:].isdigit():
-                nums.append(int(suffix[1:]))
-            elif not suffix:
-                nums.append(0)
-        next_num = max(nums) + 1 if nums else 1
-        key_name = f"{provider_upper}_API_KEY_{next_num}"
-    else:
-        key_name = f"{provider_upper}_API_KEY"
+        provider_upper = req.provider.upper()
+        existing = [k for k in env_vars if k.startswith(f"{provider_upper}_API_KEY")]
+        if existing:
+            nums = []
+            for k in existing:
+                suffix = k.replace(f"{provider_upper}_API_KEY", "")
+                if suffix.startswith("_") and suffix[1:].isdigit():
+                    nums.append(int(suffix[1:]))
+                elif not suffix:
+                    nums.append(0)
+            next_num = max(nums) + 1 if nums else 1
+            key_name = f"{provider_upper}_API_KEY_{next_num}"
+        else:
+            key_name = f"{provider_upper}_API_KEY"
 
-    _inplace_set_key(env_file, key_name, req.key)
-    os.environ[key_name] = req.key
-    load_dotenv(env_file, override=True)
+        _inplace_set_key(env_file, key_name, req.key)
+        os.environ[key_name] = req.key
+        load_dotenv(env_file, override=True)
 
-    return {"key_name": key_name}
+        hot_loaded = False
+        try:
+            client = request.app.state.rotating_client
+            hot_loaded = await _hot_load_api_key(client, req.provider, req.key)
+        except Exception as exc:
+            logger.warning(
+                f"Could not hot-load API key for {req.provider}", exc_info=True
+            )
+
+    return {"key_name": key_name, "hot_loaded": hot_loaded}
 
 
 @router.delete("/credentials/api-key/{provider}/{key_name}")
@@ -437,11 +517,17 @@ async def delete_oauth_credential(provider: str, filename: str, request: Request
                     if not c.endswith(filename)
                 ]
                 removed_from_proxy = len(client.all_credentials[provider_lower]) < before
+                if not client.all_credentials[provider_lower]:
+                    del client.all_credentials[provider_lower]
             if provider_lower in client.oauth_credentials:
                 client.oauth_credentials[provider_lower] = [
                     c for c in client.oauth_credentials[provider_lower]
                     if not c.endswith(filename)
                 ]
+                if not client.oauth_credentials[provider_lower]:
+                    del client.oauth_credentials[provider_lower]
+                    if hasattr(client, "oauth_providers"):
+                        client.oauth_providers.discard(provider_lower)
 
             # Remove from usage manager so stale state isn't persisted on shutdown
             usage_manager = client.get_usage_manager(provider_lower)
@@ -459,18 +545,74 @@ class AddCustomProviderRequest(BaseModel):
     api_key: str
 
 
+async def _hot_load_custom_provider(client, provider_name: str, api_key: str) -> dict:
+    """Register a new custom OpenAI-compatible provider at runtime."""
+    from rotator_library.providers import PROVIDER_PLUGINS, DynamicOpenAICompatibleProvider
+    from rotator_library.provider_config import KNOWN_PROVIDERS
+
+    provider = provider_name.lower()
+    result = {"plugin_registered": False, "models_discovered": 0}
+
+    if provider not in KNOWN_PROVIDERS and provider not in PROVIDER_PLUGINS:
+        def _make_plugin(name):
+            class _Plug(DynamicOpenAICompatibleProvider):
+                def __init__(self):
+                    super().__init__(name)
+            return _Plug
+
+        PROVIDER_PLUGINS[provider] = _make_plugin(provider)
+        result["plugin_registered"] = True
+
+    client.provider_config._load_api_bases()
+
+    client.api_keys.setdefault(provider, [])
+    if api_key not in client.api_keys[provider]:
+        client.api_keys[provider].append(api_key)
+
+    client.all_credentials.setdefault(provider, [])
+    if api_key not in client.all_credentials[provider]:
+        client.all_credentials[provider].append(api_key)
+
+    await _ensure_usage_manager(client, provider, client.all_credentials[provider])
+
+    try:
+        models = await client.get_available_models(provider, force_refresh=True)
+        result["models_discovered"] = len(models)
+    except Exception as exc:
+        logger.warning(f"Model discovery failed for {provider}: {exc}")
+        result["model_discovery_error"] = str(exc)
+
+    return result
+
+
 @router.post("/credentials/custom-provider")
-async def add_custom_provider(req: AddCustomProviderRequest):
-    env_file = str(_env_path())
-    provider_upper = req.name.upper()
+async def add_custom_provider(req: AddCustomProviderRequest, request: Request):
+    async with _credential_lock:
+        env_file = str(_env_path())
+        provider_upper = req.name.upper()
 
-    _inplace_set_key(env_file, f"{provider_upper}_API_BASE", req.base_url)
-    _inplace_set_key(env_file, f"{provider_upper}_API_KEY", req.api_key)
-    os.environ[f"{provider_upper}_API_BASE"] = req.base_url
-    os.environ[f"{provider_upper}_API_KEY"] = req.api_key
-    load_dotenv(env_file, override=True)
+        _inplace_set_key(env_file, f"{provider_upper}_API_BASE", req.base_url)
+        _inplace_set_key(env_file, f"{provider_upper}_API_KEY", req.api_key)
+        os.environ[f"{provider_upper}_API_BASE"] = req.base_url
+        os.environ[f"{provider_upper}_API_KEY"] = req.api_key
+        load_dotenv(env_file, override=True)
 
-    return {"provider": req.name}
+        hot_load_info = {}
+        try:
+            client = request.app.state.rotating_client
+            hot_load_info = await _hot_load_custom_provider(
+                client, req.name, req.api_key
+            )
+            logger.info(
+                f"Hot-loaded custom provider {req.name}: "
+                f"plugin={'new' if hot_load_info.get('plugin_registered') else 'existing'}, "
+                f"models={hot_load_info.get('models_discovered', 0)}"
+            )
+        except Exception:
+            logger.warning(f"Hot-load failed for {req.name}", exc_info=True)
+            hot_load_info["error"] = "hot_load_failed"
+
+    return {"provider": req.name, **hot_load_info}
 
 
 @router.get("/config/model-filters/{provider}")

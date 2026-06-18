@@ -263,6 +263,13 @@ class XAiQuotaTracker:
                 data = response.json()
 
             parsed = parse_billing_payload(data if isinstance(data, dict) else {})
+            if parsed.get("monthly_limit") is None:
+                root = data if isinstance(data, dict) else {}
+                inner = _normalize_billing_root(root)
+                lib_logger.warning(
+                    "x-ai: billing HTTP 200 but monthly_limit unset; "
+                    f"root_keys={list(root.keys())[:12]} inner_keys={list(inner.keys())[:12]}"
+                )
             snapshot = XAiBillingSnapshot(
                 credential_path=credential_path,
                 identifier=identifier,

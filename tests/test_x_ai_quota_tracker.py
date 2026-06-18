@@ -50,6 +50,43 @@ def test_parse_period_end_ts_iso_z():
     assert ts > time.time()
 
 
+def test_parse_billing_payload_float_dollars():
+    parsed = parse_billing_payload(
+        {"monthlyLimit": 100.0, "used": 20.5, "onDemandCap": 50.0}
+    )
+    assert parsed["monthly_limit"] == 100
+    assert parsed["used"] == 20
+    assert parsed["on_demand_cap"] == 50
+
+
+def test_resolve_user_id_prefers_jwt_principal():
+    async def _run():
+        host = _TrackerHost()
+
+        async def load(_path):
+            return {
+                "account_id": "email-wrong@example.com",
+                "access_token": "not-a-jwt",
+            }
+
+        host._load_credentials = load  # type: ignore[method-assign]
+        with patch(
+            "rotator_library.providers.utilities.x_ai_quota_tracker._parse_jwt_claims",
+            return_value={"principal_id": "principal-uuid"},
+        ):
+            # token present triggers JWT path first
+            host._load_credentials = AsyncMock(
+                return_value={
+                    "account_id": "email-wrong@example.com",
+                    "access_token": "tok",
+                }
+            )
+            uid = await host._resolve_user_id("/cred/x.json")
+            assert uid == "principal-uuid"
+
+    asyncio.run(_run())
+
+
 def test_parse_billing_payload_nested_vals():
     data = {
         "monthlyLimit": {"val": 1000},

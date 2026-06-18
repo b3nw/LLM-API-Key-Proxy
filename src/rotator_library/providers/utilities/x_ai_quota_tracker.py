@@ -58,22 +58,48 @@ def _parse_period_end_ts(period_end: Optional[str]) -> Optional[float]:
         return None
 
 
+def _first_billing_val(data: dict, *keys: str) -> Any:
+    for key in keys:
+        if key in data and data[key] is not None:
+            return _billing_val(data[key])
+    return None
+
+
+def _as_billing_int(v: Any) -> Optional[int]:
+    """Parse billing numeric fields (ints, floats, numeric strings)."""
+    if v is None:
+        return None
+    try:
+        if isinstance(v, bool):
+            return None
+        if isinstance(v, (int, float)):
+            return int(round(float(v)))
+        if isinstance(v, str) and v.strip():
+            return int(round(float(v.strip())))
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
 def parse_billing_payload(data: dict) -> Dict[str, Any]:
     """Parse billing JSON with optional nested {val: ...} wrappers."""
-    monthly_limit = _billing_val(data.get("monthlyLimit"))
-    used = _billing_val(data.get("used"))
-    on_demand_cap = _billing_val(data.get("onDemandCap"))
-    period_start = _billing_val(data.get("billingPeriodStart"))
-    period_end = _billing_val(data.get("billingPeriodEnd"))
-    tier = _billing_val(data.get("tier"))
+    monthly_limit = _first_billing_val(
+        data, "monthlyLimit", "monthly_limit", "monthly_limit_usd"
+    )
+    used = _first_billing_val(data, "used", "used_amount", "monthly_used")
+    on_demand_cap = _first_billing_val(
+        data, "onDemandCap", "on_demand_cap", "on_demand_balance"
+    )
+    period_start = _first_billing_val(
+        data, "billingPeriodStart", "billing_period_start", "period_start"
+    )
+    period_end = _first_billing_val(
+        data, "billingPeriodEnd", "billing_period_end", "period_end"
+    )
+    tier = _first_billing_val(data, "tier", "subscription_tier")
 
     def _as_int(v: Any) -> Optional[int]:
-        if v is None:
-            return None
-        try:
-            return int(v)
-        except (TypeError, ValueError):
-            return None
+        return _as_billing_int(v)
 
     period_end_str = str(period_end) if period_end is not None else None
     period_start_str = str(period_start) if period_start is not None else None
@@ -141,18 +167,18 @@ class XAiQuotaTracker:
 
     async def _resolve_user_id(self, credential_path: str) -> str:
         creds = await self._load_credentials(credential_path)
-        account_id = creds.get("account_id")
-        if account_id:
-            return str(account_id)
-        meta = creds.get("_proxy_metadata") or {}
-        if meta.get("account_id"):
-            return str(meta["account_id"])
         token = creds.get("access_token", "")
         if token:
             claims = _parse_jwt_claims(token)
             for key in ("principal_id", "sub", "user_id"):
                 if claims.get(key):
                     return str(claims[key])
+        account_id = creds.get("account_id")
+        if account_id:
+            return str(account_id)
+        meta = creds.get("_proxy_metadata") or {}
+        if meta.get("account_id"):
+            return str(meta["account_id"])
         raise ValueError("Could not resolve x-userid for billing request")
 
     def _build_billing_headers(self, bearer_token: str, user_id: str) -> Dict[str, str]:
@@ -279,7 +305,7 @@ class XAiQuotaTracker:
             period_end_ts = quota_data.get("period_end_ts")
             on_demand_cap = quota_data.get("on_demand_cap")
 
-            if monthly_limit is not None and monthly_limit > 0:
+            if monthly_limit is not None and monthly_limit >= 0:
                 exhausted = used >= monthly_limit
                 try:
                     await usage_manager.update_quota_baseline(
@@ -387,10 +413,16 @@ class XAiQuotaTracker:
         self._usage_manager = usage_manager
         quota_results = await self.fetch_initial_baselines(oauth_creds)
         is_initial = not self._initial_baselines_fetched
-        await self._store_baselines_to_usage_manager(
+        stored = await self._store_baselines_to_usage_manager(
             quota_results,
             usage_manager,
             force=True,
             is_initial_fetch=is_initial,
         )
-        self._initial_baselines_fetched = True
+        if stored > 0:
+            self._initial_baselines_fetched = True
+        elif any(r.get("status") == "success" for r in quota_results.values()):
+            lib_logger.warning(
+                "x-ai: billing fetch succeeded but no quota baselines were stored "
+                "(check monthly_limit/on_demand_cap parsing)"
+            )

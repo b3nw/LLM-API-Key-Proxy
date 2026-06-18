@@ -82,8 +82,8 @@ def _as_billing_int(v: Any) -> Optional[int]:
 
 
 def _normalize_billing_root(data: dict) -> dict:
-    """Unwrap common envelopes (CLI proxy / x.ai/billing RPC shape)."""
-    for key in ("billing", "result", "data", "payload"):
+    """Unwrap common envelopes (CLI proxy /billing uses top-level `config`)."""
+    for key in ("config", "billing", "result", "data", "payload"):
         inner = data.get(key)
         if isinstance(inner, dict) and inner:
             return inner

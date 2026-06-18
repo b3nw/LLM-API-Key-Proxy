@@ -59,6 +59,24 @@ def test_parse_billing_payload_float_dollars():
     assert parsed["on_demand_cap"] == 50
 
 
+def test_parse_billing_payload_cli_proxy_config_envelope():
+    """Live GET /v1/billing shape (2026-06): fields under `config`."""
+    data = {
+        "config": {
+            "monthlyLimit": {"val": 15000},
+            "used": {"val": 2600},
+            "onDemandCap": {"val": 0},
+            "billingPeriodStart": "2026-06-01T00:00:00+00:00",
+            "billingPeriodEnd": "2026-07-01T00:00:00+00:00",
+        }
+    }
+    parsed = parse_billing_payload(data)
+    assert parsed["monthly_limit"] == 15000
+    assert parsed["used"] == 2600
+    assert parsed["on_demand_cap"] == 0
+    assert "2026-07-01" in (parsed["period_end"] or "")
+
+
 def test_parse_billing_payload_grok_billing_cycle_shape():
     """CodexBar / x.ai/billing RPC documented shape."""
     data = {

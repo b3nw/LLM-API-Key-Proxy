@@ -103,3 +103,32 @@ export function formatTimeRemaining(resetAt: number): string {
   if (minutes > 0) return `${minutes}m`
   return "< 1m"
 }
+
+/** x-ai Grok CLI billing: show % used only (no opaque used/limit integers). */
+export function isXaiPercentOnlyQuotaGroup(providerName: string, groupName: string): boolean {
+  return providerName === "x-ai" && groupName === "monthly-limit"
+}
+
+export function formatPercentUsedFromRemaining(remainingPct: number | null | undefined): string {
+  const rem = remainingPct ?? 0
+  const used = Math.min(100, Math.max(0, 100 - rem))
+  const rounded = Math.round(used * 10) / 10
+  return Number.isInteger(rounded) ? `${rounded}% used` : `${rounded.toFixed(1)}% used`
+}
+
+/** Calendar reset label (e.g. "Jun 30") from unix reset timestamp. */
+export function formatResetCalendarDate(resetAt: number | null | undefined): string | null {
+  if (resetAt == null || resetAt <= 0) return null
+  const d = new Date(resetAt * 1000)
+  if (Number.isNaN(d.getTime())) return null
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" })
+}
+
+export function formatXaiQuotaValueStr(
+  remainingPct: number | null | undefined,
+  resetAt?: number | null,
+): string {
+  const pct = formatPercentUsedFromRemaining(remainingPct)
+  const cal = formatResetCalendarDate(resetAt)
+  return cal ? `${pct} · Resets ${cal}` : pct
+}

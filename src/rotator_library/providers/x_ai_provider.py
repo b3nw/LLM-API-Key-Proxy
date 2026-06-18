@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import AsyncGenerator, List, Union
+from typing import AsyncGenerator, List, Optional, Union
 
 import httpx
 import litellm
@@ -29,6 +29,7 @@ import openai
 
 from .provider_interface import ProviderInterface
 from .x_ai_auth_base import XAiAuthBase
+from .utilities.x_ai_quota_tracker import XAiQuotaTracker
 from ..model_definitions import ModelDefinitions
 from ..error_handler import mask_credential
 
@@ -76,7 +77,7 @@ SUPPORTED_PARAMS = {
 }
 
 
-class XAiProvider(XAiAuthBase, ProviderInterface):
+class XAiProvider(XAiAuthBase, XAiQuotaTracker, ProviderInterface):
     """
     Provider for xAI Grok models using OAuth2 credentials.
 
@@ -92,10 +93,26 @@ class XAiProvider(XAiAuthBase, ProviderInterface):
 
     provider_env_name = "x-ai"
 
+    model_quota_groups = {
+        "monthly-limit": ["_billing_monthly"],
+        "on-demand($)": ["_billing_ondemand"],
+    }
+
+    def get_model_quota_group(self, model: str) -> Optional[str]:
+        """Map chat models to monthly billing pool; virtual buckets for display."""
+        clean = model.split("/")[-1] if "/" in model else model
+        if clean == "_billing_ondemand":
+            return "on-demand($)"
+        if clean == "_billing_monthly":
+            return "monthly-limit"
+        return "monthly-limit"
+
     def __init__(self):
         super().__init__()
+        self._init_quota_tracker()
         self.api_base = XAI_API_BASE
         self.cli_proxy_base = XAI_CLI_PROXY_BASE
+        self._cli_version = XAI_CLI_VERSION
         self.model_definitions = ModelDefinitions()
         # Models that are only available on the CLI proxy (not on api.x.ai)
         self._cli_proxy_models: set = set()
@@ -235,8 +252,11 @@ class XAiProvider(XAiAuthBase, ProviderInterface):
 
     def _get_cli_proxy_headers(self) -> dict:
         """Return extra headers required by the CLI chat proxy."""
+        ver = XAI_CLI_VERSION
         return {
-            "User-Agent": f"grok/{XAI_CLI_VERSION}",
+            "User-Agent": f"grok/{ver}",
+            "x-xai-token-auth": "xai-grok-cli",
+            "x-grok-client-version": ver,
         }
 
     def _is_cli_proxy_model(self, model_bare: str) -> bool:

@@ -36,6 +36,14 @@ rules:
       - "fix(webui): hot-load custom providers and API keys without restart"
 
 features:
+  - id: lightning-ai
+    prefix: "feat(lightning-ai)"
+    subject: "feat(lightning-ai): dollar credit quotas and date parsing"
+    files:
+      - "src/rotator_library/providers/lightning_ai*"
+      - "src/rotator_library/providers/utilities/lightning_ai*"
+      - "src/rotator_library/providers/_retired/*"
+
   - id: anthropic
     prefix: "feat(anthropic)"
     subject: "feat(anthropic): add OAuth support and handle streaming nulls"

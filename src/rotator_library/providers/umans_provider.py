@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from .provider_interface import ProviderInterface, UsageResetConfigDef
-from .utilities.umans_quota_tracker import UmansQuotaTracker
+from .utilities.umans_quota_tracker import UmansQuotaTracker, _normalize_umans_api_base
 
 lib_logger = logging.getLogger("rotator_library")
 
@@ -139,7 +139,9 @@ class UmansProvider(UmansQuotaTracker, ProviderInterface):
             List of model names prefixed with 'umans/'
         """
         try:
-            base = os.getenv("UMANS_API_BASE", "https://api.code.umans.ai").rstrip("/")
+            base = _normalize_umans_api_base(
+                os.getenv("UMANS_API_BASE", "https://api.code.umans.ai")
+            )
             response = await client.get(
                 f"{base}/v1/models",
                 headers={"Authorization": f"Bearer {api_key}"},

@@ -76,3 +76,24 @@ Verification:
 Notes:
 - Rebased onto current `origin/dev` (fe3ee86) to fix the stale base that
   caused PR #62 to show 16 commits instead of 1.
+
+## 2026-06-22 — Fix Umans quota fetch 404 and Web UI visibility (post #62)
+
+Target: `fix(umans): normalize API base and show quota without proxy requests`
+Files:
+- `src/rotator_library/providers/utilities/umans_quota_tracker.py`
+- `src/rotator_library/providers/umans_provider.py`
+- `src/rotator_library/client/quota.py`
+- `tests/test_umans_quota_tracker.py`
+
+Changes:
+- `_normalize_umans_api_base()` strips trailing `/v1` so `UMANS_API_BASE=https://api.code.umans.ai/v1` does not call `/v1/v1/usage` (404).
+- `_resolve_umans_api_key()` resolves `env://umans/N` to `UMANS_API_KEY_N` for Bearer auth.
+- `QuotaService.get_quota_stats` keeps providers with quota baselines when `total_requests == 0`.
+- Tests for URL normalization, env key resolution, and ISO timestamp assertion.
+
+Verification:
+- `uv run pytest tests/test_umans_quota_tracker.py -q` — 36 passed
+- Live: `GET https://api.code.umans.ai/v1/usage` returns 200; double `/v1` returns 404.
+
+Follow-up PR after merge of #62.

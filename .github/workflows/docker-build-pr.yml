@@ -1,0 +1,143 @@
+# Manual / on-demand build of a PR ref into a PR-tagged image.
+#
+# Triggered explicitly by a maintainer who has reviewed the PR and is ready
+# to test it. Does NOT auto-build on pull_request_target from forks (supply
+# chain risk: a malicious PR could exfiltrate GITHUB_TOKEN during build).
+#
+# Resulting image tag: pr-<ref-safe>-latest  (e.g. pr-62-latest)
+# Pushes to:           ghcr.io/b3nw/llm-api-key-proxy
+#
+# Usage:
+#   1. Go to Actions -> "Build PR ref" -> Run workflow
+#   2. Enter the PR ref. Accepts:
+#        - "62"             -> resolves to refs/pull/62/head
+#        - "pull/62/head"   -> resolves to refs/pull/62/head
+#        - "feat-staging"   -> used as a branch ref
+#        - "<40-char-sha>"  -> used as a commit ref
+#   3. Wait for build, then on llm-proxy-dev set
+#        LLM_PROXY_IMAGE=ghcr.io/b3nw/llm-api-key-proxy:pr-<tag>-latest
+#      and redeploy.
+---
+name: Build PR ref
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_ref:
+        description: >-
+          PR number (e.g. "62"), PR ref (e.g. "pull/62/head"), branch name,
+          or commit SHA to build.
+        required: true
+        type: string
+      image_tag:
+        description: >-
+          Optional explicit image tag (e.g. "pr-62-abc1234"). If empty, a
+          tag is derived from the ref ("pr-<n>-latest" for numeric input,
+          "pr-<sanitized-ref>-latest" otherwise).
+        required: false
+        type: string
+        default: ""
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: b3nw/llm-api-key-proxy
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    steps:
+      - name: Resolve ref + tag
+        id: resolve
+        run: |
+          set -euo pipefail
+          INPUT="${{ github.event.inputs.pr_ref }}"
+          EXPLICIT_TAG="${{ github.event.inputs.image_tag }}"
+
+          # Resolve the ref to a usable git refspec.
+          if [[ "$INPUT" =~ ^[0-9]+$ ]]; then
+            # Numeric -> treat as PR number
+            RESOLVED_REF="refs/pull/${INPUT}/head"
+            DERIVED_TAG="pr-${INPUT}"
+          elif [[ "$INPUT" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            RESOLVED_REF="$INPUT"
+            DERIVED_TAG="pr-${INPUT:0:7}"
+          else
+            # Branch name or "pull/N/head"
+            if [[ "$INPUT" =~ ^pull/([0-9]+)/head$ ]]; then
+              # PR ref form already given
+              RESOLVED_REF="refs/pull/${BASH_REMATCH[1]}/head"
+              DERIVED_TAG="pr-${BASH_REMATCH[1]}"
+            else
+              RESOLVED_REF="refs/heads/${INPUT}"
+              SAFE_BRANCH="${INPUT//\//-}"
+              DERIVED_TAG="pr-${SAFE_BRANCH}"
+            fi
+          fi
+
+          FINAL_TAG="${EXPLICIT_TAG:-${DERIVED_TAG}-latest}"
+
+          echo "ref=${RESOLVED_REF}"      >> "$GITHUB_OUTPUT"
+          echo "tag=${FINAL_TAG}"         >> "$GITHUB_OUTPUT"
+          echo "Resolved '${INPUT}' -> ref='${RESOLVED_REF}', tag='${FINAL_TAG}'"
+
+      - name: Checkout resolved ref
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.resolve.outputs.ref }}
+          # Full history is needed so a 40-char SHA that is not on the
+          # default branch tip can still be resolved.
+          fetch-depth: 0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push PR image
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.resolve.outputs.tag }}
+          labels: |
+            org.opencontainers.image.title=llm-api-key-proxy (PR build)
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            llm.proxy.build.ref=${{ github.event.inputs.pr_ref }}
+          provenance: false
+          sbom: false
+
+      - name: Generate artifact attestation
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: false
+
+      - name: Summarize
+        run: |
+          echo "## PR build complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Input ref:  \`${{ github.event.inputs.pr_ref }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Resolved:   \`${{ steps.resolve.outputs.ref }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Image tag:  \`${{ steps.resolve.outputs.tag }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "To test on llm-proxy-dev, set in \`/opt/llm-proxy-dev/env/.env\`:" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "LLM_PROXY_IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.resolve.outputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

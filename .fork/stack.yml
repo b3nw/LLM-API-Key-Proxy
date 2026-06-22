@@ -25,6 +25,9 @@ rules:
     xai:
       - "feat(xai): add xAI Grok OAuth provider with PKCE and Device Code flows"
       - "feat(xai): enable xAI Grok device-code OAuth in admin WebUI"
+    ci:
+      - "feat(ci): fork-aware release notes with incremental topic diff"
+      - "feat(ci): add Build PR ref workflow for fork PR testing"
 
 features:
   - id: lightning-ai

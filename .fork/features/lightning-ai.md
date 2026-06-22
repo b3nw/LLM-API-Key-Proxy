@@ -34,3 +34,23 @@ Notes:
   compatibility. The TUI detects the `credits($)` group suffix and formats as dollars.
 - Retired providers are archived with retirement headers and documented in _retired/README.md.
 - All archived code was recovered before `git gc` could prune the dangling objects.
+
+## 2026-06-23 — Add Lightning AI documentation to .env.example and README.md
+
+Target: `feat(lightning-ai): dollar credit quotas and date parsing`
+Files:
+- `.env.example` (added Lightning AI section with env var reference)
+- `README.md` (added provider to Additional Providers table and quick-start env block)
+
+Verification:
+- llm-proxy-dev stack confirmed Lightning AI active with 48 models discovered
+- Health endpoint shows `lightning_ai` in active providers list
+- Provider routes requests to `https://lightning.ai/api/v1/chat/completions` and `/responses`
+
+Notes:
+- Resolves GitHub issue #70 (documentation gap for Lightning AI provider)
+- Documents: `LIGHTNING_AI_API_KEY_1` (UUID format), `LIGHTNING_AI_API_BASE`,
+  `LIGHTNING_AI_MONTHLY_GRANT` (plan tiers: free=$15, pro=$20, teams=$50),
+  `LIGHTNING_AI_QUOTA_REFRESH_INTERVAL` (default 300s)
+- Documents billing routing suffix (`UUID/ORG_NAME/TEAMSPACE_NAME`)
+- Notes that quota uses the API key directly (no separate session token like KiloCode)

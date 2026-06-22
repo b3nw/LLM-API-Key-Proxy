@@ -28,6 +28,7 @@ A personal fork of [Mirrowel/LLM-API-Key-Proxy](https://github.com/Mirrowel/LLM-
 | **Command Code** | Bypasses standard subscription tier limits on chat completions by routing to the CLI endpoint (`/alpha/generate`). Supports dollar credits tracking mapped to cents baseline, 5-minute background refresh, and reasoning/thinking stream translation for `deepseek-v4-pro` and `mimo-v2.5-pro` |
 | **Umans** | OpenAI-compatible aggregation provider with static model definitions via `UMANS_MODELS`, request-based quota tracking (code_pro: 200 req/5h, max: unlimited), upstream-authoritative context windows, and cost tracking via sub-provider alias resolution |
 | **xAI Grok** | OAuth2 PKCE + Device Code flow for SuperGrok/X Premium+ accounts. Dual-endpoint model discovery from `api.x.ai` and `cli-chat-proxy.grok.com`, automatic token refresh, and CLI proxy context window metadata injection |
+| **Lightning AI** | OpenAI-compatible API with dollar-based monthly credit quota tracking via `/v1/memberships`. Dynamic model discovery, balance tracked in cents for integer quota precision. Plans: free ($15/mo), pro ($20/mo), teams ($50/mo) |
 
 ### Smart "Latest" Model Aliases
 
@@ -638,6 +639,12 @@ COMMAND_API_KEY_1=user_...  # Long-lived API key from CLI authentication
 # Get token from browser cookie __Secure-next-auth.session-token on app.kilo.ai
 KILO_SESSION_TOKEN=...  # Auto-refreshes on use, ~30-day TTL
 KILO_QUOTA_REFRESH_INTERVAL=600  # optional, default 600s
+
+# Lightning AI (dollar credit quota — balance fetched via API key, no separate token)
+# Key format: bare UUID or UUID/ORG_NAME/TEAMSPACE_NAME for billing routing
+LIGHTNING_AI_API_KEY_1=a1b2c3d4-e5f6-7890-abcd-ef1234567890
+LIGHTNING_AI_MONTHLY_GRANT=15  # optional, whole dollars: free=15, pro=20, teams=50
+LIGHTNING_AI_QUOTA_REFRESH_INTERVAL=300  # optional, default 300s
 
 # Umans (OpenAI-compatible aggregation provider)
 UMANS_API_KEY_1=your-umans-api-key

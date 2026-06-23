@@ -11,6 +11,23 @@ from typing import Any, Callable, Dict, List, Optional
 lib_logger = logging.getLogger("rotator_library")
 
 
+def _stats_has_quota_data(stats: Dict[str, Any]) -> bool:
+    """True if provider has quota baselines or per-credential group windows (e.g. Umans API-only)."""
+    quota_groups = stats.get("quota_groups") or {}
+    if quota_groups:
+        for group in quota_groups.values():
+            windows = group.get("windows") or {}
+            for win in windows.values():
+                if (win.get("total_max") or 0) > 0:
+                    return True
+    for cred in (stats.get("credentials") or {}).values():
+        for group in (cred.get("group_usage") or {}).values():
+            for win in (group.get("windows") or {}).values():
+                if win.get("limit") is not None:
+                    return True
+    return False
+
+
 class QuotaService:
     """Aggregate usage stats and force-refresh provider quota baselines."""
 
@@ -56,7 +73,7 @@ class QuotaService:
             if classifier is not None:
                 stats["classifier"] = classifier
 
-            if stats.get("total_requests", 0) == 0:
+            if stats.get("total_requests", 0) == 0 and not _stats_has_quota_data(stats):
                 continue
 
             providers[manager_key if classifier is not None else provider_name] = stats
@@ -184,11 +201,13 @@ class QuotaService:
 
                     result["credentials_refreshed"] += len(creds_to_refresh)
 
-                    for cred_path, data in quota_results.items():
-                        if data.get("status") != "success":
+                    for cred_path, snapshot in quota_results.items():
+                        status = snapshot.status if hasattr(snapshot, "status") else snapshot.get("status")
+                        if status != "success":
                             result["failed_count"] += 1
+                            error = snapshot.error if hasattr(snapshot, "error") else snapshot.get("error", "Unknown error")
                             result["errors"].append(
-                                f"{Path(cred_path).name}: {data.get('error', 'Unknown error')}"
+                                f"{Path(cred_path).name}: {error}"
                             )
 
                 except Exception as e:

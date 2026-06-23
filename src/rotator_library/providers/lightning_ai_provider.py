@@ -30,13 +30,17 @@ import asyncio
 import httpx
 import os
 import logging
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, AsyncGenerator, Dict, List, Optional, Union, TYPE_CHECKING
+
+import litellm
+import openai
 
 if TYPE_CHECKING:
     from ..usage import UsageManager
 
 from .provider_interface import ProviderInterface, UsageResetConfigDef
 from .utilities.lightning_ai_quota_tracker import LightningAiQuotaTracker
+from ..error_handler import mask_credential
 from ..model_definitions import ModelDefinitions
 
 lib_logger = logging.getLogger("rotator_library")
@@ -57,6 +61,37 @@ BALANCE_FETCH_CONCURRENCY = 5
 #   teams: $50/month
 # Override with LIGHTNING_AI_MONTHLY_GRANT (in whole dollars) if on a paid plan.
 DEFAULT_MONTHLY_GRANT_DOLLARS = 15
+
+# Parameters accepted by the OpenAI SDK's chat.completions.create().
+# Lightning AI is an OpenAI-compatible endpoint, so we bypass litellm
+# entirely to avoid the responses_api_bridge_check() that routes GPT-5
+# models with tools + reasoning to the /responses endpoint (405).
+SUPPORTED_PARAMS = {
+    "model",
+    "messages",
+    "temperature",
+    "top_p",
+    "max_tokens",
+    "max_completion_tokens",
+    "stream",
+    "stream_options",
+    "tools",
+    "tool_choice",
+    "parallel_tool_calls",
+    "presence_penalty",
+    "frequency_penalty",
+    "n",
+    "stop",
+    "seed",
+    "logit_bias",
+    "logprobs",
+    "top_logprobs",
+    "response_format",
+    "reasoning_effort",
+    "extra_headers",
+    "extra_body",
+    "user",
+}
 
 
 class LightningAiProvider(LightningAiQuotaTracker, ProviderInterface):
@@ -213,6 +248,83 @@ class LightningAiProvider(LightningAiQuotaTracker, ProviderInterface):
             lib_logger.debug(f"Dynamic model discovery failed for lightning_ai: {e}")
 
         return models
+
+    # =========================================================================
+    # CUSTOM COMPLETION LOGIC
+    # =========================================================================
+
+    def has_custom_logic(self) -> bool:
+        """
+        Lightning AI bypasses litellm's standard completion path.
+
+        litellm 1.85+ has ``responses_api_bridge_check()`` that automatically
+        routes GPT-5.4+ models to the Responses API (``/responses`` endpoint)
+        when ``reasoning_effort`` and ``tools`` are present.  Lightning AI only
+        supports ``/chat/completions``, so this bridge produces a 405 error.
+
+        By returning ``True``, the executor calls our ``acompletion()``
+        directly, which uses the OpenAI SDK to call ``/chat/completions``
+        without litellm's internal routing.
+        """
+        return True
+
+    async def acompletion(
+        self,
+        client: httpx.AsyncClient,
+        **kwargs,
+    ) -> Union[
+        litellm.ModelResponse,
+        AsyncGenerator[litellm.ModelResponse, None],
+    ]:
+        """
+        Make a chat completion request directly to Lightning AI's API.
+
+        Uses the OpenAI SDK instead of litellm to avoid the
+        ``responses_api_bridge_check()`` that would route GPT-5 models with
+        tools + reasoning to the ``/responses`` endpoint (unsupported → 405).
+
+        The OpenAI SDK calls ``/chat/completions`` directly, and the response
+        objects are compatible with the executor's duck-typed usage extraction
+        (``hasattr(response, "usage")`` / ``getattr(response.usage, ...)``).
+        """
+        credential = kwargs.pop("credential_identifier", "")
+        kwargs.pop("transaction_context", None)
+
+        model = kwargs.get("model", "")
+        # Strip lightning_ai/ prefix to get the bare model name
+        model_bare = model.split("/", 1)[1] if "/" in model else model
+
+        api_base = os.getenv("LIGHTNING_AI_API_BASE", LIGHTNING_AI_API_BASE)
+
+        # Normalize reasoning param: the proxy may pass ``reasoning`` as a dict
+        # (e.g. {"effort": "medium"}) from the /v1/responses format.
+        reasoning = kwargs.pop("reasoning", None)
+        if reasoning and isinstance(reasoning, dict) and "effort" in reasoning:
+            kwargs.setdefault("reasoning_effort", reasoning["effort"])
+        elif reasoning and isinstance(reasoning, str):
+            kwargs.setdefault("reasoning_effort", reasoning)
+
+        # Create OpenAI client pointing at Lightning AI's endpoint.
+        # max_retries=0 matches the executor's litellm path (executor.py:774,
+        # 1056) — the outer retry loop owns retry policy, not the SDK.
+        openai_client = openai.AsyncOpenAI(
+            api_key=credential,
+            base_url=api_base,
+            http_client=client,
+            max_retries=0,
+        )
+
+        # Filter to supported params only — drop internal/litellm-specific keys
+        unsupported = set(kwargs.keys()) - SUPPORTED_PARAMS
+        if unsupported:
+            lib_logger.debug(
+                f"lightning_ai: stripping unsupported params for "
+                f"{mask_credential(model)}: {unsupported}"
+            )
+        call_kwargs = {k: v for k, v in kwargs.items() if k in SUPPORTED_PARAMS}
+        call_kwargs["model"] = model_bare
+
+        return await openai_client.chat.completions.create(**call_kwargs)
 
     # =========================================================================
     # BACKGROUND JOB CONFIGURATION

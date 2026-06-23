@@ -93,6 +93,39 @@ def _get_credential_identifier(credential: str) -> str:
     return f"{credential[:4]}...{credential[-4:]}"
 
 
+def _normalize_umans_api_base(raw: str) -> str:
+    """
+    Host root for Umans API paths (/v1/usage, /v1/models).
+
+    Docs often set UMANS_API_BASE to https://api.code.umans.ai/v1 for LiteLLM;
+    appending /v1/usage again would hit /v1/v1/usage (404).
+    """
+    base = (raw or UMANS_API_BASE_DEFAULT).strip().rstrip("/")
+    if base.endswith("/v1"):
+        base = base[:-3].rstrip("/")
+    return base or UMANS_API_BASE_DEFAULT
+
+
+def _resolve_umans_api_key(credential_path: str) -> str:
+    """Raw Bearer token for env://umans/N virtual paths."""
+    if not credential_path.startswith("env://"):
+        return credential_path
+    parts = credential_path[6:].split("/")
+    if len(parts) < 2:
+        return credential_path
+    provider, index_s = parts[0], parts[1]
+    if provider != "umans":
+        return credential_path
+    idx = _safe_int(index_s, 0)
+    if idx <= 0:
+        key = os.getenv("UMANS_API_KEY", "").strip()
+        if key:
+            return key
+        return credential_path
+    key = os.getenv(f"UMANS_API_KEY_{idx}", "").strip()
+    return key or credential_path
+
+
 def _parse_iso_to_unix(ts_str: Optional[str]) -> Optional[float]:
     """Parse an ISO 8601 timestamp to a Unix timestamp."""
     if not ts_str:
@@ -120,11 +153,16 @@ def _detect_plan(data: dict) -> Tuple[Optional[str], bool, int]:
     req_limit = _safe_int(req_limits.get("limit", 0))
     conc_limit = _safe_int(conc_limits.get("limit", 0))
 
-    # Explicit plan field if present
-    plan = data.get("plan")
+    # Explicit plan field — may be a string or {"slug": "...", ...} dict
+    raw_plan = data.get("plan")
+    if isinstance(raw_plan, dict):
+        plan = raw_plan.get("slug")
+    elif isinstance(raw_plan, str):
+        plan = raw_plan
+    else:
+        plan = None
 
     if plan is None:
-        # Infer from limits
         plan = "code_pro" if req_limit > 0 else "max"
 
     has_request_limit = plan == "code_pro" and req_limit > 0
@@ -164,8 +202,8 @@ def _parse_usage_response(
     limits = data.get("limits", {})
     req_limits = limits.get("requests", {})
     conc_limits = limits.get("concurrency", {})
-    usage = data.get("usage", {})
-    window = data.get("window", {})
+    usage = data.get("usage") or {}
+    window = data.get("window") or {}
 
     plan, _, conc_limit = _detect_plan(data)
 
@@ -267,7 +305,9 @@ class UmansQuotaTracker:
         self._usage_manager = usage_manager
 
     def _resolve_api_base(self) -> str:
-        return os.getenv("UMANS_API_BASE", UMANS_API_BASE_DEFAULT).rstrip("/")
+        return _normalize_umans_api_base(
+            os.getenv("UMANS_API_BASE", UMANS_API_BASE_DEFAULT)
+        )
 
     async def _fetch_usage_for_credential(
         self, credential_path: str
@@ -282,9 +322,10 @@ class UmansQuotaTracker:
             UmansQuotaSnapshot with status "success" or "error".
         """
         identifier = _get_credential_identifier(credential_path)
+        api_key = _resolve_umans_api_key(credential_path)
         try:
             headers = {
-                "Authorization": f"Bearer {credential_path}",
+                "Authorization": f"Bearer {api_key}",
                 "Accept": "application/json",
             }
             base = self._resolve_api_base()

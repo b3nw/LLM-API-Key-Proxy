@@ -76,3 +76,65 @@ Verification:
 Notes:
 - Rebased onto current `origin/dev` (fe3ee86) to fix the stale base that
   caused PR #62 to show 16 commits instead of 1.
+
+## 2026-06-22 — Fix Umans quota fetch 404 and Web UI visibility (post #62)
+
+Target: `fix(umans): normalize API base and show quota without proxy requests`
+Files:
+- `src/rotator_library/providers/utilities/umans_quota_tracker.py`
+- `src/rotator_library/providers/umans_provider.py`
+- `src/rotator_library/client/quota.py`
+- `tests/test_umans_quota_tracker.py`
+
+Changes:
+- `_normalize_umans_api_base()` strips trailing `/v1` so `UMANS_API_BASE=https://api.code.umans.ai/v1` does not call `/v1/v1/usage` (404).
+- `_resolve_umans_api_key()` resolves `env://umans/N` to `UMANS_API_KEY_N` for Bearer auth.
+- `QuotaService.get_quota_stats` keeps providers with quota baselines when `total_requests == 0`.
+- Tests for URL normalization, env key resolution, and ISO timestamp assertion.
+
+Verification:
+- `uv run pytest tests/test_umans_quota_tracker.py -q` — 36 passed
+- Live: `GET https://api.code.umans.ai/v1/usage` returns 200; double `/v1` returns 404.
+
+Follow-up PR after merge of #62.
+
+## 2026-06-22 — Static model definitions, cost tracking, and quota fixes
+
+Target: `fix(umans): normalize API base and show quota without proxy requests`
+Files:
+- `src/rotator_library/providers/umans_provider.py`
+- `src/rotator_library/providers/utilities/umans_quota_tracker.py`
+- `src/rotator_library/client/quota.py`
+- `.fork/stack.yml` (added umans to allowed_duplicate_features)
+
+Changes:
+- `UmansProvider.get_models()`: prioritize static definitions from `UMANS_MODELS`,
+  dedup dynamic models against both suffix and explicit `id` fields.
+- `UmansProvider.__init__`: cache upstream context lengths in `_upstream_context`,
+  build reverse map (`_id_to_display`) from upstream IDs to display names.
+- `UmansProvider.get_model_context_overrides()`: expose cached upstream context
+  so `/v1/models` can apply authoritative context windows.
+- `skip_cost_calculation` changed from `True` to `False` to enable cost lookup.
+- `UmansProvider.calculate_cost()`: delegates to `ModelInfoService.compute_cost`
+  using the display name via the reverse map.
+- `UmansProvider.normalize_model_for_tracking()`: maps upstream model IDs to
+  display names so usage/quota records under canonical names.
+- `umans_quota_tracker._detect_plan()`: handle `plan` as dict (`{"slug": ...}`)
+  or string; fallback to heuristic when `None`.
+- `umans_quota_tracker._parse_usage_response()`: coalesce `"window": null` with
+  `or {}` to prevent `NoneType.get()` crash.
+- `quota.py.force_refresh_quota()`: access `status`/`error` as dataclass attrs
+  on `UmansQuotaSnapshot` instead of dict `.get()`.
+
+Verification:
+- `uv run python3 -m py_compile` — passed (all 3 files)
+- `uv run ruff check --select F401,F811,F821,E9` — passed (all 3 files)
+- Hot-patched llm-proxy-dev: all 5 static models route and return responses
+- `/v1/quota-stats`: usage tracked under display names, costs computed correctly
+- Quota refresh endpoint functional, no dataclass attribute errors
+
+Notes:
+- Upstream context windows override models.dev values (e.g. glm-5.2: 405504 from
+  upstream vs 1000000 from models.dev).
+- Cost calculation relies on `PROVIDER_ALIASES` mapping sub-providers to canonical
+  catalog providers (moonshot→moonshotai, z-ai→zai/zhipuai, qwen→alibaba).

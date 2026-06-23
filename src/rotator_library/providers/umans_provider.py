@@ -22,7 +22,8 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from .provider_interface import ProviderInterface, UsageResetConfigDef
-from .utilities.umans_quota_tracker import UmansQuotaTracker
+from .utilities.umans_quota_tracker import UmansQuotaTracker, _normalize_umans_api_base
+from ..model_definitions import ModelDefinitions
 
 lib_logger = logging.getLogger("rotator_library")
 
@@ -46,8 +47,9 @@ class UmansProvider(UmansQuotaTracker, ProviderInterface):
         self-corrects on the first successful quota refresh.
     """
 
-    # LiteLLM has no Umans pricing; quota is request-based from the API.
-    skip_cost_calculation = True
+    # Cost is calculated via our calculate_cost() method using modelsdev
+    # pricing mapped through display names.  LiteLLM has no Umans pricing.
+    skip_cost_calculation = False
 
     # Provider config for env var lookups (e.g. QUOTA_GROUPS_UMANS_*)
     provider_env_name = "umans"
@@ -82,6 +84,8 @@ class UmansProvider(UmansQuotaTracker, ProviderInterface):
         """Initialize UmansProvider with request-based quota tracking."""
         super().__init__(*args, **kwargs)
         self._init_quota_tracker()
+        self._upstream_context: Dict[str, int] = {}
+        self._id_to_display: Dict[str, str] = self._build_reverse_map()
 
     # =====================================================================
     # CONCURRENCY
@@ -131,6 +135,11 @@ class UmansProvider(UmansQuotaTracker, ProviderInterface):
         """
         Fetch available models from the Umans /v1/models endpoint.
 
+        Combines static UMANS_MODELS definitions (which can use multi-segment
+        display keys like ``moonshot/kimi-k2.6``) with dynamic discovery,
+        deduplicating dynamic models that are already covered by a static
+        mapping.
+
         Args:
             api_key: Umans API key
             client: HTTP client for connection reuse
@@ -138,8 +147,26 @@ class UmansProvider(UmansQuotaTracker, ProviderInterface):
         Returns:
             List of model names prefixed with 'umans/'
         """
+        models = []
+        defs = ModelDefinitions()
+        static_models = defs.get_all_provider_models("umans")
+        if static_models:
+            models.extend(static_models)
+            lib_logger.info(f"Loaded {len(static_models)} static Umans models")
+
+        # Build set of upstream IDs covered by static definitions for dedup
+        static_ids: set = set()
+        for m in static_models:
+            suffix = m.split("/", 1)[1] if "/" in m else m
+            static_ids.add(suffix)
+            upstream_id = defs.get_model_id("umans", suffix)
+            if upstream_id and upstream_id != suffix:
+                static_ids.add(upstream_id)
+
         try:
-            base = os.getenv("UMANS_API_BASE", "https://api.code.umans.ai").rstrip("/")
+            base = _normalize_umans_api_base(
+                os.getenv("UMANS_API_BASE", "https://api.code.umans.ai")
+            )
             response = await client.get(
                 f"{base}/v1/models",
                 headers={"Authorization": f"Bearer {api_key}"},
@@ -147,18 +174,85 @@ class UmansProvider(UmansQuotaTracker, ProviderInterface):
             response.raise_for_status()
             data = response.json()
 
-            models = []
+            # Cache upstream context_length values and collect dynamic models
+            dynamic_models = []
             for model_data in data.get("data", []):
-                model_id = model_data.get("id", "")
-                if model_id:
-                    models.append(f"umans/{model_id}")
+                mid = model_data.get("id")
+                if not mid:
+                    continue
+                ctx = model_data.get("context_length")
+                if ctx:
+                    self._upstream_context[f"umans/{mid}"] = int(ctx)
+                if mid not in static_ids:
+                    dynamic_models.append(f"umans/{mid}")
+
+            # Map upstream context to static display names
+            for display_name in static_models:
+                suffix = display_name.split("/", 1)[1] if "/" in display_name else display_name
+                upstream_id = defs.get_model_id("umans", suffix)
+                if upstream_id:
+                    ctx = self._upstream_context.get(f"umans/{upstream_id}")
+                    if ctx:
+                        self._upstream_context[display_name] = ctx
+
+            if dynamic_models:
+                models.extend(dynamic_models)
+                lib_logger.debug(
+                    f"Discovered {len(dynamic_models)} additional Umans models"
+                )
 
             if models:
-                lib_logger.info(f"Discovered {len(models)} Umans models")
+                lib_logger.info(f"Total {len(models)} Umans models available")
             return models
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
             lib_logger.error(f"Failed to fetch Umans models: {e}")
-            return []
+            return models
+
+    @staticmethod
+    def _build_reverse_map() -> Dict[str, str]:
+        """Build upstream-ID -> display-name reverse map from UMANS_MODELS."""
+        defs = ModelDefinitions()
+        provider_models = defs.get_provider_models("umans")
+        reverse: Dict[str, str] = {}
+        for display_key, defn in provider_models.items():
+            upstream_id = defn.get("id", display_key) if isinstance(defn, dict) else display_key
+            if upstream_id != display_key:
+                reverse[f"umans/{upstream_id}"] = f"umans/{display_key}"
+        return reverse
+
+    def normalize_model_for_tracking(self, model: str) -> str:
+        """Map upstream model IDs back to display names for usage tracking.
+
+        This ensures usage is recorded under the canonical display name
+        (e.g. ``umans/moonshot/kimi-k2.7-code``) instead of the upstream ID
+        (e.g. ``umans/umans-kimi-k2.7``), so the WebUI can match pricing data.
+        """
+        return self._id_to_display.get(model, model)
+
+    def calculate_cost(
+        self,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        cache_read_tokens: int = 0,
+        cache_creation_tokens: int = 0,
+    ) -> float:
+        """Calculate cost using modelsdev pricing via the display name."""
+        from ..model_info_service import get_model_info_service
+        svc = get_model_info_service()
+        if not svc.is_ready:
+            return 0.0
+        display = self._id_to_display.get(model, model)
+        cost = svc.compute_cost(
+            display, prompt_tokens, completion_tokens,
+            cache_hit_tokens=cache_read_tokens,
+            cache_miss_tokens=cache_creation_tokens,
+        )
+        return cost if cost is not None else 0.0
+
+    def get_model_context_overrides(self) -> Dict[str, int]:
+        """Return upstream-authoritative context window sizes for all Umans models."""
+        return dict(self._upstream_context)
 
     # =====================================================================
     # ERROR PARSING

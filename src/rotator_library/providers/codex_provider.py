@@ -171,6 +171,8 @@ _FALLBACK_PLAN_ACCESS: Dict[str, set] = {
 # Module-level cache for dynamic model data
 _models_cache: Optional[Dict[str, Any]] = None
 _models_cache_time: float = 0.0
+# Raw upstream models.json for Codex CLI passthrough ({"models": [...]})
+_raw_models_catalog: Optional[List[Dict[str, Any]]] = None
 
 
 def _fetch_models_from_github() -> Optional[Dict[str, Any]]:
@@ -197,6 +199,9 @@ def _fetch_models_from_github() -> Optional[Dict[str, Any]]:
         if not models_list:
             lib_logger.warning("[Codex] models.json from GitHub had empty models list")
             return None
+
+        global _raw_models_catalog
+        _raw_models_catalog = models_list
 
         base_models = []
         reasoning_efforts = {}
@@ -344,6 +349,19 @@ def get_model_plan_access() -> Dict[str, set]:
     that can access that model (from available_in_plans).
     """
     return _get_model_data().get("plan_access", {})
+
+
+def get_raw_models_catalog() -> Optional[List[Dict[str, Any]]]:
+    """
+    Return the raw upstream models.json catalog for Codex CLI passthrough.
+
+    Codex CLI expects {"models": [...]} with full ModelInfo objects (slug,
+    display_name, context_window, etc.) rather than the OpenAI-compatible
+    {"object": "list", "data": [...]}.  Ensures the cache is populated
+    before returning.
+    """
+    _get_model_data()
+    return _raw_models_catalog
 
 
 def _model_requires_paid_tier(model: str) -> bool:

@@ -54,3 +54,44 @@ Notes:
   `LIGHTNING_AI_QUOTA_REFRESH_INTERVAL` (default 300s)
 - Documents billing routing suffix (`UUID/ORG_NAME/TEAMSPACE_NAME`)
 - Notes that quota uses the API key directly (no separate session token like KiloCode)
+
+## 2026-06-23 — Fix 405 on /v1/responses with GPT-5 tools + reasoning
+
+Target: `feat(lightning-ai): dollar credit quotas and date parsing`
+Files:
+- `src/rotator_library/providers/lightning_ai_provider.py` (added has_custom_logic + acompletion override)
+
+Root cause:
+- litellm 1.85+ `responses_api_bridge_check()` routes GPT-5.4+ models to the
+  `/responses` endpoint when `reasoning_effort` + `tools` are present.
+- Lightning AI only supports `/chat/completions` → 405.
+- The bridge fires because `ProviderConfig.convert_for_litellm` sets
+  `custom_llm_provider="openai"` (Lightning AI is not a known litellm provider),
+  and the bridge check matches `custom_llm_provider in ("openai", "azure")`.
+- xAI and Codex providers avoid this via `custom_llm_provider="xai"` / custom
+  Responses API calls, but Lightning AI needs OpenAI-compatible routing.
+
+Fix:
+- Override `has_custom_logic()` → True so the executor calls our `acompletion()`
+  directly instead of `litellm.acompletion()`.
+- `acompletion()` uses `openai.AsyncOpenAI.chat.completions.create()` directly,
+  bypassing litellm entirely. This avoids the bridge check completely.
+- Response objects (OpenAI SDK `ChatCompletion` / `AsyncStream`) are compatible
+  with the executor's duck-typed usage extraction and the streaming handler's
+  `AsyncIterator[Any]` contract.
+- Normalizes `reasoning` dict from /v1/responses format to `reasoning_effort`
+  string for the OpenAI SDK.
+
+Verification:
+- `uv run python3 -m py_compile ...` — passed
+- `uv run ruff check ... --select F401,F811,F821,E9` — passed
+- `uv run python3 -m pytest tests/ -q` — 414 passed, 1 pre-existing failure
+  (test_umans_quota_tracker, unrelated)
+- End-to-end /v1/responses with tools + reasoning — pending live deployment test
+
+Notes:
+- Problem 1 (missing docs) was already resolved by commit 290ca46 in the
+  2026-06-23 force-push (.env.example + README.md sections added).
+- Problem 3 (quota verification) requires live deployment testing after the
+  405 fix is deployed to llm-proxy-dev.
+- The fixup! commit will be autosquashed into the owning commit before merge.

@@ -1,3 +1,29 @@
+## 2026-06-23 — Fix Codex CLI /v1/models "missing field models" warning
+
+Target: `feat(codex): Responses API rewrite, dynamic model discovery, and OAuth exports`
+Files:
+- `src/rotator_library/providers/codex_provider.py`
+- `src/proxy_app/main.py`
+
+Verification:
+- `uv run python3 -m py_compile src/rotator_library/providers/codex_provider.py` — passed
+- `uv run python3 -m py_compile src/proxy_app/main.py` — passed
+- `uv run ruff check src/rotator_library/providers/codex_provider.py --select F401,F811,F821,E9` — passed
+- `uv run ruff check src/proxy_app/main.py --select F401,F811,F821,E9` — passed
+- `uv run python .fork/check-stack.py` — passed
+
+Notes:
+- Issue: Codex CLI deserializes /v1/models as `{"models": [...]}` (ModelsResponse in
+  codex-rs/protocol) while the proxy returns OpenAI-compatible `{"object": "list", "data": [...]}`.
+  This causes a startup warning: "missing field `models`". Inference still works.
+- Fix: Cache the raw upstream models.json catalog during GitHub fetch in codex_provider.py,
+  and detect Codex CLI requests via the `client_version` query parameter on /v1/models.
+  When detected, return `{"models": <raw_catalog>}` passthrough instead of the
+  OpenAI-compatible format. Non-Codex clients are unaffected.
+- Ref: https://github.com/b3nw/LLM-API-Key-Proxy/issues/59
+
+---
+
 ## 2026-06-19 — Fix codex exhausted credential never cleared on quota recovery
 
 Target: `feat(codex): Responses API rewrite, dynamic model discovery, and OAuth exports`

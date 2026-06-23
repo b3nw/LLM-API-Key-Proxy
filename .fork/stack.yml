@@ -25,6 +25,9 @@ rules:
     xai:
       - "feat(xai): add xAI Grok OAuth provider with PKCE and Device Code flows"
       - "feat(xai): enable xAI Grok device-code OAuth in admin WebUI"
+    umans:
+      - "feat(umans): add Umans provider with request-based quota tracking"
+      - "fix(umans): normalize API base and show quota without proxy requests"
 
 features:
   - id: lightning-ai

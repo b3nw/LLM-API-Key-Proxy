@@ -10,12 +10,17 @@ import httpx
 from rotator_library.providers.umans_provider import UmansProvider
 from rotator_library.providers.utilities.umans_quota_tracker import (
     UmansQuotaTracker,
+    _compute_in_burst_band,
     _detect_plan,
     _get_credential_identifier,
+    _normalize_umans_api_base,
     _parse_iso_to_unix,
+    _parse_priority_state,
     _parse_usage_response,
     _resolve_request_limit,
+    _resolve_umans_api_key,
     _safe_int,
+    snapshot_to_upstream_quota_dict,
 )
 
 
@@ -53,12 +58,12 @@ SAMPLE_CODE_PRO = {
         "tokens_in": 394143,
         "tokens_out": 15297,
         "tokens_cached": 358144,
+        "priority": {"low": False, "boxed_until": None, "reason": None},
     },
     "window": {
         "started_at": "2026-06-22T00:41:43Z",
         "resets_at": "2026-06-22T05:41:43Z",
     },
-    "throttled": False,
 }
 
 
@@ -105,11 +110,26 @@ def test_get_credential_identifier_short_key_unmasked():
     assert _get_credential_identifier("abcd") == "abcd"
 
 
+def test_normalize_umans_api_base_strips_trailing_v1():
+    assert (
+        _normalize_umans_api_base("https://api.code.umans.ai/v1")
+        == "https://api.code.umans.ai"
+    )
+    assert _normalize_umans_api_base("https://api.code.umans.ai") == (
+        "https://api.code.umans.ai"
+    )
+
+
+def test_resolve_umans_api_key_env_virtual_path():
+    with patch.dict(os.environ, {"UMANS_API_KEY_1": "secret-key"}, clear=False):
+        assert _resolve_umans_api_key("env://umans/1") == "secret-key"
+    assert _resolve_umans_api_key("sk-raw") == "sk-raw"
+
+
 def test_parse_iso_to_unix_z():
     ts = _parse_iso_to_unix("2026-06-22T05:41:43Z")
     assert ts is not None
-    # 2026-06-22 05:41:43 UTC is after the current test run epoch
-    assert ts > time.time()
+    assert abs(ts - 1782106903.0) < 1.0
 
 
 def test_detect_plan_code_pro_inferred():
@@ -172,6 +192,67 @@ def test_parse_usage_response_code_pro():
     assert snapshot.concurrent_sessions == 0
     assert snapshot.window_seconds == 18000
     assert snapshot.window_reset_ts is not None
+    assert snapshot.priority_low is False
+    assert snapshot.throttled is False
+    assert snapshot.in_burst_band is False
+
+
+def test_parse_priority_state_from_usage_priority():
+    usage = {"priority": {"low": True, "boxed_until": "2026-06-22T06:00:00Z", "reason": "burst"}}
+    throttled, low, boxed, reason, ts = _parse_priority_state(usage, {})
+    assert throttled is True
+    assert low is True
+    assert boxed == "2026-06-22T06:00:00Z"
+    assert reason == "burst"
+    assert ts is not None
+
+
+def test_parse_priority_state_legacy_top_level_throttled():
+    throttled, low, _, _, _ = _parse_priority_state({}, {"throttled": True})
+    assert throttled is True
+    assert low is False
+
+
+def test_compute_in_burst_band():
+    assert _compute_in_burst_band(250, 200, 400) is True
+    assert _compute_in_burst_band(12, 200, 400) is False
+    assert _compute_in_burst_band(401, 200, 400) is False
+
+
+def test_parse_usage_response_burst_and_deprioritized():
+    data = {
+        **SAMPLE_CODE_PRO,
+        "usage": {
+            **SAMPLE_CODE_PRO["usage"],
+            "requests_in_window": 250,
+            "remaining_requests": 150,
+            "priority": {
+                "low": True,
+                "boxed_until": "2026-06-22T06:00:00Z",
+                "reason": "rate_burst",
+            },
+        },
+    }
+    snapshot = _parse_usage_response(data, "k", "id")
+    assert snapshot.in_burst_band is True
+    assert snapshot.priority_low is True
+    assert snapshot.throttled is True
+    assert snapshot.throttle_reason == "rate_burst"
+    upstream = snapshot_to_upstream_quota_dict(snapshot)
+    assert upstream["deprioritized"] is True
+    assert upstream["in_burst_band"] is True
+    assert upstream["requests_soft_limit"] == 200
+    assert upstream["requests_hard_cap"] == 400
+
+
+def test_get_upstream_quota_for_accessor():
+    host = _TrackerHost()
+    snap = _parse_usage_response(SAMPLE_CODE_PRO, "cred-a", "cred-a")
+    host._quota_cache["cred-a"] = snap
+    row = host.get_upstream_quota_for_accessor("cred-a")
+    assert row is not None
+    assert row["requests_used"] == 12
+    assert row["deprioritized"] is False
 
 
 def test_parse_usage_response_max():
@@ -215,7 +296,7 @@ def test_store_baselines_to_usage_manager():
 
         req_call = next(c for c in calls if c.kwargs.get("quota_group") == "5h-requests")
         assert req_call.kwargs["model"] == "umans/_requests_5h"
-        assert req_call.kwargs["quota_max_requests"] == 200
+        assert req_call.kwargs["quota_max_requests"] == 400
         assert req_call.kwargs["quota_used"] == 12
 
         conc_call = next(
@@ -264,6 +345,42 @@ def test_fetch_initial_baselines_mixed():
 
         assert results["key-ok"].status == "success"
         assert results["key-err"].status == "error"
+
+    asyncio.run(_run())
+
+
+def test_fetch_usage_uses_normalized_base_url():
+    async def _run():
+        host = _TrackerHost()
+        captured = {}
+
+        async def fake_get(url, headers=None):
+            captured["url"] = url
+            captured["auth"] = headers.get("Authorization")
+            resp = MagicMock()
+            resp.raise_for_status = MagicMock()
+            resp.json = MagicMock(return_value=SAMPLE_CODE_PRO)
+            return resp
+
+        mock_client = MagicMock()
+        mock_client.get = AsyncMock(side_effect=fake_get)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with patch.dict(
+            os.environ,
+            {"UMANS_API_BASE": "https://api.code.umans.ai/v1"},
+            clear=False,
+        ):
+            with patch(
+                "rotator_library.providers.utilities.umans_quota_tracker.httpx.AsyncClient",
+                return_value=mock_client,
+            ):
+                snap = await host._fetch_usage_for_credential("sk-testkey")
+
+        assert captured["url"] == "https://api.code.umans.ai/v1/usage"
+        assert captured["auth"] == "Bearer sk-testkey"
+        assert snap.status == "success"
 
     asyncio.run(_run())
 

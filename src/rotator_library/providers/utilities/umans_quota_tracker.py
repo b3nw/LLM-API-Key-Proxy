@@ -78,7 +78,15 @@ class UmansQuotaSnapshot:
     tokens_in: int
     tokens_out: int
     tokens_cached: int
+    # Deprioritization (Umans docs: ~30m after burst 429). API field is usage.priority,
+    # not a top-level "throttled" key (that key is absent on live /v1/usage).
     throttled: bool
+    priority_low: bool
+    boxed_until: Optional[str]
+    throttle_reason: Optional[str]
+    boxed_until_ts: Optional[float]
+    requests_burst_pct: Optional[float]
+    in_burst_band: bool
     fetched_at: float
     status: str  # "success" | "error"
     error: Optional[str]
@@ -91,6 +99,39 @@ def _get_credential_identifier(credential: str) -> str:
     if len(credential) <= 8:
         return credential
     return f"{credential[:4]}...{credential[-4:]}"
+
+
+def _normalize_umans_api_base(raw: str) -> str:
+    """
+    Host root for Umans API paths (/v1/usage, /v1/models).
+
+    Docs often set UMANS_API_BASE to https://api.code.umans.ai/v1 for LiteLLM;
+    appending /v1/usage again would hit /v1/v1/usage (404).
+    """
+    base = (raw or UMANS_API_BASE_DEFAULT).strip().rstrip("/")
+    if base.endswith("/v1"):
+        base = base[:-3].rstrip("/")
+    return base or UMANS_API_BASE_DEFAULT
+
+
+def _resolve_umans_api_key(credential_path: str) -> str:
+    """Raw Bearer token for env://umans/N virtual paths."""
+    if not credential_path.startswith("env://"):
+        return credential_path
+    parts = credential_path[6:].split("/")
+    if len(parts) < 2:
+        return credential_path
+    provider, index_s = parts[0], parts[1]
+    if provider != "umans":
+        return credential_path
+    idx = _safe_int(index_s, 0)
+    if idx <= 0:
+        key = os.getenv("UMANS_API_KEY", "").strip()
+        if key:
+            return key
+        return credential_path
+    key = os.getenv(f"UMANS_API_KEY_{idx}", "").strip()
+    return key or credential_path
 
 
 def _parse_iso_to_unix(ts_str: Optional[str]) -> Optional[float]:
@@ -120,11 +161,16 @@ def _detect_plan(data: dict) -> Tuple[Optional[str], bool, int]:
     req_limit = _safe_int(req_limits.get("limit", 0))
     conc_limit = _safe_int(conc_limits.get("limit", 0))
 
-    # Explicit plan field if present
-    plan = data.get("plan")
+    # Explicit plan field — may be a string or {"slug": "...", ...} dict
+    raw_plan = data.get("plan")
+    if isinstance(raw_plan, dict):
+        plan = raw_plan.get("slug")
+    elif isinstance(raw_plan, str):
+        plan = raw_plan
+    else:
+        plan = None
 
     if plan is None:
-        # Infer from limits
         plan = "code_pro" if req_limit > 0 else "max"
 
     has_request_limit = plan == "code_pro" and req_limit > 0
@@ -157,6 +203,77 @@ def _resolve_request_limit(
     return 0, False
 
 
+def _parse_priority_state(usage: dict, data: dict) -> Tuple[bool, bool, Optional[str], Optional[str], Optional[float]]:
+    """
+    Map Umans usage.priority to deprioritization fields.
+
+    ``usage.priority.low`` means the account is in a deprioritized (boxed) state.
+    ``boxed_until`` is when normal priority is expected to resume (docs ~30 minutes
+    after burst-related 429). Top-level ``throttled`` is kept as a fallback only.
+    """
+    priority = usage.get("priority")
+    if not isinstance(priority, dict):
+        priority = {}
+
+    priority_low = bool(priority.get("low", False))
+    boxed_until = priority.get("boxed_until")
+    if boxed_until is not None and not isinstance(boxed_until, str):
+        boxed_until = str(boxed_until)
+    throttle_reason = priority.get("reason")
+    if throttle_reason is not None and not isinstance(throttle_reason, str):
+        throttle_reason = str(throttle_reason)
+
+    throttled = priority_low or bool(data.get("throttled", False))
+    boxed_until_ts = _parse_iso_to_unix(boxed_until)
+
+    return throttled, priority_low, boxed_until, throttle_reason, boxed_until_ts
+
+
+def _compute_in_burst_band(
+    requests_used: int,
+    requests_limit: int,
+    requests_hard_cap: int,
+) -> bool:
+    """True when usage is above the plan soft limit but still below hard cap."""
+    soft = _safe_int(requests_limit, 0)
+    hard = _safe_int(requests_hard_cap, 0)
+    used = _safe_int(requests_used, 0)
+    if soft <= 0:
+        return False
+    ceiling = hard if hard > soft else soft
+    return used > soft and used <= ceiling
+
+
+def snapshot_to_upstream_quota_dict(snapshot: "UmansQuotaSnapshot") -> Dict[str, Any]:
+    """JSON-serializable Umans-specific quota fields for /v1/quota-stats."""
+    deprioritized = snapshot.priority_low or (
+        snapshot.boxed_until_ts is not None and snapshot.boxed_until_ts > time.time()
+    )
+    return {
+        "plan": snapshot.plan,
+        "requests_soft_limit": snapshot.requests_limit,
+        "requests_hard_cap": _safe_int(snapshot.requests_hard_cap, 0),
+        "requests_used": snapshot.requests_used,
+        "requests_remaining": snapshot.requests_remaining,
+        "requests_burst_pct": snapshot.requests_burst_pct,
+        "in_burst_band": snapshot.in_burst_band,
+        "concurrency_limit": snapshot.concurrency_limit,
+        "concurrency_hard_cap": _safe_int(snapshot.concurrency_hard_cap, 0),
+        "concurrent_sessions": snapshot.concurrent_sessions,
+        "window_resets_at": snapshot.window_resets_at,
+        "weighted_used": snapshot.weighted_used,
+        "weighted_remaining": snapshot.weighted_remaining,
+        "deprioritized": deprioritized,
+        "priority_low": snapshot.priority_low,
+        "boxed_until": snapshot.boxed_until,
+        "boxed_until_ts": snapshot.boxed_until_ts,
+        "throttle_reason": snapshot.throttle_reason,
+        "fetched_at": snapshot.fetched_at,
+        "status": snapshot.status,
+        "error": snapshot.error,
+    }
+
+
 def _parse_usage_response(
     data: dict, credential_path: str, identifier: str
 ) -> UmansQuotaSnapshot:
@@ -164,8 +281,8 @@ def _parse_usage_response(
     limits = data.get("limits", {})
     req_limits = limits.get("requests", {})
     conc_limits = limits.get("concurrency", {})
-    usage = data.get("usage", {})
-    window = data.get("window", {})
+    usage = data.get("usage") or {}
+    window = data.get("window") or {}
 
     plan, _, conc_limit = _detect_plan(data)
 
@@ -176,28 +293,50 @@ def _parse_usage_response(
 
     reset_ts = _parse_iso_to_unix(window.get("resets_at"))
 
+    requests_hard_cap = _safe_int(req_limits.get("hard_cap", 0))
+    requests_used = _safe_int(usage.get("requests_in_window", 0))
+    burst_raw = req_limits.get("burst_pct")
+    requests_burst_pct: Optional[float]
+    try:
+        requests_burst_pct = float(burst_raw) if burst_raw is not None else None
+    except (TypeError, ValueError):
+        requests_burst_pct = None
+
+    throttled, priority_low, boxed_until, throttle_reason, boxed_until_ts = (
+        _parse_priority_state(usage, data)
+    )
+    in_burst_band = _compute_in_burst_band(
+        requests_used, effective_limit, requests_hard_cap
+    )
+
     return UmansQuotaSnapshot(
         credential_path=credential_path,
         identifier=identifier,
         plan=plan,
         has_request_limit=has_request_limit,
         requests_limit=effective_limit,
-        requests_hard_cap=req_limits.get("hard_cap", 0),
-        requests_used=usage.get("requests_in_window", 0),
-        requests_remaining=usage.get("remaining_requests", 0),
-        weighted_used=usage.get("weighted_requests_in_window", 0),
-        weighted_remaining=usage.get("weighted_remaining_requests", 0),
+        requests_hard_cap=requests_hard_cap,
+        requests_used=requests_used,
+        requests_remaining=_safe_int(usage.get("remaining_requests", 0)),
+        weighted_used=_safe_int(usage.get("weighted_requests_in_window", 0)),
+        weighted_remaining=_safe_int(usage.get("weighted_remaining_requests", 0)),
         concurrency_limit=conc_limit,
-        concurrency_hard_cap=conc_limits.get("hard_cap", 0),
-        concurrent_sessions=usage.get("concurrent_sessions", 0),
-        window_seconds=req_limits.get("window_seconds", 0),
+        concurrency_hard_cap=_safe_int(conc_limits.get("hard_cap", 0)),
+        concurrent_sessions=_safe_int(usage.get("concurrent_sessions", 0)),
+        window_seconds=_safe_int(req_limits.get("window_seconds", 0)),
         window_started_at=window.get("started_at"),
         window_resets_at=window.get("resets_at"),
         window_reset_ts=reset_ts,
-        tokens_in=usage.get("tokens_in", 0),
-        tokens_out=usage.get("tokens_out", 0),
-        tokens_cached=usage.get("tokens_cached", 0),
-        throttled=data.get("throttled", False),
+        tokens_in=_safe_int(usage.get("tokens_in", 0)),
+        tokens_out=_safe_int(usage.get("tokens_out", 0)),
+        tokens_cached=_safe_int(usage.get("tokens_cached", 0)),
+        throttled=throttled,
+        priority_low=priority_low,
+        boxed_until=boxed_until,
+        throttle_reason=throttle_reason,
+        boxed_until_ts=boxed_until_ts,
+        requests_burst_pct=requests_burst_pct,
+        in_burst_band=in_burst_band,
         fetched_at=time.time(),
         status="success",
         error=None,
@@ -230,6 +369,12 @@ def _error_snapshot(
         tokens_out=0,
         tokens_cached=0,
         throttled=False,
+        priority_low=False,
+        boxed_until=None,
+        throttle_reason=None,
+        boxed_until_ts=None,
+        requests_burst_pct=None,
+        in_burst_band=False,
         fetched_at=time.time(),
         status="error",
         error=error_msg,
@@ -267,7 +412,9 @@ class UmansQuotaTracker:
         self._usage_manager = usage_manager
 
     def _resolve_api_base(self) -> str:
-        return os.getenv("UMANS_API_BASE", UMANS_API_BASE_DEFAULT).rstrip("/")
+        return _normalize_umans_api_base(
+            os.getenv("UMANS_API_BASE", UMANS_API_BASE_DEFAULT)
+        )
 
     async def _fetch_usage_for_credential(
         self, credential_path: str
@@ -282,9 +429,10 @@ class UmansQuotaTracker:
             UmansQuotaSnapshot with status "success" or "error".
         """
         identifier = _get_credential_identifier(credential_path)
+        api_key = _resolve_umans_api_key(credential_path)
         try:
             headers = {
-                "Authorization": f"Bearer {credential_path}",
+                "Authorization": f"Bearer {api_key}",
                 "Accept": "application/json",
             }
             base = self._resolve_api_base()
@@ -385,13 +533,15 @@ class UmansQuotaTracker:
                 continue
 
             # Request quota — ONLY for credentials with a request limit.
-            # apply_exhaustion=False: display-only until burst ceiling is understood.
+            # Use the hard cap as the effective limit since the soft limit (200)
+            # has no enforcement; requests continue through to the hard cap (400).
             if snapshot.has_request_limit and snapshot.requests_limit > 0:
+                effective_max = snapshot.requests_hard_cap or snapshot.requests_limit
                 try:
                     await usage_manager.update_quota_baseline(
                         accessor=cred_path,
                         model=f"{provider_prefix}/_requests_5h",
-                        quota_max_requests=snapshot.requests_limit,
+                        quota_max_requests=effective_max,
                         quota_reset_ts=snapshot.window_reset_ts,
                         quota_used=snapshot.requests_used,
                         quota_group="5h-requests",
@@ -431,6 +581,13 @@ class UmansQuotaTracker:
         """Return the most recently fetched snapshot for a credential."""
         return self._quota_cache.get(credential_path)
 
+    def get_upstream_quota_for_accessor(self, accessor: str) -> Optional[Dict[str, Any]]:
+        """Latest Umans /v1/usage fields for quota-stats / WebUI (by credential accessor)."""
+        snapshot = self.get_cached_quota(accessor)
+        if snapshot is None:
+            return None
+        return snapshot_to_upstream_quota_dict(snapshot)
+
     async def get_all_quota_info(
         self,
         credential_paths: List[str],
@@ -457,19 +614,9 @@ class UmansQuotaTracker:
 
         credentials_out: Dict[str, Any] = {}
         for path, snapshot in results.items():
-            credentials_out[path] = {
-                "identifier": snapshot.identifier,
-                "status": snapshot.status,
-                "plan": snapshot.plan,
-                "requests_used": snapshot.requests_used,
-                "requests_limit": snapshot.requests_limit,
-                "requests_remaining": snapshot.requests_remaining,
-                "concurrent_sessions": snapshot.concurrent_sessions,
-                "concurrency_limit": snapshot.concurrency_limit,
-                "window_resets_at": snapshot.window_resets_at,
-                "fetched_at": snapshot.fetched_at,
-                "error": snapshot.error,
-            }
+            row = snapshot_to_upstream_quota_dict(snapshot)
+            row["identifier"] = snapshot.identifier
+            credentials_out[path] = row
 
         return {
             "credentials": credentials_out,

@@ -82,7 +82,7 @@ class CrossProviderExecutor:
         )
 
         if is_streaming:
-            return self._execute_streaming(
+            return await self._execute_streaming(
                 canonical_model, available_targets, retry_mode,
                 request, pre_request_callback, **kwargs,
             )

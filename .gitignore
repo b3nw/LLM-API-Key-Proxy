@@ -145,6 +145,7 @@ tests/*
 !tests/test_selection_engine.py
 !tests/test_xai_oauth_flow.py
 !tests/test_usage_reconciliation.py
+!tests/test_websocket_auth_disconnect.py
 docs/ignored/
 .env
 .agent/

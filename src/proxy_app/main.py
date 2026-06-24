@@ -2288,10 +2288,18 @@ _ws_connections: set = set()
 _MAX_WS_CONNECTIONS = 10
 
 
+async def _safe_ws_close(websocket: WebSocket, code: int, reason: str) -> None:
+    """Close the WebSocket without raising if the client already disconnected."""
+    try:
+        await websocket.close(code=code, reason=reason)
+    except RuntimeError:
+        pass
+
+
 @app.websocket("/v1/ws")
 async def websocket_endpoint(websocket: WebSocket):
     if len(_ws_connections) >= _MAX_WS_CONNECTIONS:
-        await websocket.close(code=4029, reason="Too many connections")
+        await _safe_ws_close(websocket, code=4029, reason="Too many connections")
         return
 
     await websocket.accept()
@@ -2301,11 +2309,17 @@ async def websocket_endpoint(websocket: WebSocket):
             auth_msg = await asyncio.wait_for(websocket.receive_json(), timeout=5.0)
             if auth_msg.get("type") != "auth" or auth_msg.get("token") != PROXY_API_KEY:
                 await websocket.send_json({"type": "auth_result", "ok": False})
-                await websocket.close(code=4001, reason="Unauthorized")
+                await _safe_ws_close(websocket, code=4001, reason="Unauthorized")
                 return
             await websocket.send_json({"type": "auth_result", "ok": True})
-        except (asyncio.TimeoutError, Exception):
-            await websocket.close(code=4001, reason="Auth timeout")
+        except WebSocketDisconnect:
+            return
+        except asyncio.TimeoutError:
+            await _safe_ws_close(websocket, code=4001, reason="Auth timeout")
+            return
+        except Exception:
+            logging.debug("WebSocket auth handshake failed", exc_info=True)
+            await _safe_ws_close(websocket, code=4001, reason="Auth failed")
             return
 
     _ws_connections.add(websocket)

@@ -116,3 +116,38 @@ Notes:
   provider that uses multi-segment display keys.
 - Context window override loop is guarded with try/except and only runs for
   providers known to supply `get_model_context_overrides()`.
+
+## 2026-06-25 — Remove hardcoded thinking whitelist from request_sanitizer
+
+Target: `feat(core): infrastructure improvements - latest aliases, error standardization, and utilities`
+Files:
+- `src/rotator_library/request_sanitizer.py`
+- `tests/test_request_sanitizer.py`
+
+PR: b3nw/LLM-API-Key-Proxy#79
+
+Root cause:
+- Fork-added code in this commit replaced upstream's narrow check (only stripped
+  `thinking` when exactly `{"type": "enabled", "budget_tokens": -1}` for non-Gemini)
+  with a broad model-name whitelist: `anthropic/`, `claude-`, `gemini-2.0-`, `gemini-2.5-`.
+- This silently stripped `thinking` for all other providers (Lightning AI, OpenAI,
+  Chutes, etc.), preventing clients from enabling reasoning via the Anthropic-style
+  `thinking` parameter.
+- Also stripped `extra_body.thinking` for non-whitelisted models, which cleaned up
+  the `_guard_thinking_tool_calls` injection — but that guard runs AFTER the sanitizer
+  (executor.py line 502 transforms, line 512 sanitize), so the sanitizer's
+  `extra_body.thinking` stripping only affected client-sent values, not guard injections.
+
+Fix:
+- Removed the `_supports_thinking` whitelist entirely.
+- Thinking parameter filtering is now delegated to each provider's `acompletion()`
+  method. Providers that don't support `thinking` strip it via their own
+  `SUPPORTED_PARAMS` filtering (e.g. Lightning AI) or litellm's param handling.
+- Updated 13 tests in `test_request_sanitizer.py` to verify `thinking` is passed
+  through (not stripped) + new `extra_body.thinking` preservation test.
+
+Verification:
+- `uv run python3 -m py_compile src/rotator_library/request_sanitizer.py` — passed
+- `uv run ruff check src/rotator_library/request_sanitizer.py --select F401,F811,F821,E9` — passed
+- `uv run pytest tests/test_request_sanitizer.py -v` — 13 passed
+- Full suite: 394 passed, 1 pre-existing failure (test_umans_quota_tracker, unrelated)

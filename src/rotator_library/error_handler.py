@@ -24,6 +24,30 @@ from litellm.exceptions import (
 
 lib_logger = logging.getLogger("rotator_library")
 
+# Substrings/codes for transient provider overload inside SSE/WS streams (e.g. Codex).
+_STREAMED_OVERLOAD_MARKERS = (
+    "server_is_overloaded",
+    "servers are currently overloaded",
+    "service_unavailable_error",
+    "service unavailable",
+    "overloaded",
+)
+
+
+def _streamed_error_is_transient_overload(error_msg: str, data) -> bool:
+    """True when a StreamedAPIError signals retryable upstream capacity/load."""
+    if isinstance(data, dict):
+        payload = data.get("error", data)
+        if isinstance(payload, dict):
+            code = str(payload.get("code", "")).lower()
+            message = str(payload.get("message", "")).lower()
+            if code in ("server_is_overloaded", "service_unavailable_error"):
+                return True
+            if any(m in message for m in _STREAMED_OVERLOAD_MARKERS):
+                return True
+    lowered = error_msg.lower()
+    return any(m in lowered for m in _STREAMED_OVERLOAD_MARKERS)
+
 
 def _parse_duration_string(duration_str: str) -> Optional[int]:
     """
@@ -1233,15 +1257,23 @@ def classify_error(e: Exception, provider: Optional[str] = None) -> ClassifiedEr
     from .core.errors import StreamedAPIError
 
     if isinstance(e, StreamedAPIError):
-        error_msg = str(e).lower()
+        error_msg = str(e)
+        data = getattr(e, "data", None)
         if any(
-            p in error_msg
+            p in error_msg.lower()
             for p in ["context window", "context_length", "too many tokens", "too long"]
         ):
             return ClassifiedError(
                 error_type="context_window_exceeded",
                 original_exception=e,
                 status_code=400,
+            )
+        if _streamed_error_is_transient_overload(error_msg, data):
+            return ClassifiedError(
+                error_type="server_error",
+                original_exception=e,
+                status_code=503,
+                retry_after=None,
             )
         return ClassifiedError(
             error_type="invalid_request",

@@ -151,3 +151,22 @@ Verification:
 - `uv run ruff check src/rotator_library/request_sanitizer.py --select F401,F811,F821,E9` — passed
 - `uv run pytest tests/test_request_sanitizer.py -v` — 13 passed
 - Full suite: 394 passed, 1 pre-existing failure (test_umans_quota_tracker, unrelated)
+
+## 2026-06-25 — Classify Codex stream overload as server_error (issue #78)
+
+Target: `feat(core): infrastructure improvements - latest aliases, error standardization, and utilities`
+Files:
+- `src/rotator_library/error_handler.py`
+- `src/rotator_library/client/executor.py`
+- `src/rotator_library/providers/codex_provider.py`
+- `tests/test_error_handler.py`
+
+Rationale:
+- Codex `server_is_overloaded` inside HTTP-200 streams was defaulting to `invalid_request`, causing credential churn instead of same-key retry/backoff.
+
+Verification:
+- `uv run python3 -m py_compile` on touched modules — passed
+- `uv run ruff check` F401,F811,F821,E9 on touched modules — passed
+- `uv run pytest tests/test_error_handler.py -q` — 24 passed
+
+Issue: https://github.com/b3nw/LLM-API-Key-Proxy/issues/78

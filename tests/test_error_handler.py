@@ -21,7 +21,10 @@ from rotator_library.error_handler import (
     ClassifiedError,
     _parse_duration_string,
     mask_credential,
+    should_rotate_on_error,
+    should_retry_same_key,
 )
+from rotator_library.core.errors import StreamedAPIError
 
 
 # =============================================================================
@@ -115,6 +118,33 @@ class TestClassifyError:
         err = RuntimeError("Something unexpected")
         result = classify_error(err)
         assert result.error_type == "unknown"
+
+    def test_streamed_codex_overload_is_server_error(self):
+        """Codex server_is_overloaded in-stream must retry, not invalid_request (issue #78)."""
+        err = StreamedAPIError(
+            "Codex error (server_is_overloaded): Our servers are currently overloaded. "
+            "Please try again later.",
+            data=None,
+        )
+        result = classify_error(err)
+        assert result.error_type == "server_error"
+        assert result.status_code == 503
+        assert should_rotate_on_error(result) is True
+        assert should_retry_same_key(result) is True
+
+    def test_streamed_overload_from_structured_data(self):
+        err = StreamedAPIError(
+            "Codex error (server_is_overloaded): overloaded",
+            data={"code": "server_is_overloaded", "message": "overloaded"},
+        )
+        result = classify_error(err)
+        assert result.error_type == "server_error"
+
+    def test_streamed_non_overload_stays_invalid_request(self):
+        err = StreamedAPIError("Codex error (bad_request): invalid parameter", data=None)
+        result = classify_error(err)
+        assert result.error_type == "invalid_request"
+        assert should_rotate_on_error(result) is False
 
 
 # =============================================================================

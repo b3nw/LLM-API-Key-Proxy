@@ -304,6 +304,31 @@ class LightningAiProvider(LightningAiQuotaTracker, ProviderInterface):
         elif reasoning and isinstance(reasoning, str):
             kwargs.setdefault("reasoning_effort", reasoning)
 
+        # Normalize thinking param (Anthropic-style) to OpenAI reasoning_effort.
+        # Lightning AI uses the OpenAI-compatible reasoning_effort parameter,
+        # not Anthropic's thinking field.  Map enabled → high as a reasonable
+        # default.  The _guard_thinking_tool_calls transform may inject
+        # extra_body: {"thinking": {"type": "disabled"}} for tool-call turns
+        # missing reasoning_content — honor that by not enabling reasoning.
+        thinking_enabled = False
+
+        # Check top-level thinking param (from client)
+        thinking = kwargs.pop("thinking", None)
+        if thinking and isinstance(thinking, dict) and thinking.get("type") == "enabled":
+            thinking_enabled = True
+
+        # Check extra_body.thinking (may be injected by _guard_thinking_tool_calls)
+        extra_body = kwargs.get("extra_body")
+        if isinstance(extra_body, dict) and "thinking" in extra_body:
+            thinking_extra = extra_body.pop("thinking")
+            if not extra_body:
+                del kwargs["extra_body"]
+            if isinstance(thinking_extra, dict) and thinking_extra.get("type") == "disabled":
+                thinking_enabled = False  # Guard takes precedence
+
+        if thinking_enabled:
+            kwargs.setdefault("reasoning_effort", "high")
+
         # Create OpenAI client pointing at Lightning AI's endpoint.
         # max_retries=0 matches the executor's litellm path (executor.py:774,
         # 1056) — the outer retry loop owns retry policy, not the SDK.

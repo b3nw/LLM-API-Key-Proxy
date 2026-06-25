@@ -6,8 +6,11 @@ Tests for request sanitization.
 
 Sanitization removes unsupported parameters from requests before
 they reach providers. If this breaks:
-- `dimensions` on non-OpenAI models → 400 Bad Request
-- `thinking` on non-Gemini or non-Anthropic models → 400 Bad Request
+- `dimensions` on non-embedding models → 400 Bad Request
+
+Note: `thinking` parameter filtering is no longer handled by the sanitizer.
+Each provider handles thinking/reasoning params in its own acompletion()
+method (e.g. Lightning AI converts `thinking` to `reasoning_effort`).
 
 NO network calls, NO API keys needed.
 """
@@ -47,17 +50,21 @@ class TestSanitizeDimensions:
 
 
 class TestSanitizeThinking:
-    """Test removal of `thinking` parameter for unsupported models."""
+    """Test that `thinking` parameter is passed through (not stripped).
 
-    def test_thinking_removed_for_non_whitelisted(self):
-        """thinking is removed for models that aren't gemini or anthropic models."""
+    The sanitizer no longer strips `thinking` — each provider handles
+    thinking/reasoning params in its own acompletion() method.
+    """
+
+    def test_thinking_kept_for_non_whitelisted(self):
+        """thinking is preserved for all models — providers handle filtering."""
         payload = {
             "model": "openai/gpt-4o",
             "messages": [],
             "thinking": {"type": "enabled", "budget_tokens": -1},
         }
         result = sanitize_request_payload(copy.deepcopy(payload), payload["model"])
-        assert "thinking" not in result
+        assert "thinking" in result
 
     def test_thinking_kept_for_anthropic(self):
         """thinking is preserved for anthropic models."""
@@ -79,37 +86,48 @@ class TestSanitizeThinking:
         result = sanitize_request_payload(copy.deepcopy(payload), payload["model"])
         assert "thinking" in result
 
-    def test_thinking_removed_if_different_value(self):
-        """thinking is removed for non-whitelisted even if values are different."""
+    def test_thinking_kept_regardless_of_value(self):
+        """thinking is preserved for all models regardless of param values."""
         payload = {
             "model": "some-model",
             "messages": [],
             "thinking": {"type": "enabled", "budget_tokens": 5000},
         }
         result = sanitize_request_payload(copy.deepcopy(payload), payload["model"])
-        assert "thinking" not in result
+        assert "thinking" in result
 
     def test_empty_payload(self):
         """Empty payload doesn't crash."""
         result = sanitize_request_payload({}, "any-model")
         assert result == {}
 
-    def test_thinking_with_invalid_type(self):
-        """thinking parameter with non-dict type doesn't crash and is removed for non-whitelisted models."""
+    def test_thinking_with_invalid_type_doesnt_crash(self):
+        """thinking parameter with non-dict type doesn't crash and is passed through."""
         payload = {
             "model": "some-model",
             "messages": [],
             "thinking": "enabled",  # String instead of dict
         }
         result = sanitize_request_payload(copy.deepcopy(payload), payload["model"])
-        assert "thinking" not in result
+        assert "thinking" in result
+
+    def test_extra_body_thinking_kept(self):
+        """extra_body.thinking is preserved — providers handle it."""
+        payload = {
+            "model": "lightning_ai/gpt-5.2",
+            "messages": [],
+            "extra_body": {"thinking": {"type": "disabled"}},
+        }
+        result = sanitize_request_payload(copy.deepcopy(payload), payload["model"])
+        assert "extra_body" in result
+        assert result["extra_body"]["thinking"] == {"type": "disabled"}
 
 
 class TestSanitizeCombined:
     """Test payloads containing multiple parameters that need sanitization."""
 
-    def test_both_removed_for_unsupported_model(self):
-        """Both dimensions and thinking are removed for unsupported model."""
+    def test_dimensions_removed_thinking_kept(self):
+        """dimensions is removed but thinking is kept for unsupported model."""
         payload = {
             "model": "some/unsupported-model",
             "input": "test",
@@ -118,7 +136,7 @@ class TestSanitizeCombined:
         }
         result = sanitize_request_payload(copy.deepcopy(payload), payload["model"])
         assert "dimensions" not in result
-        assert "thinking" not in result
+        assert "thinking" in result
 
     def test_dimensions_removed_for_openai_non_embedding(self):
         """Dimensions removed for OpenAI chat models."""

@@ -95,3 +95,54 @@ Notes:
 - Problem 3 (quota verification) requires live deployment testing after the
   405 fix is deployed to llm-proxy-dev.
 - The fixup! commit will be autosquashed into the owning commit before merge.
+
+## 2026-06-25 — Add thinking→reasoning_effort conversion and thinking param handling
+
+Target: `feat(lightning-ai): dollar credit quotas and date parsing`
+Files:
+- `src/rotator_library/providers/lightning_ai_provider.py`
+- `tests/test_lightning_ai_thinking.py` (new)
+
+PR: b3nw/LLM-API-Key-Proxy#79
+
+Problem:
+- The provider's `acompletion()` only handled `reasoning` dicts (Responses API format)
+  but not the Anthropic-style `thinking` parameter (`{"type": "enabled", "budget_tokens": N}`).
+- Even after the sanitizer whitelist was removed (see core.md entry), `thinking` would
+  be stripped by the provider's own `SUPPORTED_PARAMS` filter because it wasn't in the
+  allowed set and wasn't converted to `reasoning_effort`.
+
+Fix:
+- Added `thinking` → `reasoning_effort` conversion in `acompletion()`, mirroring the
+  existing `reasoning` dict conversion:
+  - `thinking: {"type": "enabled"}` → `reasoning_effort: "high"`
+  - `thinking: {"type": "disabled"}` → no reasoning_effort set
+- Added cleanup of `extra_body.thinking` injected by `_guard_thinking_tool_calls`:
+  - Pops `thinking` from `extra_body` to avoid sending unknown fields to Lightning AI
+  - When guard set `type: "disabled"`, takes precedence over client's `type: "enabled"`
+    (correct for multi-turn tool-call safety — prevents 400s when reasoning_content
+    was dropped from assistant tool-call turns)
+  - Cleans up empty `extra_body` dict after removing `thinking`
+- Added 9 tests in `test_lightning_ai_thinking.py` covering:
+  - thinking enabled/disabled → reasoning_effort conversion
+  - reasoning dict/string conversion (existing behavior, regression coverage)
+  - explicit reasoning_effort not overridden by thinking (setdefault)
+  - guard disabled overrides client enabled
+  - guard disabled without client thinking
+  - extra_body other keys preserved when thinking is removed
+
+Verification:
+- `uv run python3 -m py_compile src/rotator_library/providers/lightning_ai_provider.py` — passed
+- `uv run ruff check src/rotator_library/providers/lightning_ai_provider.py --select F401,F811,F821,E9` — passed
+- `uv run pytest tests/test_lightning_ai_thinking.py -v` — 9 passed
+- Live test on llm-proxy-dev.ext.ben.io (40 Lightning AI models):
+  - `reasoning_effort=high` reaches Lightning AI, models reason internally
+    (reasoning_tokens in usage stats confirmed)
+  - Lightning AI's Chat Completions API does not return `reasoning_content` in
+    responses — this is an upstream API limitation, not a proxy bug
+
+Notes:
+- `stream_options: {"include_reasoning": true}` was also tested — no effect on
+  Lightning AI's endpoint.
+- The upstream API limitation (no `reasoning_content` in responses) is documented
+  in the PR description but cannot be fixed in the proxy.

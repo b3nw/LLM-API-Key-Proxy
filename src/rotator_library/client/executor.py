@@ -1098,8 +1098,7 @@ class RequestExecutor:
 
                                 except StreamedAPIError as e:
                                     last_exception = e
-                                    original = getattr(e, "data", e)
-                                    classified = classify_error(original, provider)
+                                    classified = classify_error(e, provider)
                                     log_failure(
                                         api_key=cred,
                                         model=model,
@@ -1108,7 +1107,7 @@ class RequestExecutor:
                                         request_headers=request_headers,
                                     )
                                     error_accumulator.record_error(
-                                        cred, classified, str(original)[:150]
+                                        cred, classified, str(e)[:150]
                                     )
 
                                     # Track consecutive quota failures

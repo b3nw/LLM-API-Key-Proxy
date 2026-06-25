@@ -1093,7 +1093,10 @@ async def _parse_response_events(
             error_msg = error_data.get("message", "Unknown error")
             error_code = error_data.get("code", "")
             lib_logger.error(f"Codex WS error ({error_code}): {error_msg}")
-            raise StreamedAPIError(f"Codex error ({error_code}): {error_msg}")
+            raise StreamedAPIError(
+                f"Codex error ({error_code}): {error_msg}",
+                data=error_data if error_data else None,
+            )
 
 
 # =============================================================================

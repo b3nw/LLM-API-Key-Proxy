@@ -79,6 +79,13 @@ features:
       - "src/rotator_library/providers/nanogpt*"
       - "src/rotator_library/providers/utilities/nanogpt*"
 
+  - id: ollama-cloud
+    prefix: "feat(ollama-cloud)"
+    subject: "feat(ollama-cloud): add Ollama Cloud provider with dual-window quota tracking"
+    files:
+      - "src/rotator_library/providers/ollama_cloud*"
+      - "src/rotator_library/providers/utilities/ollama_cloud*"
+
   - id: umans
     prefix: "feat(umans)"
     subject: "feat(umans): add Umans provider with request-based quota tracking"

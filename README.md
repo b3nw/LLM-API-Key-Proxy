@@ -27,6 +27,7 @@ A personal fork of [Mirrowel/LLM-API-Key-Proxy](https://github.com/Mirrowel/LLM-
 | **Opencode Go** | 3-window quota tracking (`5hr`, `weekly`, `monthly`) via SolidJS scraping, custom OpenAI routing |
 | **Command Code** | Bypasses standard subscription tier limits on chat completions by routing to the CLI endpoint (`/alpha/generate`). Supports dollar credits tracking mapped to cents baseline, 5-minute background refresh, and reasoning/thinking stream translation for `deepseek-v4-pro` and `mimo-v2.5-pro` |
 | **Umans** | OpenAI-compatible aggregation provider with static model definitions via `UMANS_MODELS`, request-based quota tracking (code_pro: 200 req/5h, max: unlimited), upstream-authoritative context windows, and cost tracking via sub-provider alias resolution |
+| **Ollama Cloud** | Free/paid inference via `ollama.com` with dynamic model discovery from `/api/tags`. Dual-window quota tracking (`session` ~5hr reset, `weekly` 7-day reset) via HTML scraping of the settings page using a `__Secure-session` cookie. Supports 429-based reactive rotation as fallback |
 | **xAI Grok** | OAuth2 PKCE + Device Code flow for SuperGrok/X Premium+ accounts. Dual-endpoint model discovery from `api.x.ai` and `cli-chat-proxy.grok.com`, automatic token refresh, and CLI proxy context window metadata injection |
 
 ### Smart "Latest" Model Aliases
@@ -646,6 +647,14 @@ UMANS_QUOTA_LIMIT=200  # optional, code_pro soft request limit override
 UMANS_QUOTA_REFRESH_INTERVAL=300  # optional, default 300s
 # Map custom upstream model names to canonical display names:
 UMANS_MODELS='{"moonshot/kimi-k2.6": {"id": "umans-kimi-k2.6"}, "z-ai/glm-5.2": {"id": "umans-glm-5.2"}}'
+
+# Ollama Cloud (free/paid inference via ollama.com)
+# Models discovered dynamically from /api/tags. Dual-window quota tracking
+# (session ~5hr reset, weekly 7-day reset) via HTML scraping of
+# ollama.com/settings (no public quota API).
+OLLAMA_CLOUD_API_KEY_1=your-ollama-cloud-api-key
+OLLAMA_CLOUD_SESSION_COOKIE_1=...  # __Secure-session cookie from ollama.com (enables quota tracking)
+OLLAMA_CLOUD_QUOTA_REFRESH_INTERVAL=300  # optional, default 300s
 
 # Per-provider retry overrides
 MAX_RETRIES_NANOGPT=2

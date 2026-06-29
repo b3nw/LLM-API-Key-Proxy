@@ -11,7 +11,7 @@ Uses only httpx + rich (no heavy rotator_library imports).
 import os
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import httpx

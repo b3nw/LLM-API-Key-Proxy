@@ -28,7 +28,6 @@ from typing import (
     Optional,
     Tuple,
     Union,
-    TYPE_CHECKING,
 )
 
 import httpx
@@ -39,9 +38,6 @@ from .anthropic_oauth_base import AnthropicOAuthBase
 from .utilities.anthropic_quota_tracker import AnthropicQuotaTracker
 from ..model_definitions import ModelDefinitions
 from ..timeout_config import TimeoutConfig
-
-if TYPE_CHECKING:
-    pass
 
 lib_logger = logging.getLogger("rotator_library")
 

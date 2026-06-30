@@ -15,14 +15,11 @@ OAuth requests use:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
-import re
 import time
 import uuid
-from pathlib import Path
 from typing import (
     Any,
     AsyncGenerator,
@@ -31,7 +28,6 @@ from typing import (
     Optional,
     Tuple,
     Union,
-    TYPE_CHECKING,
 )
 
 import httpx
@@ -42,9 +38,6 @@ from .anthropic_oauth_base import AnthropicOAuthBase
 from .utilities.anthropic_quota_tracker import AnthropicQuotaTracker
 from ..model_definitions import ModelDefinitions
 from ..timeout_config import TimeoutConfig
-
-if TYPE_CHECKING:
-    from ..usage_manager import UsageManager
 
 lib_logger = logging.getLogger("rotator_library")
 

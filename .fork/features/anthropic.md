@@ -1,0 +1,1 @@
+- Refactored `src/rotator_library/providers/anthropic_provider.py` to remove unused imports: `Path`, `asyncio`, `re`, and `UsageManager`.

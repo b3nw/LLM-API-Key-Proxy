@@ -10,20 +10,18 @@ until all credentials in the pool are exhausted.
 
 import time
 import logging
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional
 
 from ..types import (
     CredentialState,
     LimitCheckResult,
     LimitResult,
-    FairCycleState,
     GlobalFairCycleState,
     TrackingMode,
     FAIR_CYCLE_GLOBAL_KEY,
 )
 from ..config import FairCycleConfig
 from ..tracking.windows import WindowManager
-from ...error_handler import mask_credential
 from ...error_handler import mask_credential
 from .base import LimitChecker
 

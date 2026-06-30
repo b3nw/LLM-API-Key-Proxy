@@ -18,6 +18,7 @@ from unittest.mock import MagicMock
 
 from rotator_library.error_handler import (
     classify_error,
+    is_rate_limit_error,
     ClassifiedError,
     _parse_duration_string,
     mask_credential,
@@ -191,3 +192,29 @@ class TestMaskCredential:
         """File paths are partially masked."""
         result = mask_credential("/path/to/oauth_creds/gemini_cli_oauth_1.json")
         assert isinstance(result, str)
+
+class TestIsRateLimitError:
+    """Test is_rate_limit_error function."""
+
+    def test_is_rate_limit_error_true(self):
+        """Returns True for RateLimitError."""
+        from litellm.exceptions import RateLimitError
+        err = RateLimitError(
+            message="Rate limit exceeded",
+            llm_provider="openai",
+            model="gpt-4",
+        )
+        assert is_rate_limit_error(err) is True
+
+    def test_is_rate_limit_error_false(self):
+        """Returns False for other exceptions."""
+        from litellm.exceptions import InternalServerError
+        err1 = InternalServerError(
+            message="Internal server error",
+            llm_provider="openai",
+            model="gpt-4",
+        )
+        assert is_rate_limit_error(err1) is False
+
+        err2 = ValueError("Some value error")
+        assert is_rate_limit_error(err2) is False

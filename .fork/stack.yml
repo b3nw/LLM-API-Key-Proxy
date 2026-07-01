@@ -41,6 +41,7 @@ rules:
       - "fix(anthropic): update user agent and add claude-sonnet-5 alias"
       - "fix(anthropic): return None when all models.dev entries are filtered"
       - "fix(anthropic): mirror pi-agent OAuth headers and tool naming"
+      - "fix(anthropic): full Claude Code protocol emulation (billing + identity)"
 
 features:
   - id: lightning-ai

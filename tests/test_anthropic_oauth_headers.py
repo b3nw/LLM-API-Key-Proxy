@@ -95,3 +95,124 @@ class TestPrefixToolName:
         result = _prefix_tool_name("read")
         assert result.startswith(TOOL_PREFIX)
         assert result == "mcp_Read"
+
+
+class TestComputeBillingHeader:
+    """Test the Claude Code billing header (client attestation) computation."""
+
+    def test_billing_header_format(self):
+        """Billing header has the expected format."""
+        from rotator_library.providers.anthropic_provider import _compute_billing_header
+
+        messages = [{"role": "user", "content": "Hello, Claude!"}]
+        header = _compute_billing_header(messages)
+        assert header.startswith("x-anthropic-billing-header: ")
+        assert "cc_version=" in header
+        assert "cc_entrypoint=" in header
+        assert "cch=" in header
+        assert header.endswith(";")
+
+    def test_billing_header_cch_is_deterministic(self):
+        """Same input produces same cch hash."""
+        from rotator_library.providers.anthropic_provider import _compute_billing_header
+
+        messages = [{"role": "user", "content": "Test message for hashing"}]
+        header1 = _compute_billing_header(messages)
+        header2 = _compute_billing_header(messages)
+        assert header1 == header2
+
+    def test_billing_header_different_messages_different_cch(self):
+        """Different first user messages produce different cch hashes."""
+        from rotator_library.providers.anthropic_provider import _compute_billing_header
+
+        header1 = _compute_billing_header([{"role": "user", "content": "message one"}])
+        header2 = _compute_billing_header([{"role": "user", "content": "message two"}])
+        assert header1 != header2
+
+    def test_billing_header_cch_is_5_chars(self):
+        """cch is a 5-character SHA256 prefix."""
+        import hashlib
+        from rotator_library.providers.anthropic_provider import _compute_billing_header
+
+        text = "test message"
+        expected_cch = hashlib.sha256(text.encode()).hexdigest()[:5]
+        header = _compute_billing_header([{"role": "user", "content": text}])
+        assert f"cch={expected_cch};" in header
+
+    def test_billing_header_extracts_from_list_content(self):
+        """Billing header extracts text from multipart content lists."""
+        from rotator_library.providers.anthropic_provider import _compute_billing_header
+
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Hello from list"},
+                {"type": "image", "source": {"type": "base64"}},
+            ]
+        }]
+        header = _compute_billing_header(messages)
+        assert "cch=" in header  # Should not crash
+
+    def test_billing_header_empty_messages(self):
+        """Billing header handles empty message list gracefully."""
+        from rotator_library.providers.anthropic_provider import _compute_billing_header
+
+        header = _compute_billing_header([])
+        assert "cch=" in header  # Uses empty string hash
+
+    def test_billing_header_skips_assistant_messages(self):
+        """Billing header uses first USER message, not first message."""
+        import hashlib
+        from rotator_library.providers.anthropic_provider import _compute_billing_header
+
+        messages = [
+            {"role": "assistant", "content": "ignored"},
+            {"role": "user", "content": "actual user message"},
+        ]
+        expected_cch = hashlib.sha256("actual user message".encode()).hexdigest()[:5]
+        header = _compute_billing_header(messages)
+        assert f"cch={expected_cch};" in header
+
+
+class TestBuildClaudeCodeSystem:
+    """Test the Claude Code system prompt builder."""
+
+    def test_system_array_has_two_entries(self):
+        """System array contains billing header and identity."""
+        from rotator_library.providers.anthropic_provider import _build_claude_code_system
+
+        messages = [{"role": "user", "content": "test"}]
+        system_entries, _ = _build_claude_code_system(messages, None)
+        assert len(system_entries) == 2
+        assert system_entries[0]["type"] == "text"
+        assert "billing-header" in system_entries[0]["text"]
+        assert system_entries[1]["type"] == "text"
+        assert "Claude Code" in system_entries[1]["text"]
+
+    def test_original_system_prompt_moved_to_first_user_message(self):
+        """Original system prompt is prepended to first user message."""
+        from rotator_library.providers.anthropic_provider import _build_claude_code_system
+
+        messages = [{"role": "user", "content": "original user text"}]
+        system_entries, modified_messages = _build_claude_code_system(
+            messages, "You are a helpful assistant"
+        )
+        assert "You are a helpful assistant" in modified_messages[0]["content"]
+        assert "original user text" in modified_messages[0]["content"]
+
+    def test_no_system_prompt_no_relocation(self):
+        """When no original system prompt, messages are unchanged."""
+        from rotator_library.providers.anthropic_provider import _build_claude_code_system
+
+        messages = [{"role": "user", "content": "hello"}]
+        _, modified = _build_claude_code_system(messages, None)
+        assert modified[0]["content"] == "hello"
+
+    def test_system_prompt_inserted_when_no_user_message(self):
+        """When no user message exists, original system prompt becomes one."""
+        from rotator_library.providers.anthropic_provider import _build_claude_code_system
+
+        messages = [{"role": "assistant", "content": "hi"}]
+        _, modified = _build_claude_code_system(messages, "system instructions")
+        assert modified[0]["role"] == "user"
+        assert modified[0]["content"] == "system instructions"

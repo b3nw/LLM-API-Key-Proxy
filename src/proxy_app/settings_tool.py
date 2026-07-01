@@ -8,7 +8,6 @@ Provides interactive configuration for custom providers, model definitions, and 
 
 import json
 import os
-from pathlib import Path
 from typing import Dict, Any, Optional, List
 from rich.console import Console
 from rich.prompt import Prompt, IntPrompt, Confirm

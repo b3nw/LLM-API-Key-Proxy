@@ -110,6 +110,80 @@ class TestModelAliasRegistry:
             assert targets is not None
 
 
+class TestDefaultClaudeAliases:
+    """Test built-in default Claude model aliases.
+
+    Default aliases provide bare-ID routing for Claude Code and similar
+    clients that send unprefixed model IDs (e.g. ``claude-opus-4-8``)
+    without requiring MODEL_ALIAS_* env vars.
+    """
+
+    @staticmethod
+    def _env_without_model_aliases():
+        """Return env dict with MODEL_ALIAS_* vars stripped out."""
+        return {
+            k: v for k, v in os.environ.items()
+            if not k.startswith("MODEL_ALIAS_")
+        }
+
+    def test_default_claude_aliases_loaded(self):
+        """Default Claude model aliases resolve without env vars."""
+        with patch.dict(os.environ, self._env_without_model_aliases(), clear=True):
+            registry = ModelAliasRegistry()
+            for model in [
+                "claude-fable-5", "claude-opus-4-8", "claude-opus-4-7",
+                "claude-opus-4-6", "claude-sonnet-4-6",
+                "claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5",
+            ]:
+                targets = registry.resolve(model)
+                assert targets is not None, f"{model} should have a default alias"
+                assert len(targets) == 1
+                assert targets[0].provider == "anthropic"
+
+    def test_default_alias_targets_correct_model_ids(self):
+        """Default aliases target the correct Anthropic model IDs."""
+        with patch.dict(os.environ, self._env_without_model_aliases(), clear=True):
+            registry = ModelAliasRegistry()
+            # 4-5 family uses date-suffixed IDs (matching OAUTH_MODELS)
+            targets = registry.resolve("claude-opus-4-5")
+            assert targets is not None and targets[0].model_name == "claude-opus-4-5-20251101"
+            targets = registry.resolve("claude-sonnet-4-5")
+            assert targets is not None and targets[0].model_name == "claude-sonnet-4-5-20250929"
+            targets = registry.resolve("claude-haiku-4-5")
+            assert targets is not None and targets[0].model_name == "claude-haiku-4-5-20251001"
+            # Newer models use bare IDs (no date suffix per Anthropic docs)
+            targets = registry.resolve("claude-opus-4-8")
+            assert targets is not None and targets[0].model_name == "claude-opus-4-8"
+            targets = registry.resolve("claude-fable-5")
+            assert targets is not None and targets[0].model_name == "claude-fable-5"
+            targets = registry.resolve("claude-sonnet-4-6")
+            assert targets is not None and targets[0].model_name == "claude-sonnet-4-6"
+
+    def test_env_var_overrides_default_alias(self):
+        """MODEL_ALIAS_* env vars override built-in defaults."""
+        with patch.dict(os.environ, {
+            "MODEL_ALIAS_CLAUDE_OPUS_4_8": "anthropic:claude-opus-4-8,copilot:claude-opus-4.8"
+        }, clear=False):
+            registry = ModelAliasRegistry()
+            targets = registry.resolve("claude-opus-4-8")
+            assert targets is not None
+            assert len(targets) == 2  # env var has 2 targets vs default's 1
+            assert targets[0].provider == "anthropic"
+            assert targets[1].provider == "copilot"
+
+    def test_default_claude_aliases_in_canonical_models(self):
+        """Default Claude aliases appear in get_canonical_models()."""
+        with patch.dict(os.environ, self._env_without_model_aliases(), clear=True):
+            registry = ModelAliasRegistry()
+            canonical = set(registry.get_canonical_models())
+            expected = {
+                "claude-fable-5", "claude-opus-4-8", "claude-opus-4-7",
+                "claude-opus-4-6", "claude-sonnet-4-6",
+                "claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5",
+            }
+            assert expected.issubset(canonical)
+
+
 class TestModelLatestRegistry:
     """Test MODEL_LATEST env var parsing and resolution."""
 

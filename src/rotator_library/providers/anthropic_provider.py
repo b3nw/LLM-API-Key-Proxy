@@ -61,7 +61,11 @@ TOOL_PREFIX = "mcp_"
 
 # Models available via OAuth subscription (Claude Pro/Max)
 OAUTH_MODELS = [
+    "claude-fable-5",
+    "claude-opus-4-8",
+    "claude-opus-4-7",
     "claude-opus-4-6",
+    "claude-sonnet-4-6",
     "claude-opus-4-5-20251101",
     "claude-sonnet-4-5-20250929",
     "claude-haiku-4-5-20251001",
@@ -70,7 +74,11 @@ OAUTH_MODELS = [
 # Max output tokens per model family — used when caller doesn't specify max_tokens.
 # Maps model prefix → max output tokens.
 _MODEL_MAX_OUTPUT_TOKENS: Dict[str, int] = {
+    "claude-fable-5": 128_000,
+    "claude-opus-4-8": 128_000,
+    "claude-opus-4-7": 128_000,
     "claude-opus-4-6": 128_000,
+    "claude-sonnet-4-6": 64_000,
     "claude-opus-4-5": 64_000,
     "claude-sonnet-4-5": 64_000,
     "claude-haiku-4-5": 64_000,

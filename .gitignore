@@ -145,6 +145,7 @@ tests/*
 !tests/test_selection_engine.py
 !tests/test_xai_oauth_flow.py
 !tests/test_usage_reconciliation.py
+!tests/test_suppress_litellm_warnings.py
 docs/ignored/
 .env
 .agent/
@@ -159,3 +160,7 @@ webui/dist/
 # Command Code session files
 command_code_cookies.json
 
+!tests/test_responses_compat.py
+!tests/test_fair_cycle.py
+!tests/test_anthropic_models_dev.py
+!tests/test_anthropic_oauth_headers.py

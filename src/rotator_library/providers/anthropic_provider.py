@@ -90,6 +90,111 @@ OAUTH_ACCESS_TOKEN_PREFIX = "sk-ant-oat"
 OAUTH_REFRESH_TOKEN_PREFIX = "sk-ant-ort"
 API_KEY_PREFIX = "sk-ant-api"
 
+# =============================================================================
+# DYNAMIC MODEL DISCOVERY via models.dev
+# =============================================================================
+# Fetches the Anthropic model catalog from https://models.dev/api.json at
+# runtime, providing model IDs and max output tokens without code changes.
+# Falls back to the hardcoded OAUTH_MODELS list on failure.
+#
+# Pattern follows the Codex provider's GitHub JSON catalog fetch:
+# module-level cache, 3-tier fallback (fresh → stale → hardcoded).
+#
+# OAuth tokens (sk-ant-oat-*) cannot call Anthropic's GET /v1/models endpoint,
+# so we use models.dev (a community-maintained catalog) instead. This is the
+# same approach used by pi (earendil-works/pi) and opencode (sst/opencode).
+
+_MODELS_DEV_URL = os.environ.get("MODELS_DEV_URL", "https://models.dev/api.json")
+_MODELS_DEV_CACHE_TTL = int(os.environ.get("ANTHROPIC_MODELS_CACHE_TTL", "3600"))
+_models_dev_cache: Optional[Dict[str, Any]] = None
+_models_dev_cache_time: float = 0.0
+
+# Model families excluded from the OAuth-eligible list:
+# - claude-3-* : retired, no longer available via Anthropic API
+# - claude-mythos-* : restricted to Project Glasswing participants
+_OAUTH_EXCLUDED_PREFIXES = ("claude-3-", "claude-mythos-")
+
+
+def _fetch_anthropic_models_from_models_dev() -> Optional[Dict[str, Any]]:
+    """Fetch Anthropic models from the models.dev catalog.
+
+    Returns a dict with 'models' (list of model IDs) and 'max_tokens'
+    (dict of model_id → max output tokens), or None on failure.
+    """
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(
+            _MODELS_DEV_URL,
+            headers={"User-Agent": "llm-proxy/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        anthropic_data = data.get("anthropic", {})
+        models_data = anthropic_data.get("models", {})
+        if not models_data:
+            lib_logger.warning("[Anthropic] models.dev returned empty Anthropic models")
+            return None
+
+        models = []
+        max_tokens: Dict[str, int] = {}
+
+        for model_id, model_info in models_data.items():
+            # Skip retired/restricted model families
+            if any(model_id.startswith(p) for p in _OAUTH_EXCLUDED_PREFIXES):
+                continue
+            # Only include models with tool calling support (required by Claude Code)
+            if not model_info.get("tool_call", False):
+                continue
+
+            models.append(model_id)
+
+            # Extract max output tokens
+            limit = model_info.get("limit", {})
+            output = limit.get("output")
+            if output:
+                max_tokens[model_id] = output
+
+        lib_logger.info(
+            f"[Anthropic] Fetched {len(models)} models from models.dev: "
+            f"{', '.join(models)}"
+        )
+        return {"models": models, "max_tokens": max_tokens}
+
+    except json.JSONDecodeError as e:
+        lib_logger.warning(f"[Anthropic] models.dev response is not valid JSON: {e}")
+        return None
+    except Exception as e:
+        lib_logger.warning(f"[Anthropic] Failed to fetch models from models.dev: {e}")
+        return None
+
+
+def _get_dynamic_models() -> Optional[Dict[str, Any]]:
+    """Get dynamic model data, fetching from models.dev if cache is stale.
+
+    Returns dict with 'models' (list) and 'max_tokens' (dict), or None if
+    no data is available (caller should fall back to hardcoded OAUTH_MODELS).
+    """
+    global _models_dev_cache, _models_dev_cache_time
+
+    now = time.time()
+    if _models_dev_cache is not None and (now - _models_dev_cache_time) < _MODELS_DEV_CACHE_TTL:
+        return _models_dev_cache
+
+    fetched = _fetch_anthropic_models_from_models_dev()
+    if fetched is not None:
+        _models_dev_cache = fetched
+        _models_dev_cache_time = now
+        return fetched
+
+    # Use stale cache if available (network failed but we have old data)
+    if _models_dev_cache is not None:
+        lib_logger.info("[Anthropic] Using stale models.dev cache (fetch failed)")
+        return _models_dev_cache
+
+    return None
+
 
 def _is_oauth_credential(credential: str) -> bool:
     """
@@ -342,6 +447,16 @@ class AnthropicProvider(AnthropicOAuthBase, AnthropicQuotaTracker, ProviderInter
         self.model_definitions = ModelDefinitions()
         # Track which credentials are API keys vs OAuth
         self._credential_types: Dict[str, str] = {}
+
+        # Populate quota groups dynamically from models.dev, fall back to hardcoded
+        dynamic = _get_dynamic_models()
+        oauth_models = dynamic["models"] if dynamic else list(OAUTH_MODELS)
+        self.model_quota_groups = {
+            "5h-limit": list(oauth_models),
+            "weekly-limit": list(oauth_models),
+            "anthropic-global": list(oauth_models),
+        }
+
         # Initialize quota tracker
         self._init_quota_tracker()
 
@@ -349,12 +464,24 @@ class AnthropicProvider(AnthropicOAuthBase, AnthropicQuotaTracker, ProviderInter
         """This provider uses custom logic for OAuth credentials."""
         return True
 
+    def get_model_quota_group(self, model: str) -> Optional[str]:
+        """All Anthropic models share the anthropic-global quota group.
+
+        This ensures dynamically discovered models (not yet in the quota
+        groups list) are still tracked under the global group, matching
+        the Codex provider pattern.
+        """
+        return "anthropic-global"
+
     async def get_models(self, api_key: str, client: httpx.AsyncClient) -> List[str]:
         """Return available Anthropic models."""
         models = set()
 
-        # Always include OAuth models
-        for model in OAUTH_MODELS:
+        # Try dynamic discovery first, fall back to hardcoded OAUTH_MODELS
+        dynamic = _get_dynamic_models()
+        oauth_models = dynamic["models"] if dynamic else OAUTH_MODELS
+
+        for model in oauth_models:
             models.add(f"anthropic/{model}")
 
         # Get static model definitions from env var overrides
@@ -454,13 +581,19 @@ class AnthropicProvider(AnthropicOAuthBase, AnthropicQuotaTracker, ProviderInter
         # Derive max_tokens from model family if caller didn't specify
         max_tokens = kwargs.get("max_tokens")
         if max_tokens is None:
-            # Find matching prefix (longest match wins)
             model_bare = model.split("/", 1)[-1] if "/" in model else model
             max_tokens = _DEFAULT_MAX_TOKENS
-            for prefix, limit in _MODEL_MAX_OUTPUT_TOKENS.items():
-                if model_bare.startswith(prefix):
-                    max_tokens = limit
-                    break
+
+            # Try dynamic data first (exact match from models.dev)
+            dynamic = _get_dynamic_models()
+            if dynamic and model_bare in dynamic["max_tokens"]:
+                max_tokens = dynamic["max_tokens"][model_bare]
+            else:
+                # Fall back to hardcoded prefix matching
+                for prefix, limit in _MODEL_MAX_OUTPUT_TOKENS.items():
+                    if model_bare.startswith(prefix):
+                        max_tokens = limit
+                        break
         temperature = kwargs.get("temperature")
         top_p = kwargs.get("top_p")
         stop = kwargs.get("stop")

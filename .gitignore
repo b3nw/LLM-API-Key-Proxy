@@ -162,3 +162,4 @@ command_code_cookies.json
 
 !tests/test_responses_compat.py
 !tests/test_fair_cycle.py
+!tests/test_anthropic_models_dev.py

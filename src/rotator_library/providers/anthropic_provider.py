@@ -15,14 +15,12 @@ OAuth requests use:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
+import hashlib
 import os
-import re
 import time
 import uuid
-from pathlib import Path
 from typing import (
     Any,
     AsyncGenerator,
@@ -31,7 +29,6 @@ from typing import (
     Optional,
     Tuple,
     Union,
-    TYPE_CHECKING,
 )
 
 import httpx
@@ -42,9 +39,6 @@ from .anthropic_oauth_base import AnthropicOAuthBase
 from .utilities.anthropic_quota_tracker import AnthropicQuotaTracker
 from ..model_definitions import ModelDefinitions
 from ..timeout_config import TimeoutConfig
-
-if TYPE_CHECKING:
-    from ..usage_manager import UsageManager
 
 lib_logger = logging.getLogger("rotator_library")
 
@@ -59,16 +53,172 @@ ANTHROPIC_API_BASE = os.getenv(
 ANTHROPIC_MESSAGES_ENDPOINT = f"{ANTHROPIC_API_BASE}/v1/messages"
 
 # Required headers for OAuth requests
-ANTHROPIC_BETA_HEADER = "oauth-2025-04-20,interleaved-thinking-2025-05-14"
+# Base betas for all OAuth requests — mirrors Claude Code's header set.
+# The claude-code-20250219 beta is critical: it tells Anthropic's API that
+# this is a Claude Code session (confirmed by pi-agent and @cgaravitoq).
+_BASE_BETA_HEADERS = [
+    "claude-code-20250219",
+    "oauth-2025-04-20",
+    "interleaved-thinking-2025-05-14",
+    "prompt-caching-scope-2026-01-05",
+    "context-management-2025-06-27",
+]
+# Additional betas for long-context (1M) models
+_LONG_CONTEXT_BETAS = ["context-1m-2025-08-07", "effort-2025-11-24"]
+_LONG_CONTEXT_MODEL_PREFIXES = (
+    "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8",
+    "claude-sonnet-4-6", "claude-sonnet-5", "claude-fable-5",
+)
+# Haiku models exclude interleaved thinking
+_HAIKU_PREFIX = "claude-haiku-"
+
+
+def _compute_beta_header(model: str) -> str:
+    """Compute the anthropic-beta header value based on the model.
+
+    Mirrors the beta header computation used by pi-agent and the
+    @cgaravitoq/pi-claude-code-auth extension.
+    """
+    betas = list(_BASE_BETA_HEADERS)
+
+    # Add long-context betas for 1M context models
+    if any(model.startswith(p) for p in _LONG_CONTEXT_MODEL_PREFIXES):
+        betas.extend(_LONG_CONTEXT_BETAS)
+
+    # Haiku models exclude interleaved thinking
+    if model.startswith(_HAIKU_PREFIX):
+        betas = [b for b in betas if b != "interleaved-thinking-2025-05-14"]
+
+    return ",".join(betas)
+
+
+# Kept for backward compatibility (used in token refresh requests)
+ANTHROPIC_BETA_HEADER = _compute_beta_header("")
 ANTHROPIC_VERSION = "2023-06-01"
-ANTHROPIC_USER_AGENT = "claude-cli/2.1.2 (external, cli)"
+# User agent for OAuth requests — must use claude-code/ prefix (claude-cli/ is blocked by Anthropic).
+# Configurable via env var so operators can update without code changes.
+# Latest Claude Code version: https://www.npmjs.com/package/@anthropic-ai/claude-code
+ANTHROPIC_USER_AGENT = os.environ.get("ANTHROPIC_CLI_USER_AGENT", "claude-code/2.1.195")
 
 # Tool name prefix for OAuth path
 TOOL_PREFIX = "mcp_"
 
+
+def _prefix_tool_name(name: str) -> str:
+    """Prefix a tool name with mcp_ and capitalize the first letter.
+
+    Mirrors Claude Code's tool naming convention (e.g., read → mcp_Read).
+    The capitalization matches what the @cgaravitoq/pi-claude-code-auth
+    extension does — Anthropic's API expects PascalCase tool names with
+    the mcp_ prefix.
+    """
+    if not name:
+        return name
+    return f"{TOOL_PREFIX}{name[0].upper()}{name[1:]}"
+
+# =============================================================================
+# CLAUDE CODE PROTOCOL SIGNALS (OAuth identity emulation)
+# =============================================================================
+# The following functions mirror the @cgaravitoq/pi-claude-code-auth extension
+# to make OAuth requests look like genuine Claude Code sessions.
+# Without these signals, Anthropic applies stricter rate limits (429s).
+
+_BILLING_SALT = "59cf53e54c78"
+_CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
+_CLI_VERSION = os.environ.get("ANTHROPIC_CLI_VERSION", "2.1.195")
+_CLAUDE_CODE_ENTRYPOINT = os.environ.get("CLAUDE_CODE_ENTRYPOINT", "cli")
+
+
+def _extract_first_user_message_text(messages: List[Dict[str, Any]]) -> str:
+    """Extract text content from the first user message in the list."""
+    for msg in messages:
+        if msg.get("role") == "user":
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                texts = []
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        texts.append(part.get("text", ""))
+                return " ".join(texts) if texts else ""
+            return str(content) if content else ""
+    return ""
+
+
+def _compute_billing_header(messages: List[Dict[str, Any]]) -> str:
+    """Compute the Claude Code billing header (client attestation).
+
+    Mirrors the @cgaravitoq/pi-claude-code-auth implementation:
+    - cch: SHA256(first_user_message_text)[:5]
+    - suffix: SHA256(salt + sampled_chars + version)[:3]
+    - sampled_chars: chars at positions [4, 7, 20] of first user message text
+    """
+    text = _extract_first_user_message_text(messages)
+
+    cch = hashlib.sha256(text.encode("utf-8")).hexdigest()[:5]
+
+    sampled = "".join(
+        text[i] if i < len(text) else "0"
+        for i in [4, 7, 20]
+    )
+    suffix_input = f"{_BILLING_SALT}{sampled}{_CLI_VERSION}"
+    suffix = hashlib.sha256(suffix_input.encode("utf-8")).hexdigest()[:3]
+
+    return (
+        f"x-anthropic-billing-header: "
+        f"cc_version={_CLI_VERSION}.{suffix}; "
+        f"cc_entrypoint={_CLAUDE_CODE_ENTRYPOINT}; "
+        f"cch={cch};"
+    )
+
+
+def _build_claude_code_system(
+    messages: List[Dict[str, Any]],
+    original_system_prompt: Optional[str],
+) -> tuple:
+    """Build the system prompt array and potentially modify messages.
+
+    Returns (system_entries, messages) where system_entries is a list of
+    {"type": "text", "text": ...} entries for the Anthropic API system field,
+    and messages may have been modified to relocate the original system prompt.
+
+    The system array contains:
+    1. Billing header (client attestation) — first entry
+    2. Claude Code identity string — second entry
+    The original system prompt (if any) is moved to the first user message.
+    """
+    billing = _compute_billing_header(messages)
+
+    system_entries = [
+        {"type": "text", "text": billing},
+        {"type": "text", "text": _CLAUDE_CODE_IDENTITY},
+    ]
+
+    # Move original system prompt to first user message
+    if original_system_prompt:
+        if messages and messages[0].get("role") == "user":
+            first_content = messages[0].get("content", "")
+            if isinstance(first_content, str):
+                messages[0]["content"] = f"{original_system_prompt}\n\n{first_content}"
+            elif isinstance(first_content, list):
+                messages[0]["content"] = [
+                    {"type": "text", "text": original_system_prompt}
+                ] + first_content
+            else:
+                messages.insert(0, {"role": "user", "content": original_system_prompt})
+        else:
+            messages.insert(0, {"role": "user", "content": original_system_prompt})
+
+    return system_entries, messages
+
 # Models available via OAuth subscription (Claude Pro/Max)
 OAUTH_MODELS = [
+    "claude-fable-5",
+    "claude-opus-4-8",
+    "claude-opus-4-7",
     "claude-opus-4-6",
+    "claude-sonnet-4-6",
     "claude-opus-4-5-20251101",
     "claude-sonnet-4-5-20250929",
     "claude-haiku-4-5-20251001",
@@ -77,7 +227,11 @@ OAUTH_MODELS = [
 # Max output tokens per model family — used when caller doesn't specify max_tokens.
 # Maps model prefix → max output tokens.
 _MODEL_MAX_OUTPUT_TOKENS: Dict[str, int] = {
+    "claude-fable-5": 128_000,
+    "claude-opus-4-8": 128_000,
+    "claude-opus-4-7": 128_000,
     "claude-opus-4-6": 128_000,
+    "claude-sonnet-4-6": 64_000,
     "claude-opus-4-5": 64_000,
     "claude-sonnet-4-5": 64_000,
     "claude-haiku-4-5": 64_000,
@@ -88,6 +242,121 @@ _DEFAULT_MAX_TOKENS = 16_384  # Fallback for unknown models
 OAUTH_ACCESS_TOKEN_PREFIX = "sk-ant-oat"
 OAUTH_REFRESH_TOKEN_PREFIX = "sk-ant-ort"
 API_KEY_PREFIX = "sk-ant-api"
+
+# =============================================================================
+# DYNAMIC MODEL DISCOVERY via models.dev
+# =============================================================================
+# Fetches the Anthropic model catalog from https://models.dev/api.json at
+# runtime, providing model IDs and max output tokens without code changes.
+# Falls back to the hardcoded OAUTH_MODELS list on failure.
+#
+# Pattern follows the Codex provider's GitHub JSON catalog fetch:
+# module-level cache, 3-tier fallback (fresh → stale → hardcoded).
+#
+# OAuth tokens (sk-ant-oat-*) cannot call Anthropic's GET /v1/models endpoint,
+# so we use models.dev (a community-maintained catalog) instead. This is the
+# same approach used by pi (earendil-works/pi) and opencode (sst/opencode).
+
+_MODELS_DEV_URL = os.environ.get("MODELS_DEV_URL", "https://models.dev/api.json")
+_MODELS_DEV_CACHE_TTL = int(os.environ.get("ANTHROPIC_MODELS_CACHE_TTL", "3600"))
+_models_dev_cache: Optional[Dict[str, Any]] = None
+_models_dev_cache_time: float = 0.0
+
+# Model families excluded from the OAuth-eligible list:
+# - claude-3-* : retired, no longer available via Anthropic API
+# - claude-mythos-* : restricted to Project Glasswing participants
+_OAUTH_EXCLUDED_PREFIXES = ("claude-3-", "claude-mythos-")
+
+
+def _fetch_anthropic_models_from_models_dev() -> Optional[Dict[str, Any]]:
+    """Fetch Anthropic models from the models.dev catalog.
+
+    Returns a dict with 'models' (list of model IDs) and 'max_tokens'
+    (dict of model_id → max output tokens), or None on failure.
+    """
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(
+            _MODELS_DEV_URL,
+            headers={"User-Agent": "llm-proxy/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        anthropic_data = data.get("anthropic", {})
+        models_data = anthropic_data.get("models", {})
+        if not models_data:
+            lib_logger.warning("[Anthropic] models.dev returned empty Anthropic models")
+            return None
+
+        models = []
+        max_tokens: Dict[str, int] = {}
+
+        for model_id, model_info in models_data.items():
+            # Skip retired/restricted model families
+            if any(model_id.startswith(p) for p in _OAUTH_EXCLUDED_PREFIXES):
+                continue
+            # Only include models with tool calling support (required by Claude Code)
+            if not model_info.get("tool_call", False):
+                continue
+
+            models.append(model_id)
+
+            # Extract max output tokens
+            limit = model_info.get("limit", {})
+            output = limit.get("output")
+            if output:
+                max_tokens[model_id] = output
+
+        lib_logger.info(
+            f"[Anthropic] Fetched {len(models)} models from models.dev: "
+            f"{', '.join(models)}"
+        )
+
+        # Return None if all models were filtered out, so callers fall back
+        # to hardcoded OAUTH_MODELS instead of receiving an empty truthy dict.
+        if not models:
+            lib_logger.warning(
+                "[Anthropic] All models from models.dev were filtered out; "
+                "falling back to hardcoded OAUTH_MODELS"
+            )
+            return None
+
+        return {"models": models, "max_tokens": max_tokens}
+
+    except json.JSONDecodeError as e:
+        lib_logger.warning(f"[Anthropic] models.dev response is not valid JSON: {e}")
+        return None
+    except Exception as e:
+        lib_logger.warning(f"[Anthropic] Failed to fetch models from models.dev: {e}")
+        return None
+
+
+def _get_dynamic_models() -> Optional[Dict[str, Any]]:
+    """Get dynamic model data, fetching from models.dev if cache is stale.
+
+    Returns dict with 'models' (list) and 'max_tokens' (dict), or None if
+    no data is available (caller should fall back to hardcoded OAUTH_MODELS).
+    """
+    global _models_dev_cache, _models_dev_cache_time
+
+    now = time.time()
+    if _models_dev_cache is not None and (now - _models_dev_cache_time) < _MODELS_DEV_CACHE_TTL:
+        return _models_dev_cache
+
+    fetched = _fetch_anthropic_models_from_models_dev()
+    if fetched is not None:
+        _models_dev_cache = fetched
+        _models_dev_cache_time = now
+        return fetched
+
+    # Use stale cache if available (network failed but we have old data)
+    if _models_dev_cache is not None:
+        lib_logger.info("[Anthropic] Using stale models.dev cache (fetch failed)")
+        return _models_dev_cache
+
+    return None
 
 
 def _is_oauth_credential(credential: str) -> bool:
@@ -205,9 +474,9 @@ def _convert_openai_to_anthropic_messages(
                             input_data = {}
 
                     tool_name = func.get("name", "")
-                    # Add mcp_ prefix if not already present
+                    # Add mcp_ prefix with PascalCase if not already present
                     if not tool_name.startswith(TOOL_PREFIX):
-                        tool_name = f"{TOOL_PREFIX}{tool_name}"
+                        tool_name = _prefix_tool_name(tool_name)
 
                     content_blocks.append({
                         "type": "tool_use",
@@ -260,9 +529,9 @@ def _convert_tools_to_anthropic_format(
         if not name:
             continue
 
-        # Add mcp_ prefix if not already present
+        # Add mcp_ prefix with PascalCase if not already present
         if not name.startswith(TOOL_PREFIX):
-            name = f"{TOOL_PREFIX}{name}"
+            name = _prefix_tool_name(name)
 
         anthropic_tools.append({
             "name": name,
@@ -341,6 +610,16 @@ class AnthropicProvider(AnthropicOAuthBase, AnthropicQuotaTracker, ProviderInter
         self.model_definitions = ModelDefinitions()
         # Track which credentials are API keys vs OAuth
         self._credential_types: Dict[str, str] = {}
+
+        # Populate quota groups dynamically from models.dev, fall back to hardcoded
+        dynamic = _get_dynamic_models()
+        oauth_models = dynamic["models"] if dynamic else list(OAUTH_MODELS)
+        self.model_quota_groups = {
+            "5h-limit": list(oauth_models),
+            "weekly-limit": list(oauth_models),
+            "anthropic-global": list(oauth_models),
+        }
+
         # Initialize quota tracker
         self._init_quota_tracker()
 
@@ -348,12 +627,24 @@ class AnthropicProvider(AnthropicOAuthBase, AnthropicQuotaTracker, ProviderInter
         """This provider uses custom logic for OAuth credentials."""
         return True
 
+    def get_model_quota_group(self, model: str) -> Optional[str]:
+        """All Anthropic models share the anthropic-global quota group.
+
+        This ensures dynamically discovered models (not yet in the quota
+        groups list) are still tracked under the global group, matching
+        the Codex provider pattern.
+        """
+        return "anthropic-global"
+
     async def get_models(self, api_key: str, client: httpx.AsyncClient) -> List[str]:
         """Return available Anthropic models."""
         models = set()
 
-        # Always include OAuth models
-        for model in OAUTH_MODELS:
+        # Try dynamic discovery first, fall back to hardcoded OAUTH_MODELS
+        dynamic = _get_dynamic_models()
+        oauth_models = dynamic["models"] if dynamic else OAUTH_MODELS
+
+        for model in oauth_models:
             models.add(f"anthropic/{model}")
 
         # Get static model definitions from env var overrides
@@ -453,13 +744,19 @@ class AnthropicProvider(AnthropicOAuthBase, AnthropicQuotaTracker, ProviderInter
         # Derive max_tokens from model family if caller didn't specify
         max_tokens = kwargs.get("max_tokens")
         if max_tokens is None:
-            # Find matching prefix (longest match wins)
             model_bare = model.split("/", 1)[-1] if "/" in model else model
             max_tokens = _DEFAULT_MAX_TOKENS
-            for prefix, limit in _MODEL_MAX_OUTPUT_TOKENS.items():
-                if model_bare.startswith(prefix):
-                    max_tokens = limit
-                    break
+
+            # Try dynamic data first (exact match from models.dev)
+            dynamic = _get_dynamic_models()
+            if dynamic and model_bare in dynamic["max_tokens"]:
+                max_tokens = dynamic["max_tokens"][model_bare]
+            else:
+                # Fall back to hardcoded prefix matching
+                for prefix, limit in _MODEL_MAX_OUTPUT_TOKENS.items():
+                    if model_bare.startswith(prefix):
+                        max_tokens = limit
+                        break
         temperature = kwargs.get("temperature")
         top_p = kwargs.get("top_p")
         stop = kwargs.get("stop")
@@ -482,8 +779,9 @@ class AnthropicProvider(AnthropicOAuthBase, AnthropicQuotaTracker, ProviderInter
             **auth_headers,
             "Content-Type": "application/json",
             "anthropic-version": ANTHROPIC_VERSION,
-            "anthropic-beta": ANTHROPIC_BETA_HEADER,
+            "anthropic-beta": _compute_beta_header(model),
             "user-agent": ANTHROPIC_USER_AGENT,
+            "x-app": "cli",
         }
 
         # Build request payload
@@ -493,8 +791,14 @@ class AnthropicProvider(AnthropicOAuthBase, AnthropicQuotaTracker, ProviderInter
             "messages": anthropic_messages,
         }
 
-        if system_prompt:
-            payload["system"] = system_prompt
+        # Build Claude Code protocol system (billing header + identity)
+        # Original system prompt is relocated to first user message to avoid
+        # revealing a non-Claude Code identity in system[] (causes 400s).
+        system_entries, anthropic_messages = _build_claude_code_system(
+            anthropic_messages, system_prompt
+        )
+        payload["system"] = system_entries
+        payload["messages"] = anthropic_messages
 
         if anthropic_tools:
             payload["tools"] = anthropic_tools

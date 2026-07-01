@@ -131,3 +131,47 @@ Notes:
 - The `ANTHROPIC_BETA_HEADER` constant is kept for token refresh requests
   that don't have model context. It uses the base betas only.
 - Ref: b3nw/LLM-API-Key-Proxy#97
+
+## 2026-07-01 — Full Claude Code protocol emulation (billing header + identity)
+
+Target: `feat(anthropic): add OAuth support and handle streaming nulls`
+Files:
+- `src/rotator_library/providers/anthropic_provider.py`
+- `tests/test_anthropic_oauth_headers.py`
+
+Changes:
+- Added `_compute_billing_header(messages)` — computes the client attestation
+  hash (cch) from the first user message text, mirroring @cgaravitoq:
+  - cch = SHA256(first_user_message_text)[:5]
+  - suffix = SHA256(salt + chars_at[4,7,20] + version)[:3]
+  - salt = "59cf53e54c78"
+- Added `_build_claude_code_system(messages, original_system_prompt)` — builds
+  the system prompt array with:
+  1. Billing header as first system entry
+  2. Claude Code identity ("You are Claude Code, Anthropic's official CLI for Claude.")
+     as second system entry
+  3. Original system prompt relocated to first user message (prevents 400 rejections
+     from non-Claude Code identity in system[])
+- Modified `handle_oauth_completion()` to use `_build_claude_code_system()` for
+  all OAuth requests, replacing the plain `payload["system"] = system_prompt`.
+- Added 11 new tests: billing header format, determinism, hash correctness,
+  list content extraction, empty messages, assistant message skipping, system
+  array structure, prompt relocation, no-prompt case, no-user-message case.
+- Configurable: `ANTHROPIC_CLI_VERSION` and `CLAUDE_CODE_ENTRYPOINT` env vars.
+
+Rationale:
+- Safe headers alone (PR #101 initial commit) produced 429 errors in testing.
+- The billing header and identity prompt are required for Anthropic to treat
+  OAuth requests as genuine Claude Code sessions with standard rate limits.
+- Confirmed by pi-agent (earendil-works/pi) and @cgaravitoq/pi-claude-code-auth.
+
+Verification:
+- `uv run python3 -m py_compile` — passed
+- `uv run ruff check --select F401,F811,F821,E9` — passed
+- `pytest tests/test_anthropic_oauth_headers.py tests/test_anthropic_models_dev.py tests/test_anthropic_translator.py tests/test_model_alias.py -v` — 74 passed
+
+Notes:
+- The billing header salt (59cf53e54c78) is hardcoded from @cgaravitoq's reverse-
+  engineered code. If Anthropic changes the algorithm, this will need updating.
+- `ANTHROPIC_CLI_VERSION` should be kept in sync with the user agent version.
+- Ref: b3nw/LLM-API-Key-Proxy#97

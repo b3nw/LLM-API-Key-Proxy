@@ -1,4 +1,7 @@
 import { apiFetch } from "./client"
+import type { UmansUpstreamQuota } from "@/lib/umansQuota"
+
+export type { UmansUpstreamQuota }
 
 export interface QuotaStatsResponse {
   providers: Record<string, ProviderStats>
@@ -115,6 +118,8 @@ export interface CredentialStats {
   }>
   cooldowns?: Record<string, unknown>
   fair_cycle?: Record<string, unknown>
+  /** Provider-specific fields from upstream quota API (e.g. Umans /v1/usage). */
+  upstream_quota?: UmansUpstreamQuota
   current_period?: {
     request_count: number
     prompt_tokens: number

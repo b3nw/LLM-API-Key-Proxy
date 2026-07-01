@@ -52,7 +52,47 @@ ANTHROPIC_API_BASE = os.getenv(
 ANTHROPIC_MESSAGES_ENDPOINT = f"{ANTHROPIC_API_BASE}/v1/messages"
 
 # Required headers for OAuth requests
-ANTHROPIC_BETA_HEADER = "oauth-2025-04-20,interleaved-thinking-2025-05-14"
+# Base betas for all OAuth requests — mirrors Claude Code's header set.
+# The claude-code-20250219 beta is critical: it tells Anthropic's API that
+# this is a Claude Code session (confirmed by pi-agent and @cgaravitoq).
+_BASE_BETA_HEADERS = [
+    "claude-code-20250219",
+    "oauth-2025-04-20",
+    "interleaved-thinking-2025-05-14",
+    "prompt-caching-scope-2026-01-05",
+    "context-management-2025-06-27",
+]
+# Additional betas for long-context (1M) models
+_LONG_CONTEXT_BETAS = ["context-1m-2025-08-07", "effort-2025-11-24"]
+_LONG_CONTEXT_MODEL_PREFIXES = (
+    "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8",
+    "claude-sonnet-4-6", "claude-sonnet-5", "claude-fable-5",
+)
+# Haiku models exclude interleaved thinking
+_HAIKU_PREFIX = "claude-haiku-"
+
+
+def _compute_beta_header(model: str) -> str:
+    """Compute the anthropic-beta header value based on the model.
+
+    Mirrors the beta header computation used by pi-agent and the
+    @cgaravitoq/pi-claude-code-auth extension.
+    """
+    betas = list(_BASE_BETA_HEADERS)
+
+    # Add long-context betas for 1M context models
+    if any(model.startswith(p) for p in _LONG_CONTEXT_MODEL_PREFIXES):
+        betas.extend(_LONG_CONTEXT_BETAS)
+
+    # Haiku models exclude interleaved thinking
+    if model.startswith(_HAIKU_PREFIX):
+        betas = [b for b in betas if b != "interleaved-thinking-2025-05-14"]
+
+    return ",".join(betas)
+
+
+# Kept for backward compatibility (used in token refresh requests)
+ANTHROPIC_BETA_HEADER = _compute_beta_header("")
 ANTHROPIC_VERSION = "2023-06-01"
 # User agent for OAuth requests — must use claude-code/ prefix (claude-cli/ is blocked by Anthropic).
 # Configurable via env var so operators can update without code changes.
@@ -61,6 +101,19 @@ ANTHROPIC_USER_AGENT = os.environ.get("ANTHROPIC_CLI_USER_AGENT", "claude-code/2
 
 # Tool name prefix for OAuth path
 TOOL_PREFIX = "mcp_"
+
+
+def _prefix_tool_name(name: str) -> str:
+    """Prefix a tool name with mcp_ and capitalize the first letter.
+
+    Mirrors Claude Code's tool naming convention (e.g., read → mcp_Read).
+    The capitalization matches what the @cgaravitoq/pi-claude-code-auth
+    extension does — Anthropic's API expects PascalCase tool names with
+    the mcp_ prefix.
+    """
+    if not name:
+        return name
+    return f"{TOOL_PREFIX}{name[0].upper()}{name[1:]}"
 
 # Models available via OAuth subscription (Claude Pro/Max)
 OAUTH_MODELS = [
@@ -324,9 +377,9 @@ def _convert_openai_to_anthropic_messages(
                             input_data = {}
 
                     tool_name = func.get("name", "")
-                    # Add mcp_ prefix if not already present
+                    # Add mcp_ prefix with PascalCase if not already present
                     if not tool_name.startswith(TOOL_PREFIX):
-                        tool_name = f"{TOOL_PREFIX}{tool_name}"
+                        tool_name = _prefix_tool_name(tool_name)
 
                     content_blocks.append({
                         "type": "tool_use",
@@ -379,9 +432,9 @@ def _convert_tools_to_anthropic_format(
         if not name:
             continue
 
-        # Add mcp_ prefix if not already present
+        # Add mcp_ prefix with PascalCase if not already present
         if not name.startswith(TOOL_PREFIX):
-            name = f"{TOOL_PREFIX}{name}"
+            name = _prefix_tool_name(name)
 
         anthropic_tools.append({
             "name": name,
@@ -629,8 +682,9 @@ class AnthropicProvider(AnthropicOAuthBase, AnthropicQuotaTracker, ProviderInter
             **auth_headers,
             "Content-Type": "application/json",
             "anthropic-version": ANTHROPIC_VERSION,
-            "anthropic-beta": ANTHROPIC_BETA_HEADER,
+            "anthropic-beta": _compute_beta_header(model),
             "user-agent": ANTHROPIC_USER_AGENT,
+            "x-app": "cli",
         }
 
         # Build request payload

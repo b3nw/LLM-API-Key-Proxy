@@ -85,3 +85,49 @@ Notes:
 - models.dev includes `claude-sonnet-5` which was NOT in PR #99's hardcoded list —
   this demonstrates the value of dynamic discovery.
 - Ref: b3nw/LLM-API-Key-Proxy#97
+
+## 2026-07-01 — Mirror pi-agent OAuth headers and tool naming
+
+Target: `feat(anthropic): add OAuth support and handle streaming nulls`
+Files:
+- `src/rotator_library/providers/anthropic_provider.py`
+- `tests/test_anthropic_oauth_headers.py`
+- `.gitignore`
+
+Changes:
+- Added `_compute_beta_header(model)` — dynamically computes the `anthropic-beta`
+  header based on the model. Base betas now include `claude-code-20250219`
+  (critical: tells Anthropic this is a Claude Code session), `prompt-caching-scope-2026-01-05`,
+  and `context-management-2025-06-27`. Long-context models (opus-4-6+, sonnet-4-6+,
+  fable-5, sonnet-5) get `context-1m-2025-08-07` and `effort-2025-11-24`. Haiku
+  models exclude `interleaved-thinking-2025-05-14`.
+- Added `x-app: cli` header to OAuth request headers.
+- Added `_prefix_tool_name()` helper — capitalizes first letter before prefixing
+  (e.g., `read` → `mcp_Read` instead of `mcp_read`). Mirrors Claude Code's
+  PascalCase tool naming convention.
+- Kept `ANTHROPIC_BETA_HEADER` constant for backward compatibility (token refresh
+  requests that don't have a model context).
+- 11 new tests covering beta computation (base, long-context, haiku exclusion)
+  and tool name prefixing (lowercase, capitalized, empty, single char).
+
+Rationale:
+- Research into pi-agent (earendil-works/pi) and @cgaravitoq/pi-claude-code-auth
+  revealed that the proxy was missing critical protocol signals:
+  - `claude-code-20250219` beta (identifies as Claude Code session)
+  - `x-app: cli` header (present in both pi implementations)
+  - PascalCase tool names (Anthropic expects `mcp_Read`, not `mcp_read`)
+- Skipped for now: billing header (cch), Claude Code identity system prompt
+  injection, system prompt relocation — these are protocol emulation, not
+  safe header additions.
+
+Verification:
+- `uv run python3 -m py_compile` — passed
+- `uv run ruff check --select F401,F811,F821,E9` — passed
+- `pytest tests/test_anthropic_oauth_headers.py tests/test_anthropic_models_dev.py tests/test_anthropic_translator.py -v` — 63 passed
+
+Notes:
+- `_strip_tool_prefix()` not modified — may need case-insensitive matching
+  in a follow-up if tool result routing breaks.
+- The `ANTHROPIC_BETA_HEADER` constant is kept for token refresh requests
+  that don't have model context. It uses the base betas only.
+- Ref: b3nw/LLM-API-Key-Proxy#97

@@ -146,6 +146,8 @@ tests/*
 !tests/test_xai_oauth_flow.py
 !tests/test_usage_reconciliation.py
 !tests/test_suppress_litellm_warnings.py
+!tests/test_umans_quota_tracker.py
+!tests/test_usage_manager_provider_instance.py
 docs/ignored/
 .env
 .agent/

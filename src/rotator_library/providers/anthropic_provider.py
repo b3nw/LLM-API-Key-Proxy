@@ -163,6 +163,16 @@ def _fetch_anthropic_models_from_models_dev() -> Optional[Dict[str, Any]]:
             f"[Anthropic] Fetched {len(models)} models from models.dev: "
             f"{', '.join(models)}"
         )
+
+        # Return None if all models were filtered out, so callers fall back
+        # to hardcoded OAUTH_MODELS instead of receiving an empty truthy dict.
+        if not models:
+            lib_logger.warning(
+                "[Anthropic] All models from models.dev were filtered out; "
+                "falling back to hardcoded OAUTH_MODELS"
+            )
+            return None
+
         return {"models": models, "max_tokens": max_tokens}
 
     except json.JSONDecodeError as e:

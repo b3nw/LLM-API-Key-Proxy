@@ -166,6 +166,26 @@ class TestModelsDevFetch:
             result = _fetch_anthropic_models_from_models_dev()
         assert result is None
 
+    def test_fetch_returns_none_when_all_filtered(self):
+        """Returns None when all models are filtered out (not a truthy empty dict)."""
+        fake_data = {
+            "anthropic": {
+                "models": {
+                    "claude-3-5-sonnet-20241022": {  # Will be filtered (3.x prefix)
+                        "tool_call": True,
+                        "limit": {"output": 8192},
+                    },
+                    "claude-mythos-5": {  # Will be filtered (mythos prefix)
+                        "tool_call": True,
+                        "limit": {"output": 128000},
+                    },
+                }
+            }
+        }
+        with patch("urllib.request.urlopen", return_value=self._mock_urlopen(fake_data)):
+            result = _fetch_anthropic_models_from_models_dev()
+        assert result is None
+
 
 class TestDynamicModelsCache:
     """Test the _get_dynamic_models cache and fallback logic."""

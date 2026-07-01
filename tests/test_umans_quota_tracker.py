@@ -10,14 +10,17 @@ import httpx
 from rotator_library.providers.umans_provider import UmansProvider
 from rotator_library.providers.utilities.umans_quota_tracker import (
     UmansQuotaTracker,
+    _compute_in_burst_band,
     _detect_plan,
     _get_credential_identifier,
     _normalize_umans_api_base,
     _parse_iso_to_unix,
+    _parse_priority_state,
     _parse_usage_response,
     _resolve_request_limit,
     _resolve_umans_api_key,
     _safe_int,
+    snapshot_to_upstream_quota_dict,
 )
 
 
@@ -55,12 +58,12 @@ SAMPLE_CODE_PRO = {
         "tokens_in": 394143,
         "tokens_out": 15297,
         "tokens_cached": 358144,
+        "priority": {"low": False, "boxed_until": None, "reason": None},
     },
     "window": {
         "started_at": "2026-06-22T00:41:43Z",
         "resets_at": "2026-06-22T05:41:43Z",
     },
-    "throttled": False,
 }
 
 
@@ -189,6 +192,67 @@ def test_parse_usage_response_code_pro():
     assert snapshot.concurrent_sessions == 0
     assert snapshot.window_seconds == 18000
     assert snapshot.window_reset_ts is not None
+    assert snapshot.priority_low is False
+    assert snapshot.throttled is False
+    assert snapshot.in_burst_band is False
+
+
+def test_parse_priority_state_from_usage_priority():
+    usage = {"priority": {"low": True, "boxed_until": "2026-06-22T06:00:00Z", "reason": "burst"}}
+    throttled, low, boxed, reason, ts = _parse_priority_state(usage, {})
+    assert throttled is True
+    assert low is True
+    assert boxed == "2026-06-22T06:00:00Z"
+    assert reason == "burst"
+    assert ts is not None
+
+
+def test_parse_priority_state_legacy_top_level_throttled():
+    throttled, low, _, _, _ = _parse_priority_state({}, {"throttled": True})
+    assert throttled is True
+    assert low is False
+
+
+def test_compute_in_burst_band():
+    assert _compute_in_burst_band(250, 200, 400) is True
+    assert _compute_in_burst_band(12, 200, 400) is False
+    assert _compute_in_burst_band(401, 200, 400) is False
+
+
+def test_parse_usage_response_burst_and_deprioritized():
+    data = {
+        **SAMPLE_CODE_PRO,
+        "usage": {
+            **SAMPLE_CODE_PRO["usage"],
+            "requests_in_window": 250,
+            "remaining_requests": 150,
+            "priority": {
+                "low": True,
+                "boxed_until": "2026-06-22T06:00:00Z",
+                "reason": "rate_burst",
+            },
+        },
+    }
+    snapshot = _parse_usage_response(data, "k", "id")
+    assert snapshot.in_burst_band is True
+    assert snapshot.priority_low is True
+    assert snapshot.throttled is True
+    assert snapshot.throttle_reason == "rate_burst"
+    upstream = snapshot_to_upstream_quota_dict(snapshot)
+    assert upstream["deprioritized"] is True
+    assert upstream["in_burst_band"] is True
+    assert upstream["requests_soft_limit"] == 200
+    assert upstream["requests_hard_cap"] == 400
+
+
+def test_get_upstream_quota_for_accessor():
+    host = _TrackerHost()
+    snap = _parse_usage_response(SAMPLE_CODE_PRO, "cred-a", "cred-a")
+    host._quota_cache["cred-a"] = snap
+    row = host.get_upstream_quota_for_accessor("cred-a")
+    assert row is not None
+    assert row["requests_used"] == 12
+    assert row["deprioritized"] is False
 
 
 def test_parse_usage_response_max():
@@ -232,7 +296,7 @@ def test_store_baselines_to_usage_manager():
 
         req_call = next(c for c in calls if c.kwargs.get("quota_group") == "5h-requests")
         assert req_call.kwargs["model"] == "umans/_requests_5h"
-        assert req_call.kwargs["quota_max_requests"] == 200
+        assert req_call.kwargs["quota_max_requests"] == 400
         assert req_call.kwargs["quota_used"] == 12
 
         conc_call = next(

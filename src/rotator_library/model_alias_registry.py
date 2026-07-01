@@ -25,6 +25,26 @@ lib_logger = logging.getLogger("rotator_library")
 DEFAULT_RETRY_MODE = "round_robin"
 VALID_RETRY_MODES = {"round_robin", "exhaust"}
 
+# Built-in default aliases for Claude models.
+#
+# These provide bare-ID routing out of the box so that clients like Claude Code
+# (which send unprefixed model IDs such as ``claude-opus-4-8``) work without
+# requiring the operator to set MODEL_ALIAS_* environment variables.
+#
+# Each value uses the same ``provider:model`` format as env vars.
+# Env vars always override these defaults when set.
+DEFAULT_MODEL_ALIASES: Dict[str, str] = {
+    "claude-fable-5": "anthropic:claude-fable-5",
+    "claude-opus-4-8": "anthropic:claude-opus-4-8",
+    "claude-opus-4-7": "anthropic:claude-opus-4-7",
+    "claude-opus-4-6": "anthropic:claude-opus-4-6",
+    "claude-sonnet-4-6": "anthropic:claude-sonnet-4-6",
+    "claude-sonnet-5": "anthropic:claude-sonnet-5",
+    "claude-opus-4-5": "anthropic:claude-opus-4-5-20251101",
+    "claude-sonnet-4-5": "anthropic:claude-sonnet-4-5-20250929",
+    "claude-haiku-4-5": "anthropic:claude-haiku-4-5-20251001",
+}
+
 
 @dataclass
 class AliasTarget:
@@ -77,7 +97,22 @@ class ModelAliasRegistry:
         self._lookup[canonical] = canonical
 
     def _load_from_env(self) -> None:
-        """Load all MODEL_ALIAS_* environment variables."""
+        """Load built-in default aliases, then MODEL_ALIAS_* environment variables.
+
+        Env vars override defaults when the same canonical name is set via both.
+        """
+        # Load built-in defaults first (overridden by env vars below)
+        for canonical, value in DEFAULT_MODEL_ALIASES.items():
+            try:
+                alias = self._parse_alias_value(canonical, value)
+                if alias and alias.targets:
+                    self._register_alias(canonical, alias)
+            except Exception as e:
+                lib_logger.warning(
+                    f"Failed to parse default alias '{canonical}': {e}"
+                )
+
+        # Load MODEL_ALIAS_* env vars (override defaults)
         for key, value in os.environ.items():
             if not key.startswith("MODEL_ALIAS_"):
                 continue

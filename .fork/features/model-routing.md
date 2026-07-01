@@ -22,3 +22,41 @@ Notes:
 - Fix: `return await self._execute_streaming(...)` so the coroutine resolves to the
   inner async generator before being returned to the caller.
 - Ref: https://github.com/b3nw/LLM-API-Key-Proxy/issues/58
+
+## 2026-07-01 — Add default Claude model aliases for bare-ID routing
+
+Target: `feat(model-routing): MODEL_ALIASES and cross-provider rotation`
+Files:
+- `src/rotator_library/model_alias_registry.py`
+- `tests/test_model_alias.py`
+
+Changes:
+- Added `DEFAULT_MODEL_ALIASES` dict mapping bare Claude model IDs to
+  `anthropic:<model_id>` targets. This enables clients like Claude Code
+  (which send unprefixed model IDs such as `claude-opus-4-8`) to route
+  without requiring MODEL_ALIAS_* environment variable configuration.
+- Modified `_load_from_env()` to load built-in defaults first, then load
+  MODEL_ALIAS_* env vars which override defaults for the same canonical name.
+- Default aliases for 4-5 family target date-suffixed IDs (matching
+  `OAUTH_MODELS`): `claude-opus-4-5-20251101`, `claude-sonnet-4-5-20250929`,
+  `claude-haiku-4-5-20251001`.
+- Default aliases for newer models target bare IDs: `claude-fable-5`,
+  `claude-opus-4-8`, `claude-opus-4-7`, `claude-opus-4-6`, `claude-sonnet-4-6`.
+- Added 4 tests in `TestDefaultClaudeAliases` class: defaults loaded without
+  env vars, correct target model IDs, env var override behavior, and
+  canonical models listing.
+
+Verification:
+- `uv run python3 -m py_compile src/rotator_library/model_alias_registry.py` — passed
+- `uv run ruff check src/rotator_library/model_alias_registry.py --select F401,F811,F821,E9` — passed
+- `pytest tests/test_model_alias.py -v` — passed (all tests including new ones)
+
+Notes:
+- `_register_alias()` replaces (not appends) when the same canonical name is
+  registered twice, so env vars cleanly override defaults — no duplication.
+- Operators who want cross-provider failover (e.g. anthropic + copilot) can
+  still set `MODEL_ALIAS_CLAUDE_OPUS_4_8="anthropic:...,copilot:..."` to
+  override the single-provider default.
+- `/v1/models` endpoint automatically includes default aliases via
+  `get_canonical_models()`.
+- Ref: b3nw/LLM-API-Key-Proxy#97

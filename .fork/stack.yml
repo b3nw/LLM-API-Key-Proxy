@@ -34,6 +34,9 @@ rules:
     webui:
       - "feat(webui): add React web UI with admin dashboard, quota viewer, log explorer, and settings"
       - "fix(webui): hot-load custom providers and API keys without restart"
+    anthropic:
+      - "feat(anthropic): add OAuth support and handle streaming nulls"
+      - "fix(anthropic): update Claude model matrix with current Anthropic models"
 
 features:
   - id: lightning-ai

@@ -12,7 +12,7 @@ import logging
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Set, Union
+from typing import Any, Callable, Dict, List, Literal, Optional, Set, Union
 
 from ..core.types import RequestCompleteResult
 from ..error_handler import ClassifiedError, classify_error, mask_credential
@@ -176,6 +176,7 @@ class UsageManager:
         config: Optional[ProviderUsageConfig] = None,
         max_concurrent_per_key: Optional[int] = None,
         optimal_concurrent_per_key: Optional[int] = None,
+        get_provider_instance: Optional[Callable[[str], Optional[Any]]] = None,
     ):
         """
         Initialize UsageManager.
@@ -187,9 +188,13 @@ class UsageManager:
             config: Optional pre-built configuration
             max_concurrent_per_key: Max concurrent requests per credential
             optimal_concurrent_per_key: Soft target before stacking on a credential
+            get_provider_instance: Optional callback to the shared RotatingClient
+                provider instance (same object as background quota refresh). When set,
+                upstream quota caches on the plugin are visible in get_stats_for_endpoint.
         """
         self.provider = provider
         self._provider_plugins = provider_plugins or {}
+        self._get_provider_instance = get_provider_instance
         if max_concurrent_per_key is None:
             self._max_concurrent_per_key = None
         elif max_concurrent_per_key <= 0:
@@ -1192,6 +1197,12 @@ class UsageManager:
                     self._limits.rpd_checker.get_all_rpd_status(state)
                 )
 
+            _plugin = self._get_provider_plugin_instance()
+            if _plugin and hasattr(_plugin, "get_upstream_quota_for_accessor"):
+                upstream = _plugin.get_upstream_quota_for_accessor(state.accessor)
+                if upstream:
+                    cred_stats["upstream_quota"] = upstream
+
             # --- Accumulate provider-level totals (global/lifetime) ---
             stats["total_requests"] += state.totals.request_count
             stats["tokens"]["output"] += state.totals.output_tokens
@@ -1529,6 +1540,9 @@ class UsageManager:
 
     def _get_provider_plugin_instance(self) -> Optional[Any]:
         """Get provider plugin instance for the current provider."""
+        if self._get_provider_instance is not None:
+            return self._get_provider_instance(self.provider)
+
         if not self._provider_plugins:
             return None
 

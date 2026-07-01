@@ -39,6 +39,7 @@ DEFAULT_MODEL_ALIASES: Dict[str, str] = {
     "claude-opus-4-7": "anthropic:claude-opus-4-7",
     "claude-opus-4-6": "anthropic:claude-opus-4-6",
     "claude-sonnet-4-6": "anthropic:claude-sonnet-4-6",
+    "claude-sonnet-5": "anthropic:claude-sonnet-5",
     "claude-opus-4-5": "anthropic:claude-opus-4-5-20251101",
     "claude-sonnet-4-5": "anthropic:claude-sonnet-4-5-20250929",
     "claude-haiku-4-5": "anthropic:claude-haiku-4-5-20251001",

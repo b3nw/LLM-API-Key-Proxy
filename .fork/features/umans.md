@@ -158,3 +158,37 @@ Notes:
   through to the hard cap (400). Changed `_store_baselines_to_usage_manager`
   to use `requests_hard_cap` as the effective limit, falling back to
   `requests_limit` if hard cap is 0.
+
+## 2026-06-27 — Expose burst band and deprioritized state in quota stats and WebUI
+
+Target: `fix(umans): normalize API base and show quota without proxy requests`
+Branch: `fix/umans-quota-priority-display` (PR #86 into `dev`; PR contains **fixup!** commits only per AGENTS.md)
+Files:
+- `src/rotator_library/providers/utilities/umans_quota_tracker.py`
+- `src/rotator_library/usage/manager.py`
+- `src/rotator_library/client/usage_managers.py`
+- `src/proxy_app/api/config.py`
+- `tests/test_umans_quota_tracker.py`
+- `tests/test_usage_manager_provider_instance.py`
+- `webui/src/lib/umansQuota.ts`
+- `webui/src/api/quota.ts`
+- `webui/src/pages/Quota.tsx`
+- `.fork/stack.yml`
+- `.gitignore` (test allowlist entries)
+
+Working commits before merge (fixup! only on PR branch):
+- `fixup! fix(umans): normalize API base and show quota without proxy requests` (tracker, tests, ledger)
+- `fixup! feat(usage): …` / `fixup! feat(core): …` / `fixup! feat(gemini-cli): …` / `fixup! feat(webui): …` / `fixup! feat(tests): …`
+
+Verification:
+- `uv run ruff check` (tracker, manager) — passed
+- `uv run python3 -m py_compile` (tracker, manager) — passed
+- `uv run python -m pytest tests/test_umans_quota_tracker.py -q` — 41 passed
+- `uv run python -m pytest tests/test_usage_manager_provider_instance.py -q` — passed
+
+Notes:
+- Live `/v1/usage` uses `usage.priority.low`, `boxed_until`, `reason` for deprioritization; top-level `throttled` is absent (parser keeps legacy fallback).
+- `upstream_quota` on each credential in `/v1/quota-stats` when provider implements `get_upstream_quota_for_accessor`.
+- **PR #86 review:** `UsageManager` injects `get_provider_instance` from `RotatingClient._get_provider_instance` so `_quota_cache` matches `background_refresher`.
+- WebUI: Deprioritized / Burst band badges; Umans upstream summary and per-credential panel.
+- Distinct from proxy credential rotation `priority`.

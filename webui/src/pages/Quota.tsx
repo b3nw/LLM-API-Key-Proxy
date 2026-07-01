@@ -19,6 +19,11 @@ import {
   type ModelUsageEntry,
 } from "@/api/quota"
 import { formatNumber, formatCost, getQuotaColor, formatWindowLabel, formatQuotaValue, formatTimeRemaining, isXaiPercentOnlyQuotaGroup, formatXaiQuotaValueStr, formatPercentUsedFromRemaining } from "@/lib/utils"
+import {
+  formatUmansRequestQuotaLine,
+  umansDeprioritizedTooltip,
+  type UmansUpstreamQuota,
+} from "@/lib/umansQuota"
 
 function shortenModelName(model: string): string {
   const m = model.toLowerCase().replace(/^(models\/|publishers\/google\/models\/)/, "")
@@ -354,8 +359,27 @@ function QuotaSummaryBars({
 
   if (!bars.length) return <span className="text-muted-foreground text-xs">—</span>
 
+  const umansBurst = providerName === "umans" && credentials
+    ? Object.values(credentials).some((c) => c.upstream_quota?.in_burst_band)
+    : false
+  const umansDepri = providerName === "umans" && credentials
+    ? Object.values(credentials).some((c) => c.upstream_quota?.deprioritized)
+    : false
+
   return (
     <div className="space-y-1.5 max-w-[250px]">
+      {umansDepri && (
+        <Badge variant="warning" className="text-[10px]" title={umansDeprioritizedTooltip(
+          Object.values(credentials!).find((c) => c.upstream_quota?.deprioritized)?.upstream_quota!
+        )}>
+          Deprioritized
+        </Badge>
+      )}
+      {umansBurst && !umansDepri && (
+        <Badge variant="outline" className="text-[10px]" title="Above plan soft limit; still within Umans hard cap (burst headroom)">
+          Burst band
+        </Badge>
+      )}
       {bars.slice(0, 6).map((w) => (
         <div key={w.key}>
           <div className="flex justify-between text-[10px] text-muted-foreground mb-0.5">
@@ -498,6 +522,10 @@ function ProviderDetail({
         </Card>
       )}
 
+      {providerName === "umans" && (
+        <UmansUpstreamSummary credentials={provider.credentials} />
+      )}
+
       <div className="space-y-4">
         <h2 className="text-lg font-semibold">Credentials</h2>
         {Object.entries(provider.credentials).map(([credId, cred]: [string, CredentialStats]) => (
@@ -571,6 +599,16 @@ function CredentialCard({
             </span>
             {cred.email && <span className="text-xs text-muted-foreground">{cred.email}</span>}
             {cred.tier && <Badge variant="outline" className="text-[10px]">{cred.tier}</Badge>}
+            {providerName === "umans" && cred.upstream_quota?.deprioritized && (
+              <Badge variant="warning" className="text-[10px] cursor-help" title={umansDeprioritizedTooltip(cred.upstream_quota)}>
+                Deprioritized
+              </Badge>
+            )}
+            {providerName === "umans" && cred.upstream_quota?.in_burst_band && !cred.upstream_quota?.deprioritized && (
+              <Badge variant="outline" className="text-[10px] cursor-help" title="Usage is above the plan limit but below Umans hard cap">
+                Burst band
+              </Badge>
+            )}
           </div>
           <div className="flex items-center gap-2">
             <Button variant="ghost" size="sm" onClick={onForceRefresh} disabled={refreshing}>
@@ -598,6 +636,10 @@ function CredentialCard({
             <p className="font-medium">{formatCost(cost)}</p>
           </div>
         </div>
+
+        {providerName === "umans" && cred.upstream_quota && (
+          <UmansUpstreamDetail upstream={cred.upstream_quota} />
+        )}
 
         {cred.group_usage && Object.entries(cred.group_usage).some(([, g]) =>
           Object.values(g.windows).some(w => w.limit != null)
@@ -766,6 +808,91 @@ function CredentialCard({
         )}
       </CardContent>
     </Card>
+  )
+}
+
+function UmansUpstreamSummary({
+  credentials,
+}: {
+  credentials: Record<string, CredentialStats>
+}) {
+  const withUpstream = Object.values(credentials).filter((c) => c.upstream_quota)
+  if (!withUpstream.length) {
+    return (
+      <Card>
+        <CardContent className="py-4 text-sm text-muted-foreground">
+          No Umans /v1/usage snapshot yet — use Force Refresh on a credential after the proxy has fetched quota.
+        </CardContent>
+      </Card>
+    )
+  }
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-base">Umans upstream quota</CardTitle>
+        <p className="text-xs text-muted-foreground font-normal">
+          Plan soft limit vs hard cap (burst). Deprioritized = <code className="text-[10px]">usage.priority.low</code> from Umans (not the proxy rotation priority field).
+        </p>
+      </CardHeader>
+      <CardContent className="text-sm space-y-2">
+        {withUpstream.map((cred, i) => (
+          <div key={cred.stable_id ?? i} className="border-b border-border/50 pb-2 last:border-0 last:pb-0">
+            <span className="font-mono text-xs text-muted-foreground">{cred.accessor_masked}</span>
+            <UmansUpstreamDetail upstream={cred.upstream_quota!} compact />
+          </div>
+        ))}
+      </CardContent>
+    </Card>
+  )
+}
+
+function UmansUpstreamDetail({
+  upstream,
+  compact,
+}: {
+  upstream: UmansUpstreamQuota
+  compact?: boolean
+}) {
+  const resetLabel =
+    upstream.boxed_until_ts != null && upstream.boxed_until_ts > 0
+      ? formatTimeRemaining(upstream.boxed_until_ts)
+      : upstream.boxed_until
+        ? upstream.boxed_until
+        : null
+
+  return (
+    <div className={`${compact ? "mt-1" : "mb-3"} rounded-md border border-border/60 bg-muted/30 p-3 text-xs space-y-1.5`}>
+      {!compact && <h4 className="text-xs font-medium mb-1">Umans API (/v1/usage)</h4>}
+      <p>
+        <span className="text-muted-foreground">5h requests: </span>
+        {formatUmansRequestQuotaLine(upstream)}
+      </p>
+      {(upstream.concurrency_limit ?? 0) > 0 && (
+        <p>
+          <span className="text-muted-foreground">Concurrency: </span>
+          {upstream.concurrent_sessions ?? 0} / {upstream.concurrency_limit}
+          {(upstream.concurrency_hard_cap ?? 0) > (upstream.concurrency_limit ?? 0) && (
+            <span className="text-muted-foreground"> (hard cap {upstream.concurrency_hard_cap})</span>
+          )}
+        </p>
+      )}
+      {upstream.plan && (
+        <p>
+          <span className="text-muted-foreground">Plan: </span>
+          {upstream.plan}
+        </p>
+      )}
+      {upstream.deprioritized ? (
+        <p className="text-warning" title={umansDeprioritizedTooltip(upstream)}>
+          Deprioritized (low priority){resetLabel ? ` — until ${resetLabel === "now" ? "now" : resetLabel}` : ""}
+          {upstream.throttle_reason ? ` · ${upstream.throttle_reason}` : ""}
+        </p>
+      ) : upstream.in_burst_band ? (
+        <p className="text-muted-foreground">In burst band (above plan limit, below hard cap)</p>
+      ) : (
+        <p className="text-muted-foreground">Normal priority</p>
+      )}
+    </div>
   )
 }
 

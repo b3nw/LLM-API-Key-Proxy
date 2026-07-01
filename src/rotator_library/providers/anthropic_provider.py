@@ -54,7 +54,10 @@ ANTHROPIC_MESSAGES_ENDPOINT = f"{ANTHROPIC_API_BASE}/v1/messages"
 # Required headers for OAuth requests
 ANTHROPIC_BETA_HEADER = "oauth-2025-04-20,interleaved-thinking-2025-05-14"
 ANTHROPIC_VERSION = "2023-06-01"
-ANTHROPIC_USER_AGENT = "claude-cli/2.1.2 (external, cli)"
+# User agent for OAuth requests — must use claude-code/ prefix (claude-cli/ is blocked by Anthropic).
+# Configurable via env var so operators can update without code changes.
+# Latest Claude Code version: https://www.npmjs.com/package/@anthropic-ai/claude-code
+ANTHROPIC_USER_AGENT = os.environ.get("ANTHROPIC_CLI_USER_AGENT", "claude-code/2.1.195")
 
 # Tool name prefix for OAuth path
 TOOL_PREFIX = "mcp_"

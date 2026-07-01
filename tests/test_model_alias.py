@@ -132,7 +132,7 @@ class TestDefaultClaudeAliases:
             registry = ModelAliasRegistry()
             for model in [
                 "claude-fable-5", "claude-opus-4-8", "claude-opus-4-7",
-                "claude-opus-4-6", "claude-sonnet-4-6",
+                "claude-opus-4-6", "claude-sonnet-4-6", "claude-sonnet-5",
                 "claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5",
             ]:
                 targets = registry.resolve(model)
@@ -178,7 +178,7 @@ class TestDefaultClaudeAliases:
             canonical = set(registry.get_canonical_models())
             expected = {
                 "claude-fable-5", "claude-opus-4-8", "claude-opus-4-7",
-                "claude-opus-4-6", "claude-sonnet-4-6",
+                "claude-opus-4-6", "claude-sonnet-4-6", "claude-sonnet-5",
                 "claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5",
             }
             assert expected.issubset(canonical)

@@ -37,6 +37,7 @@ rules:
     anthropic:
       - "feat(anthropic): add OAuth support and handle streaming nulls"
       - "fix(anthropic): update Claude model matrix with current Anthropic models"
+      - "feat(anthropic): dynamic model discovery via models.dev"
 
 features:
   - id: lightning-ai

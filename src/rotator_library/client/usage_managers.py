@@ -73,6 +73,7 @@ class UsageManagerRegistry:
                 config=config,
                 max_concurrent_per_key=max_concurrent,
                 optimal_concurrent_per_key=optimal_concurrent,
+                get_provider_instance=self._get_provider_instance,
             )
 
     async def initialize_usage_managers(self) -> None:
@@ -139,6 +140,7 @@ class UsageManagerRegistry:
                 config=config,
                 max_concurrent_per_key=max_concurrent,
                 optimal_concurrent_per_key=optimal_concurrent,
+                get_provider_instance=self._get_provider_instance,
             )
         return usage_key
 

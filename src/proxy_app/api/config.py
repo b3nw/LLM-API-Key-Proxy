@@ -384,6 +384,7 @@ async def _ensure_usage_manager(client, provider: str, credentials: list) -> Non
             config=config,
             max_concurrent_per_key=max_c,
             optimal_concurrent_per_key=opt_c,
+            get_provider_instance=client._get_provider_instance,
         )
         reg.managers[provider] = usage_manager
 

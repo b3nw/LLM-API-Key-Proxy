@@ -256,6 +256,9 @@ def _fetch_models_from_github() -> Optional[Dict[str, Any]]:
             "plan_access": plan_access,
         }
 
+    except json.JSONDecodeError as e:
+        lib_logger.warning(f"[Codex] models.json from GitHub is not valid JSON: {e}")
+        return None
     except Exception as e:
         lib_logger.warning(f"[Codex] Failed to fetch models from GitHub: {e}")
         return None

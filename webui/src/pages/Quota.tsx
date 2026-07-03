@@ -560,6 +560,19 @@ function CredentialCard({
   const tokensOut = usePeriod ? cred.current_period!.output_tokens : cred.totals.completion_tokens
   const cost = usePeriod ? cred.current_period!.approx_cost : cred.totals.approx_cost
 
+  // Polled quota is "stale" if the last successful quota-baseline refresh is
+  // well past the ~5-min poll interval — usually because the provider's usage
+  // endpoint is rate-limited and background polls keep failing. Uses
+  // quota_last_refreshed (set only by update_quota_baseline) rather than
+  // last_updated (which is bumped on every request by the tracking engine).
+  const QUOTA_STALE_SECONDS = 15 * 60
+  const quotaAgeSeconds =
+    cred.quota_last_refreshed != null ? Date.now() / 1000 - cred.quota_last_refreshed : null
+  const quotaStale =
+    quotaAgeSeconds != null && quotaAgeSeconds > QUOTA_STALE_SECONDS
+  const quotaAgeMinutes =
+    quotaAgeSeconds != null ? Math.floor(quotaAgeSeconds / 60) : null
+
   return (
     <Card>
       <CardHeader className="pb-2">
@@ -603,7 +616,18 @@ function CredentialCard({
           Object.values(g.windows).some(w => w.limit != null)
         ) && (
           <div className="mb-3">
-            <h4 className="text-xs font-medium mb-2">Quota Usage</h4>
+            <h4 className="text-xs font-medium mb-2 flex items-center gap-2">
+              Quota Usage
+              {quotaStale && (
+                <span
+                  title={`Quota data last refreshed ${quotaAgeMinutes}m ago — the provider's usage endpoint may be rate-limited, so these numbers (and reset times) may be out of date.`}
+                >
+                  <Badge variant="warning" className="text-[10px] cursor-help">
+                    stale
+                  </Badge>
+                </span>
+              )}
+            </h4>
             <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
               {Object.entries(cred.group_usage)
                 .filter(([, group]) => Object.values(group.windows).some(w => w.limit != null))
@@ -644,7 +668,9 @@ function CredentialCard({
                       />
                       {resetStr && (
                         <div className="text-[10px] text-muted-foreground">
-                          Resets {resetStr === "now" ? "now" : `in ${resetStr}`}
+                          {resetStr === "now"
+                            ? (quotaStale ? "Awaiting refresh" : "Resets now")
+                            : `Resets in ${resetStr}`}
                         </div>
                       )}
                     </div>

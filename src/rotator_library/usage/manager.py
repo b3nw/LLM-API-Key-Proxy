@@ -1093,6 +1093,11 @@ class UsageManager:
                 "priority": state.priority,
                 "active_requests": state.active_requests,
                 "status": status,
+                "last_updated": state.last_updated,
+                # Timestamp of the last successful quota-baseline refresh (set
+                # only by update_quota_baseline). None for providers without
+                # polled quota. Used by the UI to flag stale/rate-limited data.
+                "quota_last_refreshed": state.quota_last_refreshed,
                 "totals": {
                     "request_count": state.totals.request_count,
                     "success_count": state.totals.success_count,
@@ -1715,6 +1720,7 @@ class UsageManager:
                     current.fair_cycle = loaded_state.fair_cycle
                     current.rpd_counters = loaded_state.rpd_counters
                     current.last_updated = loaded_state.last_updated
+                    current.quota_last_refreshed = loaded_state.quota_last_refreshed
                 else:
                     # New credential from disk, add it
                     self._states[stable_id] = loaded_state
@@ -1827,7 +1833,9 @@ class UsageManager:
                     )
 
         # Mark state as updated
-        state.last_updated = time.time()
+        now = time.time()
+        state.last_updated = now
+        state.quota_last_refreshed = now
 
         # Apply cooldown if provider indicates exhaustion
         # Provider controls when apply_exhaustion is set based on its semantics

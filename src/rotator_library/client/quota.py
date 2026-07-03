@@ -169,25 +169,27 @@ class QuotaService:
             if not provider_instance:
                 continue
 
+            # Resolve which credentials to refresh (shared across refresh styles)
+            if credential:
+                creds_to_refresh = []
+                for cred_path in self._all_credentials.get(prov, []):
+                    if cred_path.endswith(credential) or cred_path == credential:
+                        creds_to_refresh.append(cred_path)
+                        break
+            else:
+                creds_to_refresh = self._all_credentials.get(prov, [])
+
+            if not creds_to_refresh:
+                continue
+
+            usage_manager = self._usage_managers.get(prov)
+
             if hasattr(provider_instance, "fetch_initial_baselines"):
-                if credential:
-                    creds_to_refresh = []
-                    for cred_path in self._all_credentials.get(prov, []):
-                        if cred_path.endswith(credential) or cred_path == credential:
-                            creds_to_refresh.append(cred_path)
-                            break
-                else:
-                    creds_to_refresh = self._all_credentials.get(prov, [])
-
-                if not creds_to_refresh:
-                    continue
-
                 try:
                     quota_results = await provider_instance.fetch_initial_baselines(
                         creds_to_refresh
                     )
 
-                    usage_manager = self._usage_managers.get(prov)
                     if usage_manager and hasattr(
                         provider_instance, "_store_baselines_to_usage_manager"
                     ):
@@ -214,6 +216,44 @@ class QuotaService:
                     lib_logger.error(f"Failed to refresh quota for {prov}: {e}")
                     result["errors"].append(f"{prov}: {str(e)}")
                     result["failed_count"] += len(creds_to_refresh)
+
+            elif hasattr(provider_instance, "fetch_quota_from_api"):
+                # Anthropic-style tracker: no fetch_initial_baselines. Each
+                # fetch_quota_from_api call fetches live usage and we apply the
+                # snapshot to the UsageManager synchronously. force=True bypasses
+                # the tracker's post-429 rate-limit cooldown for manual refreshes.
+                if usage_manager and hasattr(
+                    provider_instance, "set_usage_manager"
+                ):
+                    provider_instance.set_usage_manager(usage_manager)
+
+                for cred_path in creds_to_refresh:
+                    try:
+                        snapshot = await provider_instance.fetch_quota_from_api(
+                            cred_path, force=True
+                        )
+                        result["credentials_refreshed"] += 1
+
+                        if getattr(snapshot, "status", None) == "success":
+                            result["success_count"] += 1
+                            if usage_manager and hasattr(
+                                provider_instance, "apply_snapshot_to_usage_manager"
+                            ):
+                                await provider_instance.apply_snapshot_to_usage_manager(
+                                    cred_path, snapshot
+                                )
+                        else:
+                            result["failed_count"] += 1
+                            result["errors"].append(
+                                f"{Path(cred_path).name}: "
+                                f"{getattr(snapshot, 'error', 'Unknown error')}"
+                            )
+                    except Exception as e:
+                        lib_logger.error(
+                            f"Failed to refresh quota for {prov}: {e}"
+                        )
+                        result["failed_count"] += 1
+                        result["errors"].append(f"{Path(cred_path).name}: {e}")
 
         result["duration_ms"] = int((time.time() - start_time) * 1000)
         return result

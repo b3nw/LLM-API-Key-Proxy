@@ -65,23 +65,42 @@ else
     echo "  ⚠  ruff not found — skipping undefined-name checks (run: pip install ruff)"
 fi
 
-# ── 2. Fork stack validation ─────────────────────────────────────────────────
+# ── 2. Fork stack validation (canonical branch only) ─────────────────────────
+# The stack manifest describes the canonical linear stack (`branch:` in stack.yml,
+# default `dev`). Feature/PR branches in worktrees intentionally carry in-progress
+# and `fixup!` commits that are not yet squashed into the canonical stack, so the
+# full-stack invariant is enforced only when committing on the canonical branch.
 if [[ -f ".fork/check-stack.py" ]]; then
-    PYTHON=""
-    for candidate in .venv/bin/python venv/bin/python; do
-        if [[ -x "$candidate" ]]; then
-            PYTHON="$candidate"
-            break
-        fi
-    done
-    if [[ -z "$PYTHON" ]] && command -v python3 &>/dev/null; then
-        PYTHON="python3"
+    # Tolerate optional surrounding quotes, e.g. `branch: dev` or `branch: "dev"`.
+    CANONICAL_BRANCH=$(sed -n -E 's/^branch:[[:space:]]*"?([^"[:space:]]+)"?.*$/\1/p' .fork/stack.yml 2>/dev/null | head -1)
+    CANONICAL_BRANCH="${CANONICAL_BRANCH:-dev}"
+    # `git rev-parse --abbrev-ref HEAD` prints the literal "HEAD" when detached;
+    # normalize that (and any empty result) to an empty string so the check below
+    # skips validation and the message reads "detached HEAD".
+    CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+    if [[ "$CURRENT_BRANCH" == "HEAD" ]]; then
+        CURRENT_BRANCH=""
     fi
 
-    if [[ -n "$PYTHON" ]]; then
-        if ! $PYTHON .fork/check-stack.py 2>&1; then
-            echo "  ✗ .fork/check-stack.py failed"
-            ERRORS=$((ERRORS + 1))
+    if [[ "$CURRENT_BRANCH" != "$CANONICAL_BRANCH" ]]; then
+        echo "  ⏭  skipping fork stack validation on '${CURRENT_BRANCH:-detached HEAD}' (enforced only on '$CANONICAL_BRANCH')"
+    else
+        PYTHON=""
+        for candidate in .venv/bin/python venv/bin/python; do
+            if [[ -x "$candidate" ]]; then
+                PYTHON="$candidate"
+                break
+            fi
+        done
+        if [[ -z "$PYTHON" ]] && command -v python3 &>/dev/null; then
+            PYTHON="python3"
+        fi
+
+        if [[ -n "$PYTHON" ]]; then
+            if ! $PYTHON .fork/check-stack.py 2>&1; then
+                echo "  ✗ .fork/check-stack.py failed"
+                ERRORS=$((ERRORS + 1))
+            fi
         fi
     fi
 fi

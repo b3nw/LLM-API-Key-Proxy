@@ -42,6 +42,15 @@ rules:
       - "fix(anthropic): return None when all models.dev entries are filtered"
       - "fix(anthropic): mirror pi-agent OAuth headers and tool naming"
       - "fix(anthropic): back off quota polling on 429 and flag stale quota in UI"
+    tooling:
+      - "feat(tooling): add AGENTS.md and .agent/ config for linear stack workflow"
+      - "fix(tooling): scope fork-stack gate to canonical branch and tolerate transient commits"
+  # Exact commit subjects permitted in the stack without a feature mapping.
+  # Legacy batch commits that predate the per-feature stack convention; do not
+  # add new bare-`feat:` commits here — use a scoped `feat(<feature>):` prefix.
+  allowed_subjects:
+    - "feat: Jules code health improvements (6 items)"
+    - "feat: Jules auto-improvement batch (7 sessions)"
 
 features:
   - id: lightning-ai

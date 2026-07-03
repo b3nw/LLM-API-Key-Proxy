@@ -42,6 +42,7 @@ rules:
       - "fix(anthropic): return None when all models.dev entries are filtered"
       - "fix(anthropic): mirror pi-agent OAuth headers and tool naming"
       - "fix(anthropic): back off quota polling on 429 and flag stale quota in UI"
+      - "fix(anthropic): send Claude Code User-Agent on OAuth usage fetch"
     tooling:
       - "feat(tooling): add AGENTS.md and .agent/ config for linear stack workflow"
       - "fix(tooling): scope fork-stack gate to canonical branch and tolerate transient commits"

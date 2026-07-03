@@ -12,6 +12,27 @@ This repository is a **fork** maintained as a linear commit stack on top of `ups
 
 ---
 
+## ⚠️ Worktrees Must Branch From `b3nw/dev`
+
+The active development branch is **`dev`** (pushed to `b3nw/dev`), **not** `main`.
+`main` lags behind `dev` and does not contain in-flight feature work, so a
+worktree created from `main` will be missing files and will not merge cleanly.
+
+**Every git worktree for this repo MUST be based on `dev`, never `main`.**
+
+- When creating a worktree, base it on `dev`:
+  ```bash
+  git worktree add -b <branch-name> <path> dev
+  ```
+- If a tool created the worktree from `main` (the repo default branch), reset
+  the worktree branch onto `dev` before making any changes:
+  ```bash
+  git reset --hard dev
+  ```
+- Open PRs against **`dev`** (`--base dev`), never `main`.
+
+---
+
 ## How the Fork Works
 
 ```

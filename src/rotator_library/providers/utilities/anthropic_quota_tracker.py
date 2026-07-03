@@ -270,6 +270,12 @@ class AnthropicQuotaTracker:
             # Get auth header from the OAuth base class
             auth_headers = await self.get_anthropic_auth_header(credential_path)
 
+            # Claude Code's User-Agent is required here: without it Anthropic
+            # aggressively rate-limits /api/oauth/usage and returns persistent
+            # HTTP 429s (anthropics/claude-code#31021). Imported lazily to avoid
+            # a circular import (anthropic_provider imports this mixin).
+            from ..anthropic_provider import ANTHROPIC_USER_AGENT
+
             proxy_kwargs = {}
             if hasattr(self, "_build_proxy_client_kwargs"):
                 proxy_kwargs = self._build_proxy_client_kwargs(credential_path)
@@ -279,6 +285,7 @@ class AnthropicQuotaTracker:
                     headers={
                         **auth_headers,
                         "anthropic-beta": ANTHROPIC_BETA_HEADER,
+                        "user-agent": ANTHROPIC_USER_AGENT,
                     },
                     timeout=5.0,
                 )

@@ -60,3 +60,26 @@ Notes:
 - `/v1/models` endpoint automatically includes default aliases via
   `get_canonical_models()`.
 - Ref: b3nw/LLM-API-Key-Proxy#97
+
+## 2026-07-03 — Skip alias models already listed by their provider
+
+Target: `fix(models): skip alias models already listed by their provider`
+Files:
+- `src/proxy_app/main.py`
+
+Working commits before autosquash:
+- `8f4c5078 fix(models): skip alias models already listed by their provider`
+
+Verification:
+- `uv run python3 -m py_compile src/proxy_app/main.py` — passed
+- `uv run ruff check src/proxy_app/main.py --select F401,F811,F821,E9` — passed
+
+Notes:
+- `list_models` was appending all canonical alias model names unconditionally,
+  causing duplicates when the provider already returned the same model under its
+  prefixed name (e.g. `anthropic/claude-opus-4-6` from the provider plus bare
+  `claude-opus-4-6` from the alias registry).
+- Fix: before appending an alias, resolve its targets and skip if any target's
+  `full_model` is already present in the discovered `model_ids` set.
+- This prevents `/v1/models` from returning duplicate entries without breaking
+  aliases that route to providers not yet discovered.

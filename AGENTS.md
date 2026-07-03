@@ -234,9 +234,12 @@ the topic-prefix commit message to preserve the linear stack.
 3. **NEVER merge branches into dev.** Dev is a linear branch. PRs must use
    **Squash and merge** (not merge commit, not rebase-merge).
 
-4. **One commit per feature area on dev.** The PR squash-merge produces a single
-   commit. If fixing something in an existing area, the squash commit replaces
-   the existing one via the linear stack convention.
+4. **One commit per PR; group by feature area on dev.** The PR squash-merge
+   produces a single commit. Squash-merge **appends** that commit to `dev` — it
+   does not rewrite or replace the prior commit for the same area, which stays in
+   history. When a feature area legitimately has more than one commit, register
+   each subject under that feature key in `.fork/stack.yml`
+   (`allowed_duplicate_features`) and document the split in the feature ledger.
 
 5. **Keep the stack ordered.** Independent providers come first, shared
    infrastructure (`core`) in the middle, cross-cutting features (`tui`,

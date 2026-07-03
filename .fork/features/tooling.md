@@ -66,6 +66,12 @@ Notes:
 - This commit was originally authored and pushed to `fix/agents-docs` before
   `dev` advanced further; it is re-applied here as a clean cherry-pick onto
   current `dev` (same content, new hash) rather than reusing the stale branch.
+- Review follow-up (Kilo bot, PR #108): reworded Rule 4. The prior text said a
+  squash-merge for an existing area "replaces the existing one," which is
+  incorrect — squash-merge *appends* a new commit and the prior one stays on
+  `dev`. Rule 4 now describes append-and-allow semantics and points at
+  `allowed_duplicate_features` in `.fork/stack.yml` as the mechanism for
+  legitimately having more than one commit per feature key.
 
 ## 2026-07-03 — Scope fork-stack gate to canonical branch; tolerate transient commits
 
@@ -74,9 +80,6 @@ Files:
 - `.githooks/pre-commit`
 - `.fork/check-stack.py`
 - `.fork/stack.yml`
-
-Working commits before autosquash:
-- `fix(tooling): scope fork-stack gate to canonical branch and tolerate transient commits`
 
 Final stack commit:
 - `d7d22654 fix(tooling): scope fork-stack gate to canonical branch and tolerate transient commits`

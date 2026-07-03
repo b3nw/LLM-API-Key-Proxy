@@ -171,3 +171,34 @@ Notes:
 - `_BILLING_SALT`, `_CLI_VERSION` (env `ANTHROPIC_CLI_VERSION`), and
   `_CLAUDE_CODE_ENTRYPOINT` (env `CLAUDE_CODE_ENTRYPOINT`) drive the billing header.
 - Ref: b3nw/LLM-API-Key-Proxy#104
+
+## 2026-07-03 — Send Claude Code User-Agent on the OAuth usage/quota fetch
+
+Target: `feat(anthropic): add OAuth support and handle streaming nulls`
+Files:
+- `src/rotator_library/providers/utilities/anthropic_quota_tracker.py`
+
+Changes:
+- `fetch_quota_from_api()` now sends `user-agent: claude-code/<version>` on the
+  `GET https://api.anthropic.com/api/oauth/usage` request (previously it sent
+  only `Authorization` + `anthropic-beta: oauth-2025-04-20`).
+- The User-Agent is imported lazily from `anthropic_provider.ANTHROPIC_USER_AGENT`
+  inside the method to keep a single source of truth (env var
+  `ANTHROPIC_CLI_USER_AGENT`, default `claude-code/2.1.195`) while avoiding a
+  circular import — `anthropic_provider` imports this quota-tracker mixin.
+
+Rationale:
+- Anthropic aggressively rate-limits `/api/oauth/usage` when the request omits a
+  Claude Code User-Agent, returning persistent HTTP 429 `rate_limit_error`
+  responses (anthropics/claude-code#31021). The Messages API path already sends
+  this header (`anthropic_provider.py`), but the background quota refresh did not,
+  which surfaced as intermittent `status="error"` / `HTTP 429` quota snapshots.
+
+Verification:
+- `uv run python3 -m py_compile src/rotator_library/providers/utilities/anthropic_quota_tracker.py` — passed
+- `uv run ruff check ... --select F401,F811,F821,E9` — passed
+- `uv run python3 -c "import ... AnthropicProvider, ANTHROPIC_USER_AGENT; import ... AnthropicQuotaTracker"` — no circular import, UA resolves to claude-code/2.1.195
+
+Notes:
+- Refs: anthropics/claude-code#31021 (429 without UA), anthropics/claude-code#34348
+  (enterprise usage not exposed by this endpoint).

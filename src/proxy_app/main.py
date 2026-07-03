@@ -1576,10 +1576,21 @@ async def list_models(
         model_ids = await client.get_all_available_models(grouped=False)
 
 
-    # Append canonical alias model names (cross-provider routing)
+    # Append canonical alias model names (cross-provider routing),
+    # but skip aliases whose provider-prefixed target is already
+    # listed (e.g. skip bare "claude-opus-4-6" when
+    # "anthropic/claude-opus-4-6" was discovered by the provider).
     alias_models = client.alias_registry.get_canonical_models()
     if alias_models:
-        model_ids = list(model_ids) + alias_models
+        existing = set(model_ids)
+        deduped_aliases = []
+        for canon in alias_models:
+            targets = client.alias_registry.resolve(canon)
+            if targets and any(t.full_model in existing for t in targets):
+                continue
+            deduped_aliases.append(canon)
+        if deduped_aliases:
+            model_ids = list(model_ids) + deduped_aliases
 
     # Append smart "latest" virtual model names
     latest_models = client.latest_registry.get_virtual_models()

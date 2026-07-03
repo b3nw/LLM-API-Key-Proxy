@@ -345,6 +345,10 @@ class CredentialState:
     # Metadata
     created_at: Optional[float] = None
     last_updated: Optional[float] = None
+    # Timestamp of the last successful quota-baseline refresh (set only by
+    # update_quota_baseline). Distinct from last_updated which is bumped on
+    # every request by the tracking engine.
+    quota_last_refreshed: Optional[float] = None
 
     def get_cooldown(
         self, model_or_group: Optional[str] = None

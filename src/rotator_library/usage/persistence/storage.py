@@ -462,6 +462,7 @@ class UsageStorage:
                 max_concurrent=max_concurrent,
                 created_at=data.get("created_at"),
                 last_updated=data.get("last_updated"),
+                quota_last_refreshed=data.get("quota_last_refreshed"),
             )
 
         except Exception as e:
@@ -524,4 +525,6 @@ class UsageStorage:
             "created_at_human": _format_timestamp(state.created_at),
             "last_updated": state.last_updated,
             "last_updated_human": _format_timestamp(state.last_updated),
+            "quota_last_refreshed": state.quota_last_refreshed,
+            "quota_last_refreshed_human": _format_timestamp(state.quota_last_refreshed),
         }

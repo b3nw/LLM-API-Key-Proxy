@@ -74,6 +74,11 @@ export interface CredentialStats {
   priority?: number
   status: "active" | "cooldown" | "exhausted" | "mixed" | "needs_reauth" | "error"
   active_requests: number
+  last_updated?: number | null
+  // Unix seconds of the last successful quota-baseline refresh (set only by
+  // update_quota_baseline, not by request tracking). Used to flag stale /
+  // rate-limited quota data for providers with polled quota.
+  quota_last_refreshed?: number | null
   totals: {
     request_count: number
     success_count: number

@@ -15,6 +15,7 @@ OAuth requests use:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -104,16 +105,122 @@ TOOL_PREFIX = "mcp_"
 
 
 def _prefix_tool_name(name: str) -> str:
-    """Prefix a tool name with mcp_ and capitalize the first letter.
+    """Ensure a tool name has the mcp_ prefix with PascalCase.
 
     Mirrors Claude Code's tool naming convention (e.g., read → mcp_Read).
-    The capitalization matches what the @cgaravitoq/pi-claude-code-auth
-    extension does — Anthropic's API expects PascalCase tool names with
-    the mcp_ prefix.
+    Anthropic's OAuth API requires that mcp_-prefixed tools have an uppercase
+    letter immediately after the prefix — lowercase causes a 400 rejection.
+
+    Handles both cases:
+    - Tool without prefix: read → mcp_Read
+    - Tool already prefixed but lowercase: mcp_read → mcp_Read
     """
     if not name:
         return name
+    if name.startswith(TOOL_PREFIX):
+        remainder = name[len(TOOL_PREFIX):]
+        if remainder:
+            return f"{TOOL_PREFIX}{remainder[0].upper()}{remainder[1:]}"
+        return name
     return f"{TOOL_PREFIX}{name[0].upper()}{name[1:]}"
+
+# =============================================================================
+# CLAUDE CODE PROTOCOL SIGNALS (OAuth identity emulation)
+# =============================================================================
+# The following functions mirror the @cgaravitoq/pi-claude-code-auth extension
+# to make OAuth requests look like genuine Claude Code sessions.
+# Without these signals, Anthropic applies stricter rate limits (429s).
+
+_BILLING_SALT = "59cf53e54c78"
+_CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
+_CLI_VERSION = os.environ.get("ANTHROPIC_CLI_VERSION", "2.1.195")
+_CLAUDE_CODE_ENTRYPOINT = os.environ.get("CLAUDE_CODE_ENTRYPOINT", "cli")
+
+
+def _extract_first_user_message_text(messages: List[Dict[str, Any]]) -> str:
+    """Extract text content from the first user message in the list."""
+    for msg in messages:
+        if msg.get("role") == "user":
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                texts = []
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        texts.append(part.get("text", ""))
+                return " ".join(texts) if texts else ""
+            return str(content) if content else ""
+    return ""
+
+
+def _compute_billing_header(messages: List[Dict[str, Any]]) -> str:
+    """Compute the Claude Code billing header (client attestation).
+
+    Mirrors the @cgaravitoq/pi-claude-code-auth implementation:
+    - cch: SHA256(first_user_message_text)[:5]
+    - suffix: SHA256(salt + sampled_chars + version)[:3]
+    - sampled_chars: chars at positions [4, 7, 20] of first user message text
+    """
+    text = _extract_first_user_message_text(messages)
+
+    cch = hashlib.sha256(text.encode("utf-8")).hexdigest()[:5]
+
+    sampled = "".join(
+        text[i] if i < len(text) else "0"
+        for i in [4, 7, 20]
+    )
+    suffix_input = f"{_BILLING_SALT}{sampled}{_CLI_VERSION}"
+    suffix = hashlib.sha256(suffix_input.encode("utf-8")).hexdigest()[:3]
+
+    return (
+        f"x-anthropic-billing-header: "
+        f"cc_version={_CLI_VERSION}.{suffix}; "
+        f"cc_entrypoint={_CLAUDE_CODE_ENTRYPOINT}; "
+        f"cch={cch};"
+    )
+
+
+def _build_claude_code_system(
+    messages: List[Dict[str, Any]],
+    original_system_prompt: Optional[str],
+) -> tuple:
+    """Build the system prompt array and potentially modify messages.
+
+    Returns (system_entries, messages) where system_entries is a list of
+    {"type": "text", "text": ...} entries for the Anthropic API system field,
+    and messages may have been modified to relocate the original system prompt.
+
+    The system array contains:
+    1. Billing header (client attestation) -- first entry
+    2. Claude Code identity string -- second entry
+    The original system prompt (if any) is moved to the first user message.
+    """
+    billing = _compute_billing_header(messages)
+
+    system_entries = [
+        {"type": "text", "text": billing},
+        {"type": "text", "text": _CLAUDE_CODE_IDENTITY},
+    ]
+
+    if original_system_prompt:
+        relocated = False
+        if messages and messages[0].get("role") == "user":
+            first_content = messages[0].get("content", "")
+            if isinstance(first_content, str):
+                messages[0]["content"] = f"{original_system_prompt}\n\n{first_content}"
+                relocated = True
+            elif isinstance(first_content, list):
+                messages[0]["content"] = [
+                    {"type": "text", "text": original_system_prompt}
+                ] + first_content
+                relocated = True
+        if not relocated:
+            system_entries.append({"type": "text", "text": original_system_prompt})
+
+    return system_entries, messages
+
+
 
 # Models available via OAuth subscription (Claude Pro/Max)
 OAUTH_MODELS = [
@@ -377,9 +484,7 @@ def _convert_openai_to_anthropic_messages(
                             input_data = {}
 
                     tool_name = func.get("name", "")
-                    # Add mcp_ prefix with PascalCase if not already present
-                    if not tool_name.startswith(TOOL_PREFIX):
-                        tool_name = _prefix_tool_name(tool_name)
+                    tool_name = _prefix_tool_name(tool_name)
 
                     content_blocks.append({
                         "type": "tool_use",
@@ -432,9 +537,7 @@ def _convert_tools_to_anthropic_format(
         if not name:
             continue
 
-        # Add mcp_ prefix with PascalCase if not already present
-        if not name.startswith(TOOL_PREFIX):
-            name = _prefix_tool_name(name)
+        name = _prefix_tool_name(name)
 
         anthropic_tools.append({
             "name": name,
@@ -446,9 +549,17 @@ def _convert_tools_to_anthropic_format(
 
 
 def _strip_tool_prefix(name: str) -> str:
-    """Strip mcp_ prefix from tool name if present."""
+    """Strip mcp_ prefix and reverse PascalCase applied by _prefix_tool_name.
+
+    Restores the original tool name as sent by the client:
+    - mcp_Read → read (original: read)
+    - mcp_Outline_get_document → outline_get_document (original: mcp_outline_get_document)
+    """
     if name.startswith(TOOL_PREFIX):
-        return name[len(TOOL_PREFIX):]
+        remainder = name[len(TOOL_PREFIX):]
+        if remainder and remainder[0].isupper():
+            return f"{remainder[0].lower()}{remainder[1:]}"
+        return remainder
     return name
 
 
@@ -694,8 +805,11 @@ class AnthropicProvider(AnthropicOAuthBase, AnthropicQuotaTracker, ProviderInter
             "messages": anthropic_messages,
         }
 
-        if system_prompt:
-            payload["system"] = system_prompt
+        system_entries, anthropic_messages = _build_claude_code_system(
+            anthropic_messages, system_prompt
+        )
+        payload["system"] = system_entries
+        payload["messages"] = anthropic_messages
 
         if anthropic_tools:
             payload["tools"] = anthropic_tools

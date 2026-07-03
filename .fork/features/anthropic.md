@@ -131,3 +131,43 @@ Notes:
 - The `ANTHROPIC_BETA_HEADER` constant is kept for token refresh requests
   that don't have model context. It uses the base betas only.
 - Ref: b3nw/LLM-API-Key-Proxy#97
+
+## 2026-07-03 — Complete pi-agent protocol emulation and tool-name round-trip
+
+Target: `fix(anthropic): mirror pi-agent OAuth headers and tool naming`
+Files:
+- `src/rotator_library/providers/anthropic_provider.py`
+
+Changes:
+- Implemented the protocol-emulation items deferred in the 2026-07-01
+  "Mirror pi-agent OAuth headers and tool naming" entry:
+  - `_compute_billing_header()` — Claude Code client attestation
+    (`x-anthropic-billing-header`: cc_version / cc_entrypoint / cch), mirroring
+    `@cgaravitoq/pi-claude-code-auth`.
+  - `_build_claude_code_system()` — builds the `system` array (billing header +
+    Claude Code identity) and relocates any original system prompt into the first
+    user message. `handle_oauth_completion()` now sets `payload["system"]` to
+    these entries.
+  - `_extract_first_user_message_text()` helper.
+- `_prefix_tool_name()` now also normalizes an already-prefixed but lowercase
+  tool (`mcp_read` → `mcp_Read`), not just unprefixed names — Anthropic's OAuth
+  API rejects (400) `mcp_`-prefixed tools without an uppercase letter after the
+  prefix. Call sites simplified to always route through the helper.
+- `_strip_tool_prefix()` now reverses the PascalCase applied on the way in
+  (`mcp_Read` → `read`), completing the follow-up flagged in the 2026-07-01 entry.
+
+Rationale:
+- The OAuth identity signals (billing header, Claude Code identity system prompt,
+  system-prompt relocation) reduce stricter rate limiting on OAuth sessions; the
+  earlier change added them as "skipped for now" pending validation.
+- Tool names must survive a round-trip: prefixed+PascalCased on the way to
+  Anthropic, restored to the client's original on the way back.
+
+Verification:
+- `uv run python3 -m py_compile src/rotator_library/providers/anthropic_provider.py` — passed
+- `uv run ruff check src/rotator_library/providers/anthropic_provider.py --select F401,F811,F821,E9` — passed
+
+Notes:
+- `_BILLING_SALT`, `_CLI_VERSION` (env `ANTHROPIC_CLI_VERSION`), and
+  `_CLAUDE_CODE_ENTRYPOINT` (env `CLAUDE_CODE_ENTRYPOINT`) drive the billing header.
+- Ref: b3nw/LLM-API-Key-Proxy#104

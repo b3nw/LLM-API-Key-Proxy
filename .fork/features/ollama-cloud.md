@@ -12,11 +12,8 @@ Files:
 - `src/rotator_library/providers/utilities/ollama_cloud_quota_tracker.py`
 - `.fork/features/ollama-cloud.md`
 
-Working commits before autosquash:
-- pending
-
-Final stack commit after autosquash:
-- pending
+Final stack commit:
+- `c9f51ee6 feat(ollama-cloud): add Ollama Cloud provider with dual-window quota tracking` (landed via PR #87)
 
 Verification:
 - `uv run python3 -m py_compile src/rotator_library/providers/ollama_cloud_provider.py` — passed

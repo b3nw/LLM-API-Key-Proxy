@@ -18,14 +18,11 @@ Files:
 - `.fork/features/gemini-cli.md`
 - `.fork/check-stack.py`
 
-Working commits before autosquash:
-- pending
-
-Final stack commit after autosquash:
-- pending
+Final stack commit:
+- `5f7cbf99 feat(tooling): add AGENTS.md and .agent/ config for linear stack workflow`
 
 Verification:
-- pending
+- `uv run python .fork/check-stack.py` — passed at the time this feature landed.
 
 Notes:
 - Replaces local-only workspace ledgers as the canonical feature history with repo-tracked `.fork/` metadata.

@@ -46,6 +46,12 @@ rules:
     tooling:
       - "feat(tooling): add AGENTS.md and .agent/ config for linear stack workflow"
       - "fix(tooling): scope fork-stack gate to canonical branch and tolerate transient commits"
+    # `fix(models):` is a one-off topic prefix that doesn't match the registered
+    # `model-routing` feature id, but its ledger entry lives in
+    # .fork/features/model-routing.md. Key the exception by the literal prefix
+    # text since that's what check-stack.py matches against.
+    models:
+      - "fix(models): skip alias models already listed by their provider"
   # Exact commit subjects permitted in the stack without a feature mapping.
   # Legacy batch commits that predate the per-feature stack convention; do not
   # add new bare-`feat:` commits here — use a scoped `feat(<feature>):` prefix.

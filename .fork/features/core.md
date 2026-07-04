@@ -116,3 +116,29 @@ Notes:
   provider that uses multi-segment display keys.
 - Context window override loop is guarded with try/except and only runs for
   providers known to supply `get_model_context_overrides()`.
+
+## 2026-07-03 — Add OAUTH_DISABLE_REFRESH_PROVIDERS env var
+
+Target: `feat(core): infrastructure improvements - latest aliases, error standardization, and utilities`
+Files:
+- `src/rotator_library/background_refresher.py`
+
+Working commits before autosquash:
+- `fixup! feat(core): infrastructure improvements - latest aliases, error standardization, and utilities`
+
+Verification:
+- `uv run python3 -m py_compile src/rotator_library/background_refresher.py` — passed
+- `uv run ruff check src/rotator_library/background_refresher.py --select F401,F811,F821,E9` — passed
+- Hot-patched llm-proxy-dev: log confirms "OAuth refresh DISABLED for providers: anthropic"
+- Hot-patched llm-proxy (prod): token refresh continues normally for all providers
+
+Notes:
+- New env var `OAUTH_DISABLE_REFRESH_PROVIDERS` accepts a comma-separated list of
+  provider names (case-insensitive) whose OAuth tokens should NOT be proactively
+  refreshed by the background refresher loop.
+- Use case: when prod and dev share the same Anthropic credential, only prod should
+  refresh the token. Dev was racing prod and invalidating the refresh token.
+- The setting only affects the periodic `proactively_refresh()` calls in the main
+  background refresher loop. On-demand refresh (triggered by expired token during
+  a request) still works for disabled providers — this only prevents the background
+  timer from preemptively claiming the refresh.

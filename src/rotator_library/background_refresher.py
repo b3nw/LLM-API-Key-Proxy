@@ -58,6 +58,19 @@ class BackgroundRefresher:
             )
             self._interval = DEFAULT_OAUTH_REFRESH_INTERVAL
 
+        # Providers whose OAuth tokens should NOT be proactively refreshed.
+        # Comma-separated list, e.g. "anthropic,copilot"
+        disable_str = os.getenv("OAUTH_DISABLE_REFRESH_PROVIDERS", "").strip()
+        self._disabled_refresh_providers: set = (
+            {p.strip().lower() for p in disable_str.split(",") if p.strip()}
+            if disable_str
+            else set()
+        )
+        if self._disabled_refresh_providers:
+            lib_logger.info(
+                f"OAuth refresh DISABLED for providers: {', '.join(sorted(self._disabled_refresh_providers))}"
+            )
+
     def start(self):
         """Starts the background refresh task."""
         if self._task is None:
@@ -279,6 +292,8 @@ class BackgroundRefresher:
             try:
                 oauth_configs = self._client.get_oauth_credentials()
                 for provider, paths in oauth_configs.items():
+                    if provider.lower() in self._disabled_refresh_providers:
+                        continue
                     provider_plugin = self._client._get_provider_instance(provider)
                     if provider_plugin and hasattr(
                         provider_plugin, "proactively_refresh"

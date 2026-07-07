@@ -15,7 +15,9 @@ Breakage here means:
 NO network calls, NO API keys needed.
 """
 
+import asyncio
 import os
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from rotator_library.model_alias_registry import (
@@ -203,9 +205,24 @@ class TestDefaultCodexAliases:
             registry = ModelAliasRegistry()
             for model in [
                 "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex",
+                "gpt-5.2", "codex-auto-review",
             ]:
                 targets = registry.resolve(model)
                 assert targets is not None, f"{model} should have a default alias"
+                assert len(targets) == 1
+                assert targets[0].provider == "codex"
+                assert targets[0].model_name == model
+
+    def test_default_codex_openai_compat_aliases_loaded(self):
+        """OpenAI-prefixed Codex compatibility aliases route internally to codex."""
+        with patch.dict(os.environ, self._env_without_model_aliases(), clear=True):
+            registry = ModelAliasRegistry()
+            for model in [
+                "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex",
+                "gpt-5.2", "codex-auto-review",
+            ]:
+                targets = registry.resolve(f"openai/{model}")
+                assert targets is not None, f"openai/{model} should have a default alias"
                 assert len(targets) == 1
                 assert targets[0].provider == "codex"
                 assert targets[0].model_name == model
@@ -215,8 +232,100 @@ class TestDefaultCodexAliases:
         with patch.dict(os.environ, self._env_without_model_aliases(), clear=True):
             registry = ModelAliasRegistry()
             canonical = set(registry.get_canonical_models())
-            expected = {"gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"}
+            expected = {
+                "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex",
+                "gpt-5.2", "codex-auto-review", "openai/gpt-5.5",
+                "openai/gpt-5.4", "openai/gpt-5.4-mini",
+                "openai/gpt-5.3-codex", "openai/gpt-5.2",
+                "openai/codex-auto-review",
+            }
             assert expected.issubset(canonical)
+
+    def test_openai_prefixed_codex_alias_uses_codex_when_available(self, tmp_path):
+        """openai/gpt-5.x compatibility IDs dispatch to codex credentials when present."""
+        from rotator_library import RotatingClient
+
+        captured = {}
+
+        async def fake_execute(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace()
+
+        with patch(
+            "rotator_library.client.rotating_client.CredentialManager.discover_and_prepare",
+            return_value={},
+        ):
+            client = RotatingClient(
+                data_dir=tmp_path,
+                api_keys={"openai": ["openai-key"], "codex": ["codex-key"]},
+                configure_logging=False,
+            )
+
+        async def run_test():
+            try:
+                with patch.object(client._cross_provider_executor, "execute", fake_execute):
+                    await client.acompletion(
+                        model="openai/gpt-5.5",
+                        messages=[{"role": "user", "content": "hi"}],
+                    )
+            finally:
+                await client.close()
+
+        asyncio.run(run_test())
+
+        assert captured["canonical_model"] == "openai/gpt-5.5"
+        assert [target.full_model for target in captured["targets"]] == ["codex/gpt-5.5"]
+
+    def test_openai_prefixed_alias_does_not_hijack_without_codex(self, tmp_path):
+        """Regular OpenAI routing is preserved when no codex credentials exist."""
+        from rotator_library import RotatingClient
+
+        captured = {}
+
+        async def fake_acompletion(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(usage=None, response=SimpleNamespace(headers={}))
+
+        with patch(
+            "rotator_library.client.rotating_client.CredentialManager.discover_and_prepare",
+            return_value={},
+        ):
+            client = RotatingClient(
+                data_dir=tmp_path,
+                api_keys={"openai": ["openai-key"]},
+                configure_logging=False,
+            )
+
+        async def run_test():
+            try:
+                with patch(
+                    "rotator_library.client.executor.litellm.acompletion",
+                    fake_acompletion,
+                ):
+                    await client.acompletion(
+                        model="openai/gpt-5.5",
+                        messages=[{"role": "user", "content": "hi"}],
+                    )
+            finally:
+                await client.close()
+
+        asyncio.run(run_test())
+
+        assert captured["api_key"] == "openai-key"
+        assert captured["model"] == "openai/gpt-5.5"
+
+    def test_codex_provider_exposes_openai_prefixed_models(self):
+        """Codex model discovery uses OpenAI-prefixed public IDs."""
+        from rotator_library.providers.codex_provider import CodexProvider
+
+        with patch(
+            "rotator_library.providers.codex_provider.get_available_models",
+            return_value=["gpt-5.5", "gpt-5.4-mini"],
+        ):
+            provider = CodexProvider()
+            models = asyncio.run(provider.get_models("codex-key", None))
+
+        assert models == ["openai/gpt-5.5", "openai/gpt-5.4-mini"]
 
 
 class TestModelLatestRegistry:

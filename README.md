@@ -55,7 +55,7 @@ MODEL_LATEST_nanogpt=nanogpt/glm-5  # "latest" resolves to current best GLM-5
 
 `POST /responses` is also supported as a compatibility alias for clients that append `/responses` to their configured base URL or cannot safely target a `/v1` base path.
 
-Default bare Codex aliases (`gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, and `gpt-5.3-codex`) route to the Codex provider, matching clients that send unprefixed Codex model IDs.
+Codex models are exposed with OpenAI-prefixed public IDs such as `openai/gpt-5.5`, while still routing internally through the Codex OAuth provider. Bare Codex aliases (`gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.2`, and `codex-auto-review`) are also supported for clients that send unprefixed model IDs.
 
 ### Monitoring & Health Endpoints
 

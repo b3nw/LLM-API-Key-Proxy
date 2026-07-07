@@ -1236,7 +1236,7 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
     async def get_models(self, api_key: str, client: httpx.AsyncClient) -> List[str]:
         """Return available Codex models (dynamically fetched from GitHub)."""
         models = get_available_models()
-        return [f"codex/{m}" for m in models]
+        return [f"openai/{m}" for m in models]
 
     def get_credential_tier_name(self, credential: str) -> Optional[str]:
         """Get tier name for a credential.
@@ -2172,4 +2172,3 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
             return f"EXHAUSTED (resets in {reset_str})"
         else:
             return f"{remaining:.0f}% remaining (resets in {reset_str})"
-

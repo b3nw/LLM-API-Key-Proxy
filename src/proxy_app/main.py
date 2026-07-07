@@ -1591,7 +1591,10 @@ async def list_models(
         deduped_aliases = []
         for canon in alias_models:
             targets = client.alias_registry.resolve(canon)
-            if targets and any(t.full_model in existing for t in targets):
+            target_already_listed = bool(
+                targets and any(t.full_model in existing for t in targets)
+            )
+            if canon in existing or target_already_listed:
                 continue
             deduped_aliases.append(canon)
         if deduped_aliases:
@@ -1619,8 +1622,8 @@ async def list_models(
                 if codex_ctx:
                     for entry in enriched_data:
                         eid = entry.get("id", "")
-                        if eid.startswith("codex/"):
-                            slug = eid[len("codex/"):]
+                        if eid.startswith(("codex/", "openai/")):
+                            slug = eid.split("/", 1)[1]
                             ctx_win = codex_ctx.get(slug)
                             if ctx_win:
                                 entry["context_window"] = ctx_win
@@ -1727,10 +1730,10 @@ async def get_model(
             info = model_info_service.get_model_info(model_id)
             if info:
                 result = info.to_dict()
-                if model_id.startswith("codex/"):
+                if model_id.startswith(("codex/", "openai/")):
                     try:
                         from rotator_library.providers.codex_provider import get_model_context_limits
-                        ctx_win = get_model_context_limits().get(model_id[len("codex/"):])
+                        ctx_win = get_model_context_limits().get(model_id.split("/", 1)[1])
                         if ctx_win:
                             result["context_window"] = ctx_win
                             result["context_length"] = ctx_win

@@ -604,21 +604,24 @@ class RotatingClient:
 
         is_x_ai = (provider == "x-ai")
 
-        if not provider:
-            alias_targets = self._alias_registry.resolve(model)
-            if alias_targets:
-                lib_logger.info(
-                    f"Model '{model}' matched alias → routing across "
-                    f"{len(alias_targets)} providers"
-                )
-                return await self._cross_provider_executor.execute(
-                    canonical_model=model,
-                    targets=alias_targets,
-                    request=request,
-                    pre_request_callback=pre_request_callback,
-                    **kwargs,
-                )
+        alias_targets = self._alias_registry.resolve(model)
+        alias_target_available = bool(
+            alias_targets and any(t.provider in self.all_credentials for t in alias_targets)
+        )
+        if alias_targets and (not provider or alias_target_available):
+            lib_logger.info(
+                f"Model '{model}' matched alias → routing across "
+                f"{len(alias_targets)} providers"
+            )
+            return await self._cross_provider_executor.execute(
+                canonical_model=model,
+                targets=alias_targets,
+                request=request,
+                pre_request_callback=pre_request_callback,
+                **kwargs,
+            )
 
+        if not provider:
             raise ValueError(
                 f"Invalid model format or no credentials for provider: {model}"
             )

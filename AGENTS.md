@@ -63,10 +63,10 @@ topic prefix is treated as a stable feature identifier.
 
 ### Feature Tracking Ledger
 
-Because `dev` is rewritten with autosquash, git history on `dev` only shows the
-current clean feature stack. It does **not** preserve the incremental commits,
+Because PRs are squash-merged into `dev`, git history on `dev` only shows the
+final squashed commits. It does **not** preserve the incremental commits,
 rationale, verification notes, or deployment observations that happened while a
-feature evolved.
+feature evolved on its branch.
 
 To preserve that history across contributors and developer workspaces, the
 canonical feature ledger is committed to this repository under:
@@ -74,7 +74,7 @@ canonical feature ledger is committed to this repository under:
 ```text
 .fork/
   stack.yml                  # shared feature IDs, stack order, file ownership
-  check-stack.py             # validation before autosquash/push
+  check-stack.py             # stack validation (CI and local)
   features/
     <feature-key>.md         # append-only shared feature history
 ```
@@ -84,63 +84,10 @@ Local workspace state under paths such as
 notes, run logs, reviews, and temporary artifacts, but it is **not canonical**.
 Do not rely on local state as the only record of a durable feature change.
 
-`<feature-key>` should match the stable topic prefix when possible:
+`<feature-key>` matches the topic prefix area (e.g. `feat(codex):` → `codex`).
+See `.fork/stack.yml` for the full registry of feature IDs and file ownership.
+See existing entries in `.fork/features/` for the ledger format.
 
-| Commit Prefix | Feature Key |
-|---------------|-------------|
-| `feat(xai):` | `xai` |
-| `feat(codex):` | `codex` |
-| `feat(webui):` | `webui` |
-| `feat(core):` | `core` |
-| `feat(model-routing):` | `model-routing` |
-| `feat(tests):` | `tests` |
-
-Each `.fork/features/<feature-key>.md` entry should record:
-
-- date and short title
-- target commit/topic prefix
-- files changed
-- temporary/fixup commit hashes, if any existed before autosquash
-- final rewritten stack commit hash after autosquash, if known
-- verification commands and outcomes
-- rationale, compatibility notes, and follow-up risks
-
-Example:
-
-```markdown
-## 2026-06-18 — Add xAI device-code OAuth controls
-
-Target: `feat(xai): add xAI Grok OAuth provider with PKCE and Device Code flows`
-Files:
-- `src/llm_api_key_proxy/providers/xai_provider.py`
-- `webui/src/...`
-
-Working commits before autosquash:
-- `abc1234 fixup! feat(xai): ...`
-
-Final stack commit after autosquash:
-- `02f7470 feat(xai): ...`
-
-Verification:
-- `uv run python3 -m py_compile ...` — passed
-- `cd webui && npm run build` — passed
-
-Notes:
-- Preserves `% used + reset` quota display for undocumented xAI units.
-```
-
-If the feature file does not exist yet, create it before pushing the code
-change. Keep local state for bulky logs and review artifacts; summarize the
-durable outcome in `.fork/features/<feature-key>.md`.
-
-#### Feature Registry
-
-`.fork/stack.yml` is the machine-readable source of truth for feature ownership,
-stack order, allowed historical exceptions, and file ownership. It replaces the
-old local-only `feature-registry.yml` idea.
-
-When `.fork/stack.yml` and the manual table below disagree, stop and reconcile
-them before editing. Do not silently choose one.
 ---
 
 ## Making a Change
@@ -167,9 +114,24 @@ Match files to commits:
 | `model_alias_registry.py`, `cross_provider_executor.py` | `feat(model-routing):` |
 | `error_handler.py`, `error_tracker.py` | `feat(core):` |
 | `credential_manager.py`, `credential_tool.py` | `feat(core):` |
-| `tests/*` | `feat: add local test suite` |
+| `tests/*` | `feat(tests):` |
 
-### Step 2: Lint all changed Python files before staging
+### Step 2: Create a feature branch in a worktree
+
+All development happens on **feature branches**, never directly on `dev`.
+Use a git worktree so you can work on multiple branches without switching:
+
+```bash
+# Branch naming: <type>/<area>-<short-description>
+git worktree add worktrees/fix-codex-credits -b fix/codex-credits dev
+cd worktrees/fix-codex-credits
+```
+
+Branch name conventions:
+- `fix/<area>-<description>` — bug fixes to existing features
+- `feat/<area>-<description>` — new features or enhancements
+
+### Step 3: Lint all changed Python files before committing
 
 **MANDATORY — do not skip this step.** Run the following on every `.py` file you touched:
 
@@ -198,28 +160,37 @@ Common things to verify after a change:
 - No import statements were accidentally deleted while editing.
 - `py_compile` exits 0.
 
-
-### Step 3: Commit with the `fixup!` prefix
+### Step 4: Commit with the proper topic prefix
 
 Stage only the files that belong to the change. Do **not** use `git add -A` in
 this repository: `worktrees/` is intentionally untracked for local git worktrees,
 and `.dev` symlinks or other workspace artifacts may also exist locally.
 
+Use the standard topic prefix form for the commit message. This is the message
+that will appear on `dev` after the PR is squash-merged:
+
 ```bash
-# Edit files...
 git add src/path/to/file.py tests/path/to/test_file.py
-# or, for documentation-only changes:
-# git add AGENTS.md
-git commit -m "fixup! feat(codex): Responses API rewrite, dynamic model discovery, and OAuth exports"
+git commit -m "fix(codex): don't block routing when paid credits bypass window exhaustion"
 ```
 
-> **CRITICAL:** The text after `fixup!` must **exactly match** the first line of the
-> target commit. Copy it from `git log --oneline`.
+For new features:
 
-### Step 4: Update the feature ledger
+```bash
+git commit -m "feat(newprovider): add SomeProvider with quota tracking"
+```
 
-After creating the fixup commit, but before autosquashing or pushing, update the
-repo-tracked per-feature ledger for the owning feature under:
+> **CRITICAL:** The commit message must use a recognized topic prefix:
+> `feat(<area>):`, `fix(<area>):`. This becomes the squash-merge commit
+> message on `dev` and feeds the automated release changelog.
+
+You may have multiple commits on the feature branch during development. They
+will all be squashed into a single commit when the PR is merged.
+
+### Step 5: Update the feature ledger
+
+Before pushing, update the repo-tracked per-feature ledger for the owning
+feature under:
 
 ```text
 .fork/features/<feature-key>.md
@@ -227,8 +198,7 @@ repo-tracked per-feature ledger for the owning feature under:
 
 For small documentation-only changes, the ledger entry may be brief. For code,
 behavior, release, quota, auth, provider, or WebUI changes, include the files
-changed, verification commands, and the temporary/fixup commit hash that will
-disappear after autosquash.
+changed, verification commands, and the branch name.
 
 If this is a new feature area:
 
@@ -238,139 +208,65 @@ If this is a new feature area:
 3. Keep bulky logs/reviews in local workspace state if useful, but summarize the
    durable outcome in `.fork/features/<feature-key>.md`.
 
-Stage the `.fork/` metadata with the code/docs change so other contributors see
-it after the rewritten `dev` branch is pushed.
-
-### Step 5: Fold it into the correct commit
+### Step 6: Push the branch and hand off to the user
 
 ```bash
-GIT_SEQUENCE_EDITOR=: git rebase -i --autosquash upstream/dev
+git push -u origin fix/codex-credits
 ```
 
-This automatically moves your fixup commit next to its target and squashes them.
+> **IMPORTANT:** Agents do NOT create PRs. Push the branch and report the URL.
+> The user creates the PR on GitHub, sets the squash-merge commit message to the
+> topic-prefix form, and merges.
 
-### Step 6: Verify the rebased stack
-
-After autosquash/rebase, rerun the checks that cover the changed files before
-pushing the rewritten branch. At minimum, rerun the targeted Python checks from
-Step 2 for touched Python files. If the change touches WebUI or release tooling,
-also run the relevant build/test command for that area.
-
-Examples:
-
-```bash
-uv run python3 -m py_compile src/path/to/file.py
-uv run ruff check src/path/to/file.py --select F401,F811,F821,E9
-cd webui && npm run build
-```
-
-Record the post-rebase verification outcome in the relevant
-`.fork/features/<feature-key>.md` entry. Then run the shared stack validator:
-
-```bash
-uv run python .fork/check-stack.py
-```
-
-### Step 7: Record final stack hash and push
-
-After verification passes, record the final rewritten commit hash in the relevant
-`.fork/features/<feature-key>.md` entry if it is known:
-
-```bash
-git log --oneline upstream/dev..HEAD --grep='feat(xai)'
-```
-
-Then push:
-
-```bash
-git push origin dev --force-with-lease
-```
-
----
-
-## Adding an Entirely New Feature
-
-```bash
-# Just commit at the tip with a new prefix:
-git add src/path/to/new_feature.py tests/path/to/test_new_feature.py
-git commit -m "feat(newprovider): add SomeProvider with quota tracking"
-
-# Update the new feature's shared ledger before pushing
-$EDITOR .fork/features/<feature-key>.md
-
-# Verify the committed stack before pushing
-uv run python3 -m py_compile src/path/to/new_feature.py
-uv run ruff check src/path/to/new_feature.py --select F401,F811,F821,E9
-uv run python .fork/check-stack.py
-
-# Record the new stack commit hash in the ledger
-git log --oneline upstream/dev..HEAD --grep='feat(newprovider)'
-
-# Push
-git push origin dev --force-with-lease
-```
-
-No fixup needed — new features go at the end of the stack naturally, but the
-feature ledger is still required before pushing.
-
----
-
-## Upstream Sync
-
-When the upstream repository updates:
-
-```bash
-git fetch upstream
-git rebase upstream/dev
-# Resolve any conflicts in the specific commit that breaks
-git push origin dev --force-with-lease
-```
-
-Each commit is replayed one at a time. Conflicts are localized to the specific
-commit that touched the affected lines — resolve it there and continue.
+The user creates the PR targeting `dev`, then uses **Squash and merge** with
+the topic-prefix commit message to preserve the linear stack.
 
 ---
 
 ## Rules
 
-1. **NEVER add raw commits** without a topic prefix. Every commit must be
-   `feat(<area>):`, `fix(<area>):`, or `fixup! <exact target commit message>`.
+1. **NEVER commit directly to dev.** All changes go through feature branches
+   and PR squash-merge. The only exception is upstream syncs by the maintainer.
 
-2. **NEVER merge branches into dev.** Dev is a linear rebase-only branch.
+2. **Every commit message must have a topic prefix.** Use `feat(<area>):` or
+   `fix(<area>):`. This is the squash-merge message that lands on `dev`.
 
-3. **Always use `--force-with-lease`** when pushing dev (it's a rewritten branch).
+3. **NEVER merge branches into dev.** Dev is a linear branch. PRs must use
+   **Squash and merge** (not merge commit, not rebase-merge).
 
-4. **One commit per feature area.** If you're fixing something in an existing
-   area, use `fixup!` + autosquash to fold it back in.
+4. **One commit per PR; group by feature area on dev.** The PR squash-merge
+   produces a single commit. Squash-merge **appends** that commit to `dev` — it
+   does not rewrite or replace the prior commit for the same area, which stays in
+   history. When a feature area legitimately has more than one commit, register
+   each subject under that feature key in `.fork/stack.yml`
+   (`allowed_duplicate_features`) and document the split in the feature ledger.
 
 5. **Keep the stack ordered.** Independent providers come first, shared
    infrastructure (`core`) in the middle, cross-cutting features (`tui`,
    `model-routing`, `copilot`) at the end.
 
-6. **When a rebase conflict occurs during autosquash**, stop and resolve it
-   carefully. You can always compare with the current file content using
-   `git stash` to save your work and inspect.
-
-7. **Always lint Python files before committing.** Run `uv run python3 -m py_compile
+6. **Always lint Python files before pushing.** Run `uv run python3 -m py_compile
    <file>` and `uv run ruff check <file> --select F401,F811,F821,E9` on every file
    you changed. The pre-commit hook enforces this automatically, but treat it
    as a manual checklist item too — catching errors before `git add` is faster
    than fixing a broken deployment.
 
-8. **Keep topic prefixes stable.** The automated release changelog uses commit
+7. **Keep topic prefixes stable.** The automated release changelog uses commit
    messages as feature identifiers. Renaming a topic prefix (e.g.
    `feat(codex):` → `feat(openai-codex):`) causes the release notes to show
    both a "removed" entry and a "new" entry. If a rename is intentional, do it
    in a single rebase so the changelog shows both sides cleanly.
 
-9. **Update the repo-tracked feature ledger for every durable change.** Because
-   autosquash rewrites away incremental commits, `.fork/features/<feature>.md`
-   is the durable shared history of how a feature evolved. Do not autosquash or
-   push without recording the change there.
+8. **Update the repo-tracked feature ledger for every durable change.** The
+   `.fork/features/<feature>.md` files are the durable shared history of how
+   each feature evolved. Update before pushing the feature branch.
 
-10. **Treat local workspace state as non-canonical.** Local state directories are
+9. **Treat local workspace state as non-canonical.** Local state directories are
    useful for bulky logs, reviews, and scratch notes, but `.fork/stack.yml` and
    `.fork/features/*.md` are the shared records that must travel with the repo.
+
+10. **Agents do NOT create PRs.** Push the feature branch and report the URL
+    to the user. The user handles PR creation and merge.
 
 ---
 
@@ -383,33 +279,25 @@ git log --oneline upstream/dev..HEAD
 # Find which commit owns a file
 git log --oneline upstream/dev..HEAD -- path/to/file.py
 
-# Lint changed Python files (run BEFORE git add)
+# Create a feature branch in a worktree
+git worktree add worktrees/<branch-name> -b <type>/<area>-<desc> dev
+
+# Lint changed Python files (run BEFORE committing)
 uv run python3 -m py_compile src/path/to/file.py
 uv run ruff check src/path/to/file.py --select F401,F811,F821,E9
 
-# Stage only files that belong to this change, then make a fixup commit
-git add src/path/to/file.py tests/path/to/test_file.py
-git commit -m "fixup! <exact commit message from git log>"
+# Stage and commit with topic prefix
+git add src/path/to/file.py
+git commit -m "fix(codex): description of the fix"
 
-# Update shared feature ledger before autosquash/push
+# Update shared feature ledger
 $EDITOR .fork/features/<feature-key>.md
 
-# Fold it in
-GIT_SEQUENCE_EDITOR=: git rebase -i --autosquash upstream/dev
+# Push the feature branch (agent stops here)
+git push -u origin <type>/<area>-<desc>
 
-# Sync with upstream before recording final hashes
-git fetch upstream && git rebase upstream/dev
-
-# Verify the rebased stack before pushing
-uv run python3 -m py_compile src/path/to/file.py
-uv run ruff check src/path/to/file.py --select F401,F811,F821,E9
-uv run python .fork/check-stack.py
-
-# Record final rewritten stack hash in the ledger
-git log --oneline upstream/dev..HEAD --grep='<feature-prefix>'
-
-# Push
-git push origin dev --force-with-lease
+# User creates PR on GitHub → Squash and merge into dev
+# Squash commit message: "fix(codex): description of the fix"
 ```
 
 ## Additional References

@@ -46,6 +46,7 @@ rules:
     tooling:
       - "feat(tooling): add AGENTS.md and .agent/ config for linear stack workflow"
       - "fix(tooling): scope fork-stack gate to canonical branch and tolerate transient commits"
+      - "fix(tooling): update AGENTS.md to feature-branch PR workflow"
     # `fix(models):` is a one-off topic prefix that doesn't match the registered
     # `model-routing` feature id, but its ledger entry lives in
     # .fork/features/model-routing.md. Key the exception by the literal prefix

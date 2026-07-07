@@ -18,12 +18,9 @@ NO network calls, NO API keys needed.
 import os
 from unittest.mock import patch
 
-import pytest
-
 from rotator_library.model_alias_registry import (
     ModelAliasRegistry,
     AliasTarget,
-    DEFAULT_RETRY_MODE,
 )
 
 
@@ -181,6 +178,44 @@ class TestDefaultClaudeAliases:
                 "claude-opus-4-6", "claude-sonnet-4-6", "claude-sonnet-5",
                 "claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5",
             }
+            assert expected.issubset(canonical)
+
+
+class TestDefaultCodexAliases:
+    """Test built-in default Codex model aliases.
+
+    Codex desktop apps can send unprefixed model IDs such as ``gpt-5.5``.
+    Default aliases route those IDs through the proxy's Codex provider without
+    requiring per-install MODEL_ALIAS_* environment variables.
+    """
+
+    @staticmethod
+    def _env_without_model_aliases():
+        """Return env dict with MODEL_ALIAS_* vars stripped out."""
+        return {
+            k: v for k, v in os.environ.items()
+            if not k.startswith("MODEL_ALIAS_")
+        }
+
+    def test_default_codex_aliases_loaded(self):
+        """Default Codex model aliases resolve without env vars."""
+        with patch.dict(os.environ, self._env_without_model_aliases(), clear=True):
+            registry = ModelAliasRegistry()
+            for model in [
+                "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex",
+            ]:
+                targets = registry.resolve(model)
+                assert targets is not None, f"{model} should have a default alias"
+                assert len(targets) == 1
+                assert targets[0].provider == "codex"
+                assert targets[0].model_name == model
+
+    def test_default_codex_aliases_in_canonical_models(self):
+        """Default Codex aliases appear in get_canonical_models()."""
+        with patch.dict(os.environ, self._env_without_model_aliases(), clear=True):
+            registry = ModelAliasRegistry()
+            canonical = set(registry.get_canonical_models())
+            expected = {"gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"}
             assert expected.issubset(canonical)
 
 

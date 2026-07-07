@@ -83,3 +83,32 @@ Notes:
   `full_model` is already present in the discovered `model_ids` set.
 - This prevents `/v1/models` from returning duplicate entries without breaking
   aliases that route to providers not yet discovered.
+
+## 2026-07-07 — Add default Codex desktop model aliases
+
+Target: `feat(model-routing): MODEL_ALIASES and cross-provider rotation`
+Files:
+- `src/rotator_library/model_alias_registry.py`
+- `tests/test_model_alias.py`
+
+Working commits before autosquash:
+- (see fixup commit hash after commit)
+
+Verification:
+- `uv run --with pytest pytest tests/test_model_alias.py tests/test_proxy_endpoints.py` — passed
+- `uv run ruff check src/proxy_app/main.py src/rotator_library/model_alias_registry.py tests/test_model_alias.py tests/test_proxy_endpoints.py --select F401,F811,F821,E9` — passed
+- `uv run python3 -m py_compile src/proxy_app/main.py src/rotator_library/model_alias_registry.py tests/test_model_alias.py tests/test_proxy_endpoints.py` — passed
+
+Notes:
+- Added built-in default aliases for Codex desktop/OpenAI Codex clients that send
+  bare model IDs: `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, and `gpt-5.3-codex`.
+- Each alias routes to the existing Codex provider target with the same model ID,
+  e.g. `gpt-5.5` -> `codex/gpt-5.5` via `AliasTarget.full_model`.
+- This mirrors the existing built-in Claude aliases for clients that cannot or do
+  not prefix model IDs with a provider name.
+- Env vars still override defaults when operators need custom routing or
+  multi-provider failover.
+- Practical use case: Codex desktop/macOS apps and HumanLayer's OpenAI Codex
+  provider expose/send model IDs like `gpt-5.5` rather than `codex/gpt-5.5`;
+  without default aliases the proxy rejects those requests as invalid unprefixed
+  models before they can reach Codex credentials.

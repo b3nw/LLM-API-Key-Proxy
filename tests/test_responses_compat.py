@@ -16,6 +16,24 @@ class MockChatResponse:
     def model_dump(self):
         return self.data
 
+def parse_sse_events(raw):
+    events = []
+    for block in raw.strip().split("\n\n"):
+        if not block.strip():
+            continue
+        event_type = None
+        data_lines = []
+        for line in block.splitlines():
+            if line.startswith("event: "):
+                event_type = line[len("event: "):]
+            elif line.startswith("data: "):
+                data_lines.append(line[len("data: "):])
+        events.append({
+            "event": event_type,
+            "data": json.loads("\n".join(data_lines)),
+        })
+    return events
+
 def test_convert_responses_input_to_messages_string():
     result = convert_responses_input_to_messages("Hello!", instructions="Be helpful.")
     assert result == [
@@ -212,6 +230,107 @@ def test_responses_stream_converter():
     assert "response.output_text.done" in events_final
     assert "response.content_part.done" in events_final
     assert "response.completed" in events_final
+
+def test_responses_stream_converter_emits_reasoning_lifecycle():
+    converter = ResponsesStreamConverter("resp_123", "test-model")
+
+    chunk1 = {"model": "test-model", "choices": [{"delta": {"reasoning_content": "think "}}]}
+    events1 = parse_sse_events(converter.convert_chunk(f"data: {json.dumps(chunk1)}"))
+    event_types1 = [event["event"] for event in events1]
+
+    assert event_types1 == [
+        "response.created",
+        "response.in_progress",
+        "response.output_item.added",
+        "response.reasoning_summary_part.added",
+        "response.reasoning_summary_text.delta",
+    ]
+
+    added = events1[2]["data"]
+    part_added = events1[3]["data"]
+    delta = events1[4]["data"]
+    reasoning_id = added["item"]["id"]
+    reasoning_output_index = added["output_index"]
+
+    assert added["item"]["type"] == "reasoning"
+    assert added["item"]["summary"] == []
+    assert part_added["item_id"] == reasoning_id
+    assert part_added["output_index"] == reasoning_output_index
+    assert part_added["summary_index"] == 0
+    assert part_added["part"] == {"type": "summary_text", "text": ""}
+    assert delta["item_id"] == reasoning_id
+    assert delta["output_index"] == reasoning_output_index
+    assert delta["summary_index"] == 0
+    assert delta["delta"] == "think "
+
+    chunk2 = {"choices": [{"delta": {"reasoning_content": "more"}}]}
+    events2 = parse_sse_events(converter.convert_chunk(f"data: {json.dumps(chunk2)}"))
+    assert [event["event"] for event in events2] == ["response.reasoning_summary_text.delta"]
+    assert events2[0]["data"]["item_id"] == reasoning_id
+    assert events2[0]["data"]["output_index"] == reasoning_output_index
+    assert events2[0]["data"]["delta"] == "more"
+
+    final_events = parse_sse_events(converter.convert_chunk("data: [DONE]"))
+    final_types = [event["event"] for event in final_events]
+
+    assert final_types == [
+        "response.reasoning_summary_text.done",
+        "response.reasoning_summary_part.done",
+        "response.output_item.done",
+        "response.completed",
+    ]
+
+    text_done = final_events[0]["data"]
+    part_done = final_events[1]["data"]
+    item_done = final_events[2]["data"]
+    completed = final_events[3]["data"]["response"]
+
+    assert text_done["item_id"] == reasoning_id
+    assert text_done["output_index"] == reasoning_output_index
+    assert text_done["summary_index"] == 0
+    assert text_done["text"] == "think more"
+    assert part_done["item_id"] == reasoning_id
+    assert part_done["output_index"] == reasoning_output_index
+    assert part_done["part"] == {"type": "summary_text", "text": "think more"}
+    assert item_done["output_index"] == reasoning_output_index
+    assert item_done["item"] == {
+        "type": "reasoning",
+        "id": reasoning_id,
+        "summary": [{"type": "summary_text", "text": "think more"}],
+    }
+    assert completed["output"] == [item_done["item"]]
+
+def test_responses_stream_converter_allocates_unique_output_indices():
+    converter = ResponsesStreamConverter("resp_123", "test-model")
+    chunks = [
+        {"model": "test-model", "choices": [{"delta": {"content": "hello"}}]},
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "function": {"name": "f", "arguments": "{}"}}]}}]},
+        {"choices": [{"delta": {"reasoning_content": "checked"}}]},
+    ]
+    raw_events = ""
+    for chunk in chunks:
+        raw_events += converter.convert_chunk(f"data: {json.dumps(chunk)}")
+    raw_events += converter.convert_chunk("data: [DONE]")
+
+    events = parse_sse_events(raw_events)
+    added_items = [
+        event["data"]
+        for event in events
+        if event["event"] == "response.output_item.added"
+    ]
+    added_indices = [item["output_index"] for item in added_items]
+    added_types = [item["item"]["type"] for item in added_items]
+
+    assert added_types == ["message", "function_call", "reasoning"]
+    assert added_indices == [0, 1, 2]
+    assert len(added_indices) == len(set(added_indices))
+
+    completed = [
+        event["data"]["response"]
+        for event in events
+        if event["event"] == "response.completed"
+    ][0]
+    assert [item["type"] for item in completed["output"]] == added_types
 
 def test_flatten_content():
     assert _flatten_content("hello") == "hello"

@@ -1113,6 +1113,7 @@ async def chat_completions(
 
 
 # --- OpenAI Responses API Endpoint ---
+@app.post("/responses")
 @app.post("/v1/responses")
 async def responses_api(
     request: Request,
@@ -1125,6 +1126,10 @@ async def responses_api(
     Accepts requests in the Responses API format (used by codex-cli, OpenAI SDK)
     and internally converts to Chat Completions for processing via the proxy pipeline.
     Returns responses in the Responses API format.
+
+    The root /responses route is a compatibility alias for clients that already
+    append /responses to their configured base URL or cannot safely use a /v1
+    base path.
     """
     raw_logger = RawIOLogger() if ENABLE_RAW_LOGGING else None
     try:

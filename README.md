@@ -53,6 +53,10 @@ MODEL_LATEST_nanogpt=nanogpt/glm-5  # "latest" resolves to current best GLM-5
 
 `POST /v1/responses` — accepts the Responses API format used by codex-cli and the OpenAI Python SDK, and transparently converts it to/from Chat Completions internally. Supports streaming, tool calling, and multi-turn conversations.
 
+`POST /responses` is also supported as a compatibility alias for clients that append `/responses` to their configured base URL or cannot safely target a `/v1` base path.
+
+Default bare Codex aliases (`gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, and `gpt-5.3-codex`) route to the Codex provider, matching clients that send unprefixed Codex model IDs.
+
 ### Monitoring & Health Endpoints
 
 - `GET /v1/health` — status, uptime, provider/credential counts (add `?detail=full` for per-model window stats and error summary)

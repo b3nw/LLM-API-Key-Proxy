@@ -25,11 +25,11 @@ lib_logger = logging.getLogger("rotator_library")
 DEFAULT_RETRY_MODE = "round_robin"
 VALID_RETRY_MODES = {"round_robin", "exhaust"}
 
-# Built-in default aliases for Claude models.
+# Built-in default aliases for clients that send bare model IDs.
 #
 # These provide bare-ID routing out of the box so that clients like Claude Code
-# (which send unprefixed model IDs such as ``claude-opus-4-8``) work without
-# requiring the operator to set MODEL_ALIAS_* environment variables.
+# and Codex desktop apps work without requiring the operator to set MODEL_ALIAS_*
+# environment variables.
 #
 # Each value uses the same ``provider:model`` format as env vars.
 # Env vars always override these defaults when set.
@@ -43,6 +43,10 @@ DEFAULT_MODEL_ALIASES: Dict[str, str] = {
     "claude-opus-4-5": "anthropic:claude-opus-4-5-20251101",
     "claude-sonnet-4-5": "anthropic:claude-sonnet-4-5-20250929",
     "claude-haiku-4-5": "anthropic:claude-haiku-4-5-20251001",
+    "gpt-5.5": "codex:gpt-5.5",
+    "gpt-5.4": "codex:gpt-5.4",
+    "gpt-5.4-mini": "codex:gpt-5.4-mini",
+    "gpt-5.3-codex": "codex:gpt-5.3-codex",
 }
 
 

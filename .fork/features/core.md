@@ -1,5 +1,64 @@
 # core — Infrastructure Improvements
 
+## 2026-07-07 — Add root Responses API compatibility route
+
+Target: `feat(core): infrastructure improvements - latest aliases, error standardization, and utilities`
+Files:
+- `src/proxy_app/main.py`
+- `tests/test_proxy_endpoints.py`
+
+Working commits before autosquash:
+- (see fixup commit hash after commit)
+
+Verification:
+- `uv run --with pytest pytest tests/test_model_alias.py tests/test_proxy_endpoints.py` — passed
+- `uv run ruff check src/proxy_app/main.py src/rotator_library/model_alias_registry.py tests/test_model_alias.py tests/test_proxy_endpoints.py --select F401,F811,F821,E9` — passed
+- `uv run python3 -m py_compile src/proxy_app/main.py src/rotator_library/model_alias_registry.py tests/test_model_alias.py tests/test_proxy_endpoints.py` — passed
+
+Notes:
+- Added `POST /responses` as a compatibility alias for the existing
+  `POST /v1/responses` handler.
+- Some OpenAI SDK-based clients append `/responses` to their configured base URL,
+  and some provider wrappers cannot safely target a `/v1` base path because they
+  intercept or rewrite `/v1/responses` internally.
+- The alias reuses the same handler and auth dependency, so request conversion,
+  model alias rewriting, streaming conversion, and error behavior remain identical
+  to `/v1/responses`.
+- Practical use case: HumanLayer's OpenAI Codex provider can be configured to use
+  its Responses transport with a proxy root base URL. It then calls `/responses`,
+  allowing the proxy to serve Codex-compatible traffic without patching the client
+  binary or using a different provider harness.
+
+## 2026-07-08 — Complete Responses reasoning stream lifecycle
+
+Target: `fix(core): support root responses route and Codex aliases`
+Files:
+- `src/proxy_app/responses_compat.py`
+- `tests/test_responses_compat.py`
+
+Working commits before autosquash:
+- `ab58d92 fixup! fix(core): support root responses route and Codex aliases`
+
+Verification:
+- `uv run --with pytest python3 -m pytest -q tests/test_responses_compat.py` — passed
+- `uv run python3 -m py_compile src/proxy_app/responses_compat.py tests/test_responses_compat.py` — passed
+- `uv run ruff check src/proxy_app/responses_compat.py tests/test_responses_compat.py --select F401,F811,F821,E9` — passed
+
+Notes:
+- HumanLayer's Responses stream parser is strict about reasoning output ordering:
+  it must see a `response.output_item.added` reasoning item and a
+  `response.reasoning_summary_part.added` part before any
+  `response.reasoning_summary_text.delta` events for that item.
+- `ResponsesStreamConverter` now keeps stable reasoning item state, emits the
+  reasoning item and summary part once, reuses the same `item_id` and
+  `output_index` for all reasoning deltas, and finalizes the summary text,
+  summary part, and output item before `response.completed`.
+- Output indices are now allocated monotonically across reasoning, message, and
+  function-call output items so mixed streams cannot collide or emit finalized
+  events with a missing index.
+- Added SSE-block parsing regression coverage for the reasoning lifecycle and
+  mixed output-index ordering.
+
 ## 2026-06-22 — Extend reasoning tag handling for `<think>`/`</think>`
 
 Target: `feat(core): infrastructure improvements - latest aliases, error standardization, and utilities`

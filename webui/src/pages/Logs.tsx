@@ -8,6 +8,7 @@ import {
   AlertTriangle,
   CheckCircle,
   XCircle,
+  Globe,
 } from "lucide-react"
 import { Card, CardContent } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -234,6 +235,11 @@ function TransactionBrowser() {
                   {tx.credential_masked && (
                     <Badge variant="secondary" className="text-[10px] font-mono shrink-0">{tx.credential_masked}</Badge>
                   )}
+                  {tx.proxy_name && (
+                    <Badge variant="outline" className="text-[10px] shrink-0 border-blue-500/50 text-blue-600 dark:text-blue-400">
+                      <Globe className="h-2.5 w-2.5 mr-0.5" />{tx.proxy_name}
+                    </Badge>
+                  )}
                   {shortPrompt && (
                     <span className="text-xs text-muted-foreground truncate hidden sm:inline">&mdash; {tx.prompt_preview}</span>
                   )}
@@ -265,6 +271,14 @@ function TransactionBrowser() {
                     <div>
                       <span className="text-muted-foreground">Credential</span>
                       <p className="font-mono">{tx.credential_masked || "—"}</p>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">Proxy</span>
+                      <p>{tx.proxy_name ? (
+                        <span className="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400">
+                          <Globe className="h-3 w-3" />{tx.proxy_name}
+                        </span>
+                      ) : "Direct"}</p>
                     </div>
                     <div>
                       <span className="text-muted-foreground">Timestamp</span>

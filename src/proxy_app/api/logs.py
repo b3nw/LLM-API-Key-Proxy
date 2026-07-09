@@ -258,6 +258,7 @@ async def list_transactions(
                 "log_level": log_level,
                 "format": parsed["api_format"],
                 "credential_masked": meta.get("credential_masked"),
+                "proxy_name": meta.get("proxy_name"),
             })
 
         matched += 1

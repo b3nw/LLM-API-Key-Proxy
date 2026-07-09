@@ -16,6 +16,7 @@ export interface TransactionSummary {
   log_level: string
   format: "oai" | "ant"
   credential_masked?: string | null
+  proxy_name?: string | null
 }
 
 export interface TransactionDetail {

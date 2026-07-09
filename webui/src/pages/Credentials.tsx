@@ -12,9 +12,12 @@ import {
   deleteApiKey,
   deleteOAuthCredential,
   addCustomProvider,
+  getProxies,
+  setCredentialProxy,
   type CredentialSummary,
   type ApiKeyInfo,
   type OAuthInfo,
+  type ProxiesResponse,
 } from "@/api/config"
 import {
   getOAuthProviders,
@@ -37,6 +40,28 @@ export function Credentials() {
   const [addOAuthOpen, setAddOAuthOpen] = useState(false)
   const [deleting, setDeleting] = useState<string | null>(null)
   const [filter, setFilter] = useState<CredFilter>("all")
+  const [proxies, setProxies] = useState<ProxiesResponse["proxies"]>([])
+  const [updatingProxy, setUpdatingProxy] = useState<string | null>(null)
+
+  useEffect(() => {
+    getProxies().then((r) => setProxies(r.proxies)).catch(() => {})
+  }, [])
+
+  const handleProxyChange = useCallback(async (stableId: string | undefined, proxyName: string) => {
+    if (!stableId) return
+    setUpdatingProxy(stableId)
+    try {
+      await setCredentialProxy(stableId, proxyName || null)
+      await refresh()
+      // Re-fetch proxies in case PROXY_LIST was edited externally
+      getProxies().then((r) => setProxies(r.proxies)).catch(() => {})
+    } catch (err) {
+      console.error("Failed to update credential proxy:", err)
+      await refresh()
+    } finally {
+      setUpdatingProxy(null)
+    }
+  }, [refresh])
 
   const handleDeleteApiKey = useCallback(async (provider: string, keyName: string) => {
     if (!confirm(`Delete API key ${keyName} for ${provider}?`)) return
@@ -159,15 +184,31 @@ export function Credentials() {
                       <span className="text-sm font-mono">{key.key_name}</span>
                       <span className="text-xs text-muted-foreground">{key.masked_value}</span>
                     </div>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7"
-                      onClick={() => handleDeleteApiKey(provider, key.key_name)}
-                      disabled={deleting === key.key_name}
-                    >
-                      <Trash2 className="h-3.5 w-3.5 text-destructive" />
-                    </Button>
+                    <div className="flex items-center gap-2">
+                      <select
+                        className="h-7 text-xs rounded-md border bg-background px-2"
+                        value={key.proxy ?? ""}
+                        onChange={(e) => handleProxyChange(key.stable_id, e.target.value)}
+                        disabled={updatingProxy === key.stable_id}
+                      >
+                        <option value="">Direct (no proxy)</option>
+                        {proxies.map((p) => (
+                          <option key={p.name} value={p.name} title={p.url}>{p.name}</option>
+                        ))}
+                        {key.proxy && !proxies.some((p) => p.name === key.proxy) && (
+                          <option value={key.proxy} title={key.proxy}>⚠ {key.proxy.length > 30 ? key.proxy.slice(0, 27) + "…" : key.proxy}</option>
+                        )}
+                      </select>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7"
+                        onClick={() => handleDeleteApiKey(provider, key.key_name)}
+                        disabled={deleting === key.key_name}
+                      >
+                        <Trash2 className="h-3.5 w-3.5 text-destructive" />
+                      </Button>
+                    </div>
                   </div>
                 ))}
                 {oauthCreds.map((cred: OAuthInfo) => {
@@ -217,15 +258,31 @@ export function Credentials() {
                           <Badge variant="success" className="text-[10px]">active</Badge>
                         )}
                       </div>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-7 w-7"
-                        onClick={() => handleDeleteOAuth(provider, cred.filename)}
-                        disabled={deleting === cred.filename}
-                      >
-                        <Trash2 className="h-3.5 w-3.5 text-destructive" />
-                      </Button>
+                      <div className="flex items-center gap-2">
+                        <select
+                          className="h-7 text-xs rounded-md border bg-background px-2"
+                          value={cred.proxy ?? ""}
+                          onChange={(e) => handleProxyChange(cred.stable_id, e.target.value)}
+                          disabled={updatingProxy === cred.stable_id}
+                        >
+                          <option value="">Direct (no proxy)</option>
+                          {proxies.map((p) => (
+                            <option key={p.name} value={p.name} title={p.url}>{p.name}</option>
+                          ))}
+                          {cred.proxy && !proxies.some((p) => p.name === cred.proxy) && (
+                            <option value={cred.proxy} title={cred.proxy}>⚠ {cred.proxy.length > 30 ? cred.proxy.slice(0, 27) + "…" : cred.proxy}</option>
+                          )}
+                        </select>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7"
+                          onClick={() => handleDeleteOAuth(provider, cred.filename)}
+                          disabled={deleting === cred.filename}
+                        >
+                          <Trash2 className="h-3.5 w-3.5 text-destructive" />
+                        </Button>
+                      </div>
                     </div>
                   )
                 })}

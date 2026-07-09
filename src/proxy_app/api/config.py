@@ -362,7 +362,12 @@ async def get_credentials(request: Request):
         tracker = get_error_tracker()
         records, _ = tracker.get_recent_errors(limit=50)
         for rec in records:
-            if rec.error_type in ("CredentialNeedsReauth", "TokenRefreshFailed"):
+            if rec.error_type in (
+                "CredentialNeedsReauth",
+                "TokenRefreshFailed",
+                "QuotaAuthFailed",
+                "BillingAuthFailed",
+            ):
                 cred_id = rec.credential_masked
                 errored_creds.add(cred_id)
     except Exception:

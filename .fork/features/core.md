@@ -116,3 +116,44 @@ Notes:
   provider that uses multi-segment display keys.
 - Context window override loop is guarded with try/except and only runs for
   providers known to supply `get_model_context_overrides()`.
+
+---
+
+### fix/quota-auth-reauth-detection — Detect expired credentials from billing/quota API failures
+
+Branch: `fix/quota-auth-reauth-detection`
+
+Files changed:
+- `src/rotator_library/providers/utilities/x_ai_quota_tracker.py` — trigger reauth on billing 401/403
+- `src/rotator_library/providers/utilities/codex_quota_tracker.py` — trigger reauth on quota 401/403
+- `src/proxy_app/api/config.py` — recognize QuotaAuthFailed/BillingAuthFailed for needs_reauth badge
+- `src/proxy_app/main.py` — overlay ErrorTracker auth errors onto quota-stats and health endpoints
+- `webui/src/pages/Quota.tsx` — show error_count badge on provider row
+
+Problem:
+- Billing (xAI) and quota (Codex) fetch endpoints returning HTTP 401/403 were
+  silently logged without marking credentials for re-authentication, leaving
+  dead OAuth tokens in rotation indefinitely.
+- Dashboard showed all credentials as "active", Quota page showed green bars,
+  and Credentials page showed green "active" badges — even for dead credentials.
+- Root cause: UsageManager only tracks cooldown/exhaustion, not auth health.
+  The only signal path was ErrorTracker, but quota trackers didn't record errors
+  and the credentials API only checked two error types.
+
+Fix:
+- xAI/Codex quota trackers now call `_queue_refresh(needs_reauth=True)` and
+  `_record_refresh_error()` on 401/403 from billing/quota APIs.
+- Credentials API (`/v1/admin/credentials`) now matches QuotaAuthFailed and
+  BillingAuthFailed error types for the needs_reauth override.
+- New `_overlay_auth_errors_on_quota_stats()` in main.py cross-references the
+  ErrorTracker and flips credential status from "active" to "needs_reauth" in
+  quota-stats responses. Applied to both `GET /v1/quota-stats` and the health
+  endpoint so Dashboard counts and Quota page both reflect broken credentials.
+- Quota page provider table shows `N err` badge when `error_count > 0`.
+
+Verification:
+- `uv run python3 -m py_compile` — passed (all 4 Python files)
+- `uv run ruff check --select F401,F811,F821,E9` — passed (all 4 Python files)
+- Hot-patched llm-proxy-dev: codex_oauth_1.json correctly shows needs_reauth
+  on Credentials page, "1 err" badge on Quota page, "3 active / 1 error" on
+  Dashboard, with QuotaAuthFailed in Error Summary and Recent Errors.

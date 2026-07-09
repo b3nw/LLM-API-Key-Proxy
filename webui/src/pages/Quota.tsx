@@ -212,6 +212,9 @@ export function Quota() {
                     <TableCell className="text-center">
                       <div className="flex items-center justify-center gap-1">
                         <span>{p.credential_count}</span>
+                        {(p as any).error_count > 0 && (
+                          <Badge variant="destructive" className="text-[10px]">{(p as any).error_count} err</Badge>
+                        )}
                         {p.exhausted_count > 0 && (
                           <Badge variant="destructive" className="text-[10px]">{p.exhausted_count} exh</Badge>
                         )}

@@ -43,6 +43,8 @@ export interface ApiKeyInfo {
   key_name: string
   masked_value: string
   provider: string
+  stable_id?: string
+  proxy?: string | null
 }
 
 export interface OAuthInfo {
@@ -52,6 +54,18 @@ export interface OAuthInfo {
   email?: string
   tier?: string
   status?: string
+  stable_id?: string
+  proxy?: string | null
+}
+
+export interface ProxyInfo {
+  name: string
+  url: string
+}
+
+export interface ProxiesResponse {
+  proxies: ProxyInfo[]
+  default: string | null
 }
 
 export async function getConfig(): Promise<ProxyConfig> {
@@ -111,4 +125,18 @@ export async function updateModelFilters(
 
 export async function reloadProxy(): Promise<{ status: string; message: string }> {
   return apiFetch("/v1/admin/reload", { method: "POST" })
+}
+
+export async function getProxies(): Promise<ProxiesResponse> {
+  return apiFetch("/v1/admin/proxies")
+}
+
+export async function setCredentialProxy(
+  credentialSlug: string,
+  proxyName: string | null
+): Promise<{ ok: boolean }> {
+  return apiFetch("/v1/admin/credentials/proxy", {
+    method: "PUT",
+    body: JSON.stringify({ credential_slug: credentialSlug, proxy_name: proxyName }),
+  })
 }

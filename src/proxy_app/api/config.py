@@ -1,6 +1,7 @@
 """Admin API for proxy configuration and credential management."""
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -12,6 +13,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from dotenv import load_dotenv
+from rotator_library.proxy_config import ProxySpec, _slugify_stable_id, load_proxy_config
 from rotator_library.utils.paths import get_data_file
 
 _credential_lock = asyncio.Lock()
@@ -100,6 +102,57 @@ def _get_env_vars() -> dict[str, str]:
     from dotenv import dotenv_values
     vals = dotenv_values(_env_path())
     return {k: v for k, v in vals.items() if v is not None}
+
+
+def _parse_named_proxies(env_vars: dict[str, str]) -> dict[str, str]:
+    """Parse PROXY_LIST and PROXY_NAME_* env vars into a {name: url} dict.
+
+    PROXY_LIST is a comma-separated list of proxy names (e.g. "us-east,eu-west").
+    For each name, the URL is read from PROXY_NAME_<UPPERCASE_NAME_WITH_UNDERSCORES>.
+    Each URL is validated against supported proxy schemes via ProxySpec.
+    """
+    named: dict[str, str] = {}
+    raw_list = env_vars.get("PROXY_LIST", "")
+    if not raw_list.strip():
+        return named
+    for name in raw_list.split(","):
+        name = name.strip()
+        if not name:
+            continue
+        env_key = "PROXY_NAME_" + re.sub(r"[^A-Z0-9]", "_", name.upper())
+        url = env_vars.get(env_key)
+        if not url:
+            logger.warning(f"PROXY_LIST contains '{name}' but {env_key} is not set")
+            continue
+        try:
+            ProxySpec(url=url)  # validates scheme
+        except ValueError as exc:
+            logger.warning(f"Named proxy '{name}' has invalid URL '{url}': {exc}")
+            continue
+        named[name] = url
+    return named
+
+
+def _resolve_credential_proxy_name(
+    slug: str, env_vars: dict[str, str], named_proxies: dict[str, str]
+) -> Optional[str]:
+    """Given a credential slug, find which named proxy (if any) is assigned.
+
+    Looks up PROXY_URL_CREDENTIAL_<slug> in env_vars, then matches the URL
+    against the named_proxies dict to find the proxy name.
+    """
+    key = f"PROXY_URL_CREDENTIAL_{slug.upper()}"
+    url = env_vars.get(key)
+    if not url:
+        return None
+    for name, named_url in named_proxies.items():
+        if named_url == url:
+            return name
+    # Proxy URL is set but doesn't match any named proxy (e.g. the proxy was
+    # removed from PROXY_LIST after assignment, or it was set manually via env).
+    # Return the raw URL so the frontend can display it and the user knows
+    # traffic is still being routed through a proxy they may not expect.
+    return url
 
 
 def _mask_key(value: str) -> str:
@@ -199,6 +252,20 @@ async def get_config():
             provider = key[len("PROXY_URL_"):].lower()
             proxy_urls.setdefault("providers", {})[provider] = value
 
+    # Parse named proxies from PROXY_LIST + PROXY_NAME_*
+    named_proxies = _parse_named_proxies(env_vars)
+
+    # Resolve which named proxy each credential is using
+    if "credentials" in proxy_urls and named_proxies:
+        cred_proxy_names: dict[str, str] = {}
+        url_to_name = {url: name for name, url in named_proxies.items()}
+        for slug, url in proxy_urls["credentials"].items():
+            proxy_name = url_to_name.get(url)
+            if proxy_name:
+                cred_proxy_names[slug] = proxy_name
+        if cred_proxy_names:
+            proxy_urls["credential_proxy_names"] = cred_proxy_names
+
     # Count OAuth credentials from files
     if oauth_dir.exists():
         for f in oauth_dir.iterdir():
@@ -220,6 +287,8 @@ async def get_config():
     }
     if proxy_urls:
         result["proxy_urls"] = proxy_urls
+    if named_proxies:
+        result["available_proxies"] = [{"name": n, "url": u} for n, u in named_proxies.items()]
     return result
 
 
@@ -300,16 +369,22 @@ async def get_credentials(request: Request):
         pass
 
     api_keys: dict[str, list] = {}
+    named_proxies = _parse_named_proxies(env_vars)
     for key, value in env_vars.items():
         api_key_match = re.match(r"^(.+?)_API_KEY(?:_\d+)?$", key)
         if api_key_match and not key.startswith("PROXY_"):
             provider_name = api_key_match.group(1).lower()
             if provider_name not in api_keys:
                 api_keys[provider_name] = []
+            stable_id = hashlib.sha256(value.encode()).hexdigest()[:12]
+            slug = _slugify_stable_id(stable_id)
+            proxy_name = _resolve_credential_proxy_name(slug, env_vars, named_proxies)
             api_keys[provider_name].append({
                 "key_name": key,
                 "masked_value": _mask_key(value),
                 "provider": provider_name,
+                "stable_id": slug,
+                "proxy": proxy_name,
             })
 
     oauth: dict[str, list] = {}
@@ -352,11 +427,98 @@ async def get_credentials(request: Request):
                     if resolved == "active" and f.name in errored_creds:
                         resolved = "needs_reauth"
                     info["status"] = resolved
+                    # stable_id and proxy assignment
+                    stable_id = info.get("email") or meta.get("login") or data.get("login")
+                    if stable_id:
+                        slug = _slugify_stable_id(stable_id)
+                        info["stable_id"] = slug
+                        info["proxy"] = _resolve_credential_proxy_name(slug, env_vars, named_proxies)
+                    else:
+                        info["stable_id"] = None
+                        info["proxy"] = None
                 except Exception:
                     info["status"] = runtime_status.get(f.name, "error")
                 oauth[provider_name].append(info)
 
     return {"api_keys": api_keys, "oauth": oauth}
+
+
+@router.get("/proxies")
+async def get_proxies():
+    """Return the list of named proxies available for per-credential assignment,
+    plus the global default proxy URL (if any).
+    """
+    env_vars = _get_env_vars()
+    named = _parse_named_proxies(env_vars)
+    default = env_vars.get("PROXY_URL_DEFAULT")
+    return {
+        "proxies": [{"name": n, "url": u} for n, u in named.items()],
+        "default": default,
+    }
+
+
+class SetCredentialProxyRequest(BaseModel):
+    credential_slug: str  # The env-var-safe slug (e.g. USER_GMAIL_COM)
+    proxy_name: Optional[str] = None  # Named proxy from PROXY_LIST, or None to clear
+
+
+@router.put("/credentials/proxy")
+async def set_credential_proxy(req: SetCredentialProxyRequest, request: Request):
+    """Assign or clear a named proxy for a specific credential.
+
+    Writes PROXY_URL_CREDENTIAL_<slug>=<url> to .env, then hot-reloads
+    the running ProxyConfig if one exists on app.state.
+    """
+    env_file = str(_env_path())
+    env_vars = _get_env_vars()
+    named_proxies = _parse_named_proxies(env_vars)
+
+    if req.proxy_name is not None:
+        if req.proxy_name not in named_proxies:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown proxy name '{req.proxy_name}'. "
+                       f"Available: {list(named_proxies.keys())}",
+            )
+        proxy_url = named_proxies[req.proxy_name]
+        env_key = f"PROXY_URL_CREDENTIAL_{req.credential_slug}"
+        _inplace_set_key(env_file, env_key, proxy_url)
+        os.environ[env_key] = proxy_url
+    else:
+        env_key = f"PROXY_URL_CREDENTIAL_{req.credential_slug}"
+        _inplace_unset_key(env_file, env_key)
+        os.environ.pop(env_key, None)
+
+    load_dotenv(env_file, override=True)
+
+    # Hot-reload the ProxyConfig on the running RotatingClient if present.
+    # The ProxyConfig instance lives at client._proxy_config (set during
+    # RotatingClient.__init__), not at app.state.proxy_config.
+    try:
+        client = getattr(request.app.state, "rotating_client", None)
+        if client is not None:
+            proxy_config = getattr(client, "_proxy_config", None)
+            if proxy_config is not None:
+                new_config = load_proxy_config(env=dict(os.environ))
+                # Copy fields into the existing config object to preserve identity
+                proxy_config.default = new_config.default
+                proxy_config.provider_proxies = new_config.provider_proxies
+                proxy_config.credential_proxies = new_config.credential_proxies
+                proxy_config.rotation_pool = new_config.rotation_pool
+                proxy_config.rotation_strategy = new_config.rotation_strategy
+                proxy_config.rotation_scope = new_config.rotation_scope
+                logger.info(
+                    f"Hot-reloaded proxy config after credential proxy update "
+                    f"(slug={req.credential_slug}, name={req.proxy_name})"
+                )
+    except Exception:
+        logger.warning("Could not hot-reload ProxyConfig", exc_info=True)
+
+    return {
+        "ok": True,
+        "credential_slug": req.credential_slug,
+        "proxy_name": req.proxy_name,
+    }
 
 
 class AddApiKeyRequest(BaseModel):

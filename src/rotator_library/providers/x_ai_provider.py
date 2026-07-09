@@ -250,9 +250,20 @@ class XAiProvider(XAiAuthBase, XAiQuotaTracker, ProviderInterface):
         """
         return True
 
+    def _get_grok_build_headers(self) -> dict:
+        """Return User-Agent header identifying as a Grok Build client.
+
+        xAI classifies usage as "Grok Build" vs "API" partly based on the
+        User-Agent.  The openai-python SDK sets ``OpenAI/Python ...`` which
+        gets bucketed as plain API usage.  Overriding with the same UA the
+        Grok Build CLI sends ensures OAuth-subscription traffic is attributed
+        to the Grok Build billing track.
+        """
+        return {"User-Agent": f"grok/{self._cli_version}"}
+
     def _get_cli_proxy_headers(self) -> dict:
         """Return extra headers required by the CLI chat proxy."""
-        ver = XAI_CLI_VERSION
+        ver = self._cli_version
         return {
             "User-Agent": f"grok/{ver}",
             "x-xai-token-auth": "xai-grok-cli",
@@ -301,14 +312,19 @@ class XAiProvider(XAiAuthBase, XAiQuotaTracker, ProviderInterface):
         kwargs["api_base"] = api_base
         kwargs["custom_llm_provider"] = "xai"
 
-        # Inject CLI proxy headers if needed
+        # Always inject Grok Build User-Agent so xAI attributes traffic to
+        # the subscription billing track instead of the pay-per-token API.
+        existing_headers = kwargs.get("extra_headers") or {}
+        extra_headers = {**self._get_grok_build_headers(), **existing_headers}
+
+        # CLI proxy models need additional transport headers
         if use_cli_proxy:
-            extra_headers = self._get_cli_proxy_headers()
-            existing_headers = kwargs.get("extra_headers") or {}
-            kwargs["extra_headers"] = {**existing_headers, **extra_headers}
+            extra_headers.update(self._get_cli_proxy_headers())
             lib_logger.debug(
                 f"xai: routing {model_bare} through CLI proxy with version header"
             )
+
+        kwargs["extra_headers"] = extra_headers
 
         # Set up async OpenAI client for LiteLLM
         kwargs["client"] = openai.AsyncOpenAI(
@@ -355,6 +371,10 @@ class XAiProvider(XAiAuthBase, XAiQuotaTracker, ProviderInterface):
         kwargs["api_key"] = token
         kwargs["api_base"] = self.api_base
         kwargs["custom_llm_provider"] = "xai"
+        kwargs["extra_headers"] = {
+            **self._get_grok_build_headers(),
+            **(kwargs.get("extra_headers") or {}),
+        }
 
         kwargs["client"] = openai.AsyncOpenAI(
             api_key=token,

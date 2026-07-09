@@ -44,6 +44,9 @@ rules:
       - "fix(anthropic): mirror pi-agent OAuth headers and tool naming"
       - "fix(anthropic): back off quota polling on 429 and flag stale quota in UI"
       - "fix(anthropic): send Claude Code User-Agent on OAuth usage fetch"
+    proxy:
+      - "feat(proxy): outbound HTTP/SOCKS5 proxy support with per-provider/credential routing"
+      - "fix(proxy): resolve per-credential proxy routing and improve observability"
     tooling:
       - "feat(tooling): add AGENTS.md and .agent/ config for linear stack workflow"
       - "fix(tooling): scope fork-stack gate to canonical branch and tolerate transient commits"

@@ -199,10 +199,26 @@ class RequestExecutor:
             return await self._client_pool.get_client(provider, credential, stable_id)
         return self._http_client
 
+    def _resolve_proxy_spec(
+        self, provider: str, credential: str, stable_id: str,
+    ) -> "tuple[Optional[Any], Optional[str]]":
+        """Resolve the ProxySpec and its named alias for a request.
+
+        Returns (spec, proxy_name) where both are None for direct connections.
+        """
+        if not self._client_pool:
+            return None, None
+        spec = self._client_pool.config.resolve(provider, credential, stable_id)
+        if spec is None:
+            return None, None
+        name = self._client_pool.config.get_proxy_name(spec) or spec.url
+        return spec, name
+
     async def _resolve_litellm_client(
         self, provider: str, credential: str, stable_id: str,
         base_url: Optional[str] = None,
         extra_headers: Optional[Dict[str, str]] = None,
+        resolved_spec: Optional[Any] = None,
     ) -> Optional[Any]:
         """Build a litellm-compatible client backed by the proxy pool.
 
@@ -223,12 +239,16 @@ class RequestExecutor:
                 client (e.g. User-Agent, X-Title).  When we inject our own
                 ``openai.AsyncOpenAI`` client, litellm's ``extra_headers``
                 kwarg is bypassed, so these must be baked in here.
+            resolved_spec: Pre-resolved ProxySpec to avoid redundant
+                resolution.  If None, resolves fresh from the pool.
 
         Returns None when no proxy applies or base_url is missing.
         """
-        if not self._client_pool:
-            return None
-        spec = self._client_pool.config.resolve(provider, credential, stable_id)
+        spec = resolved_spec
+        if spec is None:
+            if not self._client_pool:
+                return None
+            spec = self._client_pool.config.resolve(provider, credential, stable_id)
         if spec is None:
             return None
         if not base_url:
@@ -761,6 +781,18 @@ class RequestExecutor:
                                     provider, cred, cred_context.stable_id
                                 )
 
+                                # Resolve proxy once for logging, metadata, and client injection
+                                proxy_spec, proxy_name = self._resolve_proxy_spec(
+                                    provider, cred, cred_context.stable_id
+                                )
+                                if proxy_name:
+                                    lib_logger.info(
+                                        f"Routing through proxy '{proxy_name}' for "
+                                        f"{provider}/{mask_credential(cred)}"
+                                    )
+                                if context.transaction_logger:
+                                    context.transaction_logger.proxy_name = proxy_name
+
                                 is_embedding = getattr(context, "request_type", "chat") == "embedding"
 
                                 # Make the API call
@@ -779,6 +811,7 @@ class RequestExecutor:
                                         provider, cred, cred_context.stable_id,
                                         base_url=kwargs.get("api_base"),
                                         extra_headers=kwargs.get("extra_headers"),
+                                        resolved_spec=proxy_spec,
                                     )
                                     if litellm_client:
                                         kwargs["client"] = litellm_client
@@ -1031,6 +1064,18 @@ class RequestExecutor:
                             if plugin and hasattr(plugin, "calculate_cost"):
                                 cost_calculator = plugin.calculate_cost
 
+                            # Resolve proxy once before retry loop
+                            proxy_spec_s, proxy_name_s = self._resolve_proxy_spec(
+                                provider, cred, cred_context.stable_id
+                            )
+                            if proxy_name_s:
+                                lib_logger.info(
+                                    f"Routing stream through proxy '{proxy_name_s}' for "
+                                    f"{provider}/{mask_credential(cred)}"
+                                )
+                            if context.transaction_logger:
+                                context.transaction_logger.proxy_name = proxy_name_s
+
                             # Execute request with retries
                             for attempt in range(max_retries):
                                 last_streamed_chunk: Optional[str] = None
@@ -1044,7 +1089,7 @@ class RequestExecutor:
                                         context, kwargs
                                     )
 
-                                    # Make the API call
+                                    # Make the API call (with proxy-aware client for streaming)
                                     if plugin and plugin.has_custom_logic():
                                         kwargs["credential_identifier"] = credential_secret
                                         stream = await plugin.acompletion(
@@ -1057,6 +1102,14 @@ class RequestExecutor:
                                         self._apply_litellm_logger(kwargs)
                                         # Remove internal context before litellm call
                                         kwargs.pop("transaction_context", None)
+                                        litellm_client = await self._resolve_litellm_client(
+                                            provider, cred, cred_context.stable_id,
+                                            base_url=kwargs.get("api_base"),
+                                            extra_headers=kwargs.get("extra_headers"),
+                                            resolved_spec=proxy_spec_s,
+                                        )
+                                        if litellm_client:
+                                            kwargs["client"] = litellm_client
                                         stream = await litellm.acompletion(**kwargs)
 
                                     # Hand off to streaming handler with cred_context

@@ -193,7 +193,7 @@ export function Settings() {
         <Card>
           <CardHeader>
             <CardTitle className="text-base">Outbound Proxies</CardTitle>
-            <CardDescription>PROXY_URL_* settings for routing requests through proxies</CardDescription>
+            <CardDescription>Per-credential and per-provider proxy routing</CardDescription>
           </CardHeader>
           <CardContent>
             <div className="space-y-2">
@@ -204,11 +204,13 @@ export function Settings() {
                 <SettingRow key={name} label={`Provider: ${name}`} value={url} mono />
               ))}
               {data.proxy_urls.credentials && Object.entries(data.proxy_urls.credentials).map(([slug, url]: [string, string]) => {
+                const proxyAlias = data.proxy_urls?.credential_proxy_names?.[slug]
                 const provider = data.proxy_urls?.credential_providers?.[slug]
                 const label = provider && provider !== "unknown"
                   ? `${provider} / ${slug.slice(0, 12)}`
                   : `Credential: ${slug}`
-                return <SettingRow key={slug} label={label} value={url} mono />
+                const displayValue = proxyAlias ? `${proxyAlias}  (${url})` : url
+                return <SettingRow key={slug} label={label} value={displayValue} mono />
               })}
             </div>
           </CardContent>

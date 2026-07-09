@@ -120,6 +120,9 @@ class ProxyConfig:
     rotation_strategy: str = "round_robin"
     rotation_scope: str = "global"
 
+    named_proxies: Dict[str, str] = field(default_factory=dict)
+    """Mapping of proxy alias name -> URL, loaded from PROXY_LIST + PROXY_NAME_*."""
+
     # Internal counter for round-robin (keyed by scope discriminator)
     _rr_counters: Dict[str, int] = field(default_factory=dict, repr=False)
 
@@ -143,10 +146,18 @@ class ProxyConfig:
 
         Priority: credential > provider > rotation pool > default.
         """
-        # 1. Per-credential (match by stable_id, case-insensitive)
-        sid_lower = stable_id.lower()
+        # 1. Per-credential — match by raw stable_id or its slugified form.
+        #    Config keys are env-var slugs (e.g. FALTERS_RIZON_NET) while
+        #    runtime stable_ids may be raw (e.g. falters@rizon.net::account_id).
+        #    Build candidate slugs: full id, email-only (before ::), full slugified,
+        #    and email-only slugified to cover all admin API assignment paths.
+        candidates = {stable_id.lower(), _slugify_stable_id(stable_id).lower()}
+        if "::" in stable_id:
+            email_part = stable_id.split("::")[0]
+            candidates.add(email_part.lower())
+            candidates.add(_slugify_stable_id(email_part).lower())
         for key, spec in self.credential_proxies.items():
-            if key.lower() == sid_lower:
+            if key.lower() in candidates:
                 return spec
 
         # 2. Per-provider
@@ -160,6 +171,15 @@ class ProxyConfig:
 
         # 4. Global default
         return self.default
+
+    def get_proxy_name(self, spec: Optional[ProxySpec]) -> Optional[str]:
+        """Return the named alias for a proxy spec, or None if unrecognised."""
+        if spec is None:
+            return None
+        for name, url in self.named_proxies.items():
+            if url == spec.url:
+                return name
+        return None
 
     def resolve_for_provider(self, provider: str) -> Optional[ProxySpec]:
         """Resolve proxy using only provider-level or global config (no credential)."""
@@ -243,6 +263,20 @@ def load_proxy_config(
         slug = key[len("PROXY_URL_CREDENTIAL_"):]
         if slug:
             config.credential_proxies[slug] = ProxySpec(url=value)
+
+    # Named proxies: PROXY_LIST + PROXY_NAME_*
+    raw_list = env.get("PROXY_LIST", "")
+    for name in (n.strip() for n in raw_list.split(",") if n.strip()):
+        env_key = "PROXY_NAME_" + re.sub(r"[^A-Z0-9]", "_", name.upper())
+        url = env.get(env_key)
+        if url:
+            try:
+                ProxySpec(url=url)  # validate
+                config.named_proxies[name] = url
+            except ValueError as exc:
+                lib_logger.warning(
+                    f"Named proxy '{name}' has invalid URL '{url}': {exc}"
+                )
 
     # Rotation pool
     pool_raw = env.get("PROXY_ROTATION_POOL")

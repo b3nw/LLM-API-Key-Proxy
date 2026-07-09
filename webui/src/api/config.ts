@@ -14,6 +14,7 @@ export interface ProxyConfig {
     providers?: Record<string, string>
     credentials?: Record<string, string>
     credential_providers?: Record<string, string>
+    credential_proxy_names?: Record<string, string>
   }
 }
 

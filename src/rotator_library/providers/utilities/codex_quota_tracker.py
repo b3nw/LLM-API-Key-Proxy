@@ -484,8 +484,29 @@ class CodexQuotaTracker:
             return snapshot
 
         except httpx.HTTPStatusError as e:
-            error_msg = f"HTTP {e.response.status_code}: {e.response.text[:200]}"
+            status_code = e.response.status_code
+            error_msg = f"HTTP {status_code}: {e.response.text[:200]}"
             lib_logger.warning(f"Failed to fetch Codex quota for {identifier}: {error_msg}")
+
+            if status_code in (401, 403):
+                lib_logger.warning(
+                    f"Codex credential {identifier} returned {status_code} on quota fetch — "
+                    "queueing for re-authentication"
+                )
+                if hasattr(self, "_queue_refresh"):
+                    asyncio.create_task(
+                        self._queue_refresh(
+                            credential_path, force=True, needs_reauth=True
+                        )
+                    )
+                if hasattr(self, "_record_refresh_error"):
+                    self._record_refresh_error(
+                        credential_path,
+                        "QuotaAuthFailed",
+                        f"Quota API returned {status_code} for {identifier}",
+                        status_code,
+                    )
+
             return CodexQuotaSnapshot(
                 credential_path=credential_path,
                 identifier=identifier,

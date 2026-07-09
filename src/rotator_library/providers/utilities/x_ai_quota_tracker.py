@@ -288,8 +288,29 @@ class XAiQuotaTracker:
             return snapshot
 
         except httpx.HTTPStatusError as e:
-            error_msg = f"HTTP {e.response.status_code}: {e.response.text[:200]}"
+            status_code = e.response.status_code
+            error_msg = f"HTTP {status_code}: {e.response.text[:200]}"
             lib_logger.warning(f"xAI billing fetch failed for {identifier}: {error_msg}")
+
+            if status_code in (401, 403):
+                lib_logger.warning(
+                    f"xAI credential {identifier} returned {status_code} on billing fetch — "
+                    "queueing for re-authentication"
+                )
+                if hasattr(self, "_queue_refresh"):
+                    asyncio.create_task(
+                        self._queue_refresh(
+                            credential_path, force=True, needs_reauth=True
+                        )
+                    )
+                if hasattr(self, "_record_refresh_error"):
+                    self._record_refresh_error(
+                        credential_path,
+                        "BillingAuthFailed",
+                        f"Billing API returned {status_code} for {identifier}",
+                        status_code,
+                    )
+
             return XAiBillingSnapshot(
                 credential_path=credential_path,
                 identifier=identifier,

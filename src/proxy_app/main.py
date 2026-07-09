@@ -1819,6 +1819,7 @@ async def health_check(
 
     try:
         full_stats = await client.get_quota_stats()
+        _overlay_auth_errors_on_quota_stats(full_stats)
         quota_providers = set(full_stats.get("providers", {}).keys())
         for provider_name, pstats in full_stats.get("providers", {}).items():
             active_providers.append(provider_name)
@@ -2030,6 +2031,49 @@ async def get_latest_aliases(
     return client.latest_registry.get_diagnostics(client._model_list_cache)
 
 
+_AUTH_ERROR_TYPES = frozenset((
+    "CredentialNeedsReauth",
+    "TokenRefreshFailed",
+    "QuotaAuthFailed",
+    "BillingAuthFailed",
+))
+
+
+def _overlay_auth_errors_on_quota_stats(stats: dict) -> None:
+    """Mark credentials with recent auth errors as needs_reauth in quota stats.
+
+    Also adjusts provider-level active_count / error_count so the Quota table
+    and Dashboard health endpoint reflect the correct numbers.
+    """
+    try:
+        from rotator_library.error_tracker import get_error_tracker
+        tracker = get_error_tracker()
+        records, _ = tracker.get_recent_errors(limit=50)
+        errored_files: set[str] = set()
+        for rec in records:
+            if rec.error_type in _AUTH_ERROR_TYPES:
+                errored_files.add(rec.credential_masked)
+        if not errored_files:
+            return
+        for pstats in stats.get("providers", {}).values():
+            flipped = 0
+            for cdata in pstats.get("credentials", {}).values():
+                if not isinstance(cdata, dict):
+                    continue
+                full_path = cdata.get("full_path", "")
+                if not full_path:
+                    continue
+                fname = full_path.rsplit("/", 1)[-1] if "/" in full_path else full_path
+                if cdata.get("status") == "active" and fname in errored_files:
+                    cdata["status"] = "needs_reauth"
+                    flipped += 1
+            if flipped:
+                pstats["active_count"] = max(0, pstats.get("active_count", 0) - flipped)
+                pstats["error_count"] = pstats.get("error_count", 0) + flipped
+    except Exception:
+        pass
+
+
 @app.get("/v1/quota-stats")
 async def get_quota_stats(
     request: Request,
@@ -2068,6 +2112,7 @@ async def get_quota_stats(
     """
     try:
         stats = await client.get_quota_stats(provider_filter=provider)
+        _overlay_auth_errors_on_quota_stats(stats)
         return stats
     except Exception as e:
         logging.error(f"Failed to get quota stats: {e}")

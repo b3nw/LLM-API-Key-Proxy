@@ -157,3 +157,46 @@ Verification:
 - Hot-patched llm-proxy-dev: codex_oauth_1.json correctly shows needs_reauth
   on Credentials page, "1 err" badge on Quota page, "3 active / 1 error" on
   Dashboard, with QuotaAuthFailed in Error Summary and Recent Errors.
+
+---
+
+## 2026-07-09 — Responses API compatibility: root /responses route, model normalization, reasoning lifecycle
+
+Branch: `fix/core-responses-compat`
+Files:
+- `src/proxy_app/main.py`
+- `src/proxy_app/responses_compat.py`
+- `tests/test_responses_compat.py`
+- `tests/test_proxy_endpoints.py`
+
+Changes:
+- Added root `/responses` route as a compatibility alias for clients that
+  already append `/responses` to their configured base URL or cannot safely
+  use a `/v1` base path. Both `/responses` and `/v1/responses` route to the
+  same `responses_api` handler.
+- Added `_normalize_model_id()` helper at the API handler layer that rewrites
+  compatibility model IDs (e.g. `openai/gpt-5.5` → `codex/gpt-5.5`) before
+  the request reaches `RotatingClient.acompletion()`. The rewrite only fires
+  when an alias exists and the target provider has credentials. This avoids
+  modifying routing logic in `acompletion()`.
+- Fixed reasoning stream lifecycle in `ResponsesStreamConverter`: reasoning
+  now emits `response.output_item.added` + `response.reasoning_summary_part.added`
+  before the first delta, and `response.reasoning_summary_text.done` +
+  `response.reasoning_summary_part.done` + `response.output_item.done` during
+  finalization. Previously reasoning only emitted bare delta events with a
+  fresh `build_item_id("rs")` per chunk and `output_index: 0`.
+- Replaced ad-hoc `output_index` allocation with a centralized
+  `_allocate_output_index()` counter. Reasoning, message, and tool call items
+  each get unique sequential indices. The `_finalize` method now builds
+  `output_items` sorted by allocation index.
+
+Verification:
+- `uv run python3 -m py_compile` — passed (all source files)
+- `uv run ruff check --select F401,F811,F821,E9` — passed (all source files)
+- `uv run --with pytest python3 -m pytest tests/test_responses_compat.py tests/test_proxy_endpoints.py -v` — passed
+
+Notes:
+- `CodexProvider.get_models()` still returns `codex/<model>` (unchanged)
+- `RotatingClient.acompletion()` routing logic unchanged
+- `list_models()` and `get_model()` unchanged
+- Ref: b3nw/LLM-API-Key-Proxy#110

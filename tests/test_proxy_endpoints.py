@@ -11,10 +11,7 @@ any real LLM API calls.
 NO network calls, NO API keys needed.
 """
 
-import json
-from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 
 
 # We test endpoint routing and auth without starting the full app lifecycle
@@ -143,3 +140,27 @@ class TestEndpointRouting:
         """GET /v1/models returns model list."""
         endpoint = "/v1/models"
         assert endpoint == "/v1/models"
+
+
+def test_root_responses_endpoint_alias():
+    """Both /responses and /v1/responses decorators exist on responses_api."""
+    import ast
+    import pathlib
+
+    main_path = pathlib.Path(__file__).resolve().parent.parent / "src" / "proxy_app" / "main.py"
+    source = main_path.read_text()
+    tree = ast.parse(source)
+
+    routes_found = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.name == "responses_api":
+                for dec in node.decorator_list:
+                    if isinstance(dec, ast.Call):
+                        func = dec.func
+                        if isinstance(func, ast.Attribute) and func.attr == "post":
+                            if dec.args and isinstance(dec.args[0], ast.Constant):
+                                routes_found.append(dec.args[0].value)
+
+    assert "/responses" in routes_found, f"Root /responses route not found in {routes_found}"
+    assert "/v1/responses" in routes_found, f"/v1/responses route not found in {routes_found}"

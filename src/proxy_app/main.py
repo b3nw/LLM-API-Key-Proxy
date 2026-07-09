@@ -953,6 +953,40 @@ async def streaming_response_wrapper(
             )
 
 
+# --- Model ID Normalization ---
+
+def _normalize_model_id(model: str, client: RotatingClient) -> str:
+    """Rewrite compatibility model IDs to canonical form before routing.
+
+    Some clients send provider-prefixed IDs that should route through a
+    different provider when an alias exists and the target provider has
+    credentials.  For example, "openai/gpt-5.5" is rewritten to
+    "codex/gpt-5.5" when a Codex alias is registered and Codex
+    credentials are available.
+
+    This keeps the routing logic in acompletion() untouched - the
+    rewrite happens at the API handler layer before the request reaches
+    the RotatingClient.
+    """
+    if not model:
+        return model
+    alias_targets = client.alias_registry.resolve(model)
+    if alias_targets:
+        # Pick the first target whose provider has credentials.
+        # For multi-target aliases (e.g. codex:gpt-5,nanogpt:gpt-5),
+        # this avoids rewriting to a provider that will fail downstream.
+        credentialed = next(
+            (t for t in alias_targets if t.provider in client.all_credentials),
+            None,
+        )
+        if credentialed:
+            rewritten = credentialed.full_model
+            if rewritten != model:
+                logging.info(f"Model normalization: {model} → {rewritten}")
+                return rewritten
+    return model
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(
     request: Request,
@@ -1013,6 +1047,8 @@ async def chat_completions(
                 )
                 request_data["model"] = resolved
 
+            # Normalize compatibility model IDs (e.g. openai/gpt-5.5 → codex/gpt-5.5)
+            request_data["model"] = _normalize_model_id(request_data["model"], client)
 
         # Extract and log specific reasoning parameters for monitoring.
         model = request_data.get("model")
@@ -1113,6 +1149,7 @@ async def chat_completions(
 
 
 # --- OpenAI Responses API Endpoint ---
+@app.post("/responses")
 @app.post("/v1/responses")
 async def responses_api(
     request: Request,
@@ -1125,6 +1162,10 @@ async def responses_api(
     Accepts requests in the Responses API format (used by codex-cli, OpenAI SDK)
     and internally converts to Chat Completions for processing via the proxy pipeline.
     Returns responses in the Responses API format.
+
+    The root /responses route is a compatibility alias for clients that already
+    append /responses to their configured base URL or cannot safely use a /v1
+    base path.
     """
     raw_logger = RawIOLogger() if ENABLE_RAW_LOGGING else None
     try:
@@ -1149,6 +1190,10 @@ async def responses_api(
             if resolved:
                 logging.info(f"Latest alias: {cc_request['model']} → {resolved}")
                 cc_request["model"] = resolved
+
+        # Normalize compatibility model IDs (e.g. openai/gpt-5.5 → codex/gpt-5.5)
+        if "model" in cc_request:
+            cc_request["model"] = _normalize_model_id(cc_request["model"], client)
 
         log_request_to_console(
             url=str(request.url),

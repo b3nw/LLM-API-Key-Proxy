@@ -334,13 +334,18 @@ class ResponsesStreamConverter:
         self.started = False
         self.content_started = False
         self.message_item_id = build_item_id("msg")
+        self.reasoning_started = False
+        self.reasoning_item_id = build_item_id("rs")
+        self.reasoning_output_index: Optional[int] = None
         self.tool_calls: Dict[int, Dict[str, Any]] = {}
         self.tool_item_ids: Dict[int, str] = {}
+        self.tool_output_indices: Dict[int, int] = {}
         self.accumulated_content = ""
         self.accumulated_reasoning = ""
         self.usage: Optional[Dict[str, Any]] = None
         self.finish_reason: Optional[str] = None
-        self.output_index = 0
+        self.output_index: Optional[int] = None
+        self.next_output_index = 0
 
     def _sse(self, event_type: str, data: Dict[str, Any]) -> str:
         data["type"] = event_type
@@ -355,6 +360,11 @@ class ResponsesStreamConverter:
             "status": status,
             "output": [],
         }
+
+    def _allocate_output_index(self) -> int:
+        output_index = self.next_output_index
+        self.next_output_index += 1
+        return output_index
 
     def convert_chunk(self, chunk_str: str) -> str:
         """Convert a single SSE chunk string from Chat Completions format to Responses API events."""
@@ -395,10 +405,27 @@ class ResponsesStreamConverter:
         # Handle reasoning_content delta
         reasoning = delta.get("reasoning_content")
         if reasoning:
+            if not self.reasoning_started:
+                self.reasoning_started = True
+                self.reasoning_output_index = self._allocate_output_index()
+                events += self._sse("response.output_item.added", {
+                    "output_index": self.reasoning_output_index,
+                    "item": {
+                        "type": "reasoning",
+                        "id": self.reasoning_item_id,
+                        "summary": [],
+                    },
+                })
+                events += self._sse("response.reasoning_summary_part.added", {
+                    "item_id": self.reasoning_item_id,
+                    "output_index": self.reasoning_output_index,
+                    "summary_index": 0,
+                    "part": {"type": "summary_text", "text": ""},
+                })
             self.accumulated_reasoning += reasoning
             events += self._sse("response.reasoning_summary_text.delta", {
-                "item_id": build_item_id("rs"),
-                "output_index": 0,
+                "item_id": self.reasoning_item_id,
+                "output_index": self.reasoning_output_index,
                 "summary_index": 0,
                 "delta": reasoning,
             })
@@ -408,7 +435,7 @@ class ResponsesStreamConverter:
         if text_content:
             if not self.content_started:
                 self.content_started = True
-                self.output_index = len(self.tool_calls)
+                self.output_index = self._allocate_output_index()
                 events += self._sse("response.output_item.added", {
                     "output_index": self.output_index,
                     "item": {
@@ -441,13 +468,14 @@ class ResponsesStreamConverter:
             if idx not in self.tool_calls:
                 item_id = build_item_id("fc")
                 self.tool_item_ids[idx] = item_id
+                self.tool_output_indices[idx] = self._allocate_output_index()
                 self.tool_calls[idx] = {
                     "id": tc.get("id", ""),
                     "name": tc.get("function", {}).get("name", ""),
                     "arguments": "",
                 }
                 events += self._sse("response.output_item.added", {
-                    "output_index": idx,
+                    "output_index": self.tool_output_indices[idx],
                     "item": {
                         "type": "function_call",
                         "id": item_id,
@@ -465,7 +493,7 @@ class ResponsesStreamConverter:
                 self.tool_calls[idx]["arguments"] += func["arguments"]
                 events += self._sse("response.function_call_arguments.delta", {
                     "item_id": self.tool_item_ids[idx],
-                    "output_index": idx,
+                    "output_index": self.tool_output_indices[idx],
                     "delta": func["arguments"],
                 })
 
@@ -481,72 +509,82 @@ class ResponsesStreamConverter:
     def _finalize(self) -> str:
         """Emit final events: output_item.done, content_part.done, response.completed."""
         events = ""
+        output_items_by_index = []
 
-        # Finalize tool call items
+        # Finalize reasoning (summary text/part done events)
+        if self.reasoning_started:
+            events += self._sse("response.reasoning_summary_text.done", {
+                "item_id": self.reasoning_item_id,
+                "output_index": self.reasoning_output_index,
+                "summary_index": 0,
+                "text": self.accumulated_reasoning,
+            })
+            events += self._sse("response.reasoning_summary_part.done", {
+                "item_id": self.reasoning_item_id,
+                "output_index": self.reasoning_output_index,
+                "summary_index": 0,
+                "part": {"type": "summary_text", "text": self.accumulated_reasoning},
+            })
+            reasoning_item = {
+                "type": "reasoning",
+                "id": self.reasoning_item_id,
+                "summary": [{"type": "summary_text", "text": self.accumulated_reasoning}],
+            }
+            output_items_by_index.append((self.reasoning_output_index, reasoning_item))
+
+        # Finalize tool call arguments
         for idx, tc in sorted(self.tool_calls.items()):
             item_id = self.tool_item_ids.get(idx, build_item_id("fc"))
+            output_index = self.tool_output_indices[idx]
             events += self._sse("response.function_call_arguments.done", {
                 "item_id": item_id,
-                "output_index": idx,
+                "output_index": output_index,
                 "arguments": tc["arguments"],
             })
-            events += self._sse("response.output_item.done", {
-                "output_index": idx,
-                "item": {
-                    "type": "function_call",
-                    "id": item_id,
-                    "call_id": tc["id"],
-                    "name": tc["name"],
-                    "arguments": tc["arguments"],
-                    "status": "completed",
-                },
-            })
-
-        # Finalize message content
-        if self.content_started:
-            events += self._sse("response.output_text.done", {
-                "item_id": self.message_item_id,
-                "output_index": self.output_index,
-                "content_index": 0,
-                "text": self.accumulated_content,
-            })
-            events += self._sse("response.content_part.done", {
-                "item_id": self.message_item_id,
-                "output_index": self.output_index,
-                "content_index": 0,
-                "part": {"type": "output_text", "text": self.accumulated_content},
-            })
-            events += self._sse("response.output_item.done", {
-                "output_index": self.output_index,
-                "item": {
-                    "type": "message",
-                    "id": self.message_item_id,
-                    "role": "assistant",
-                    "status": "completed",
-                    "content": [{"type": "output_text", "text": self.accumulated_content}],
-                },
-            })
-
-        # Build final output items for the completed response
-        output_items = []
-        for idx, tc in sorted(self.tool_calls.items()):
-            item_id = self.tool_item_ids.get(idx, build_item_id("fc"))
-            output_items.append({
+            tool_item = {
                 "type": "function_call",
                 "id": item_id,
                 "call_id": tc["id"],
                 "name": tc["name"],
                 "arguments": tc["arguments"],
                 "status": "completed",
-            })
+            }
+            output_items_by_index.append((output_index, tool_item))
+
+        # Finalize message content (text/part done events)
         if self.content_started:
-            output_items.append({
+            message_output_index = self.output_index
+            events += self._sse("response.output_text.done", {
+                "item_id": self.message_item_id,
+                "output_index": message_output_index,
+                "content_index": 0,
+                "text": self.accumulated_content,
+            })
+            events += self._sse("response.content_part.done", {
+                "item_id": self.message_item_id,
+                "output_index": message_output_index,
+                "content_index": 0,
+                "part": {"type": "output_text", "text": self.accumulated_content},
+            })
+            message_item = {
                 "type": "message",
                 "id": self.message_item_id,
                 "role": "assistant",
                 "status": "completed",
                 "content": [{"type": "output_text", "text": self.accumulated_content}],
+            }
+            output_items_by_index.append((message_output_index, message_item))
+
+        # Emit output_item.done events in allocation order so stream
+        # event order matches the final output array order.
+        for output_index, item in sorted(output_items_by_index, key=lambda pair: pair[0]):
+            events += self._sse("response.output_item.done", {
+                "output_index": output_index,
+                "item": item,
             })
+
+        # Build final output items in the same sorted order
+        output_items = [item for _, item in sorted(output_items_by_index, key=lambda item: item[0])]
 
         # Determine status
         status = "completed"

@@ -18,12 +18,10 @@ NO network calls, NO API keys needed.
 import os
 from unittest.mock import patch
 
-import pytest
 
 from rotator_library.model_alias_registry import (
     ModelAliasRegistry,
     AliasTarget,
-    DEFAULT_RETRY_MODE,
 )
 
 
@@ -219,3 +217,59 @@ class TestModelLatestRegistry:
         model = "glm-5"
         excluded = any(fnmatch.fnmatch(model, p) for p in exclude_patterns)
         assert not excluded
+
+
+class TestDefaultCodexAliases:
+    """Test built-in default Codex model aliases.
+
+    Default aliases provide bare-ID routing for OpenAI/Codex desktop apps
+    that send unprefixed or openai/-prefixed model IDs (e.g. ``gpt-5.5``,
+    ``openai/gpt-5.5``) without requiring MODEL_ALIAS_* env vars.
+    """
+
+    @staticmethod
+    def _env_without_model_aliases():
+        """Return env dict with MODEL_ALIAS_* vars stripped out."""
+        return {
+            k: v for k, v in os.environ.items()
+            if not k.startswith("MODEL_ALIAS_")
+        }
+
+    def test_default_codex_aliases_loaded(self):
+        """Default bare Codex model aliases resolve without env vars."""
+        with patch.dict(os.environ, self._env_without_model_aliases(), clear=True):
+            registry = ModelAliasRegistry()
+            for model in [
+                "gpt-5.5", "gpt-5.4", "gpt-5.4-mini",
+                "gpt-5.3-codex", "gpt-5.2", "codex-auto-review",
+            ]:
+                targets = registry.resolve(model)
+                assert targets is not None, f"{model} should have a default alias"
+                assert len(targets) == 1
+                assert targets[0].provider == "codex"
+
+    def test_default_codex_openai_compat_aliases_loaded(self):
+        """Default openai/-prefixed Codex aliases resolve without env vars."""
+        with patch.dict(os.environ, self._env_without_model_aliases(), clear=True):
+            registry = ModelAliasRegistry()
+            for model in [
+                "openai/gpt-5.5", "openai/gpt-5.4", "openai/gpt-5.4-mini",
+                "openai/gpt-5.3-codex", "openai/gpt-5.2", "openai/codex-auto-review",
+            ]:
+                targets = registry.resolve(model)
+                assert targets is not None, f"{model} should have a default alias"
+                assert len(targets) == 1
+                assert targets[0].provider == "codex"
+
+    def test_default_codex_aliases_in_canonical_models(self):
+        """All 12 Codex aliases appear in get_canonical_models()."""
+        with patch.dict(os.environ, self._env_without_model_aliases(), clear=True):
+            registry = ModelAliasRegistry()
+            canonical = set(registry.get_canonical_models())
+            expected = {
+                "gpt-5.5", "gpt-5.4", "gpt-5.4-mini",
+                "gpt-5.3-codex", "gpt-5.2", "codex-auto-review",
+                "openai/gpt-5.5", "openai/gpt-5.4", "openai/gpt-5.4-mini",
+                "openai/gpt-5.3-codex", "openai/gpt-5.2", "openai/codex-auto-review",
+            }
+            assert expected.issubset(canonical)

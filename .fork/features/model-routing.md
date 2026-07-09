@@ -83,3 +83,34 @@ Notes:
   `full_model` is already present in the discovered `model_ids` set.
 - This prevents `/v1/models` from returning duplicate entries without breaking
   aliases that route to providers not yet discovered.
+
+## 2026-07-09 — Add default Codex model aliases for bare and openai/-prefixed IDs
+
+Branch: `fix/core-responses-compat`
+Files:
+- `src/rotator_library/model_alias_registry.py`
+- `tests/test_model_alias.py`
+
+Changes:
+- Added 12 default Codex model aliases to `DEFAULT_MODEL_ALIASES`:
+  - 6 bare IDs: `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`,
+    `gpt-5.2`, `codex-auto-review` → `codex:<model>`
+  - 6 `openai/`-prefixed compatibility IDs: `openai/gpt-5.5`,
+    `openai/gpt-5.4`, `openai/gpt-5.4-mini`, `openai/gpt-5.3-codex`,
+    `openai/gpt-5.2`, `openai/codex-auto-review` → `codex:<model>`
+- Updated the `DEFAULT_MODEL_ALIASES` comment to reflect that defaults now
+  serve both Claude Code and OpenAI/Codex desktop apps.
+- Added `TestDefaultCodexAliases` test class with 3 tests: bare aliases
+  loaded, openai/-prefixed aliases loaded, all 12 in `get_canonical_models()`.
+
+Verification:
+- `uv run python3 -m py_compile src/rotator_library/model_alias_registry.py` — passed
+- `uv run ruff check src/rotator_library/model_alias_registry.py --select F401,F811,F821,E9` — passed
+- `uv run --with pytest python3 -m pytest tests/test_model_alias.py -v` — passed
+
+Notes:
+- The `openai/`-prefixed aliases are resolved by `_normalize_model_id()` in
+  `main.py` at the API handler layer, not by the routing logic in
+  `acompletion()`.
+- Operators can still override any default with `MODEL_ALIAS_*` env vars.
+- Ref: b3nw/LLM-API-Key-Proxy#110

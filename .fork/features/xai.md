@@ -80,3 +80,41 @@ Verification:
 - Header capture test confirmed `user-agent: grok/0.1.202` reaches upstream
   (via openai SDK `extra_headers` → httpx request)
 - Test completions to `grok-4.3` and `grok-build-0.1` both succeeded
+
+## 2026-07-09 — Route all chat completions through CLI proxy
+
+Branch: `feat/xai-cli-proxy-only`
+Files:
+- `src/rotator_library/providers/x_ai_provider.py`
+
+Problem:
+- The provider had dual-endpoint routing: models classified as "CLI-proxy-only"
+  went through `cli-chat-proxy.grok.com/v1`, all others through `api.x.ai/v1`.
+- Testing confirmed that **every chat-capable model** works through the CLI proxy
+  endpoint, making the dual routing unnecessary complexity.
+- Non-chat models (image gen `grok-imagine-*`, video gen, multi-agent
+  `grok-4.20-multi-agent*`) correctly reject `/chat/completions` on both endpoints.
+
+Changes:
+- `acompletion()` and `aembedding()` now always route through `cli_proxy_base`
+  (`cli-chat-proxy.grok.com/v1`) instead of conditionally selecting per model.
+- CLI proxy headers (`User-Agent`, `x-xai-token-auth`, `x-grok-client-version`)
+  injected on every request — merged `_get_grok_build_headers()` into
+  `_get_cli_proxy_headers()`.
+- Removed `_cli_proxy_models` set, `_is_cli_proxy_model()`, and the
+  versionless-alias deduplication logic from `get_models()`.
+- Added `_NON_CHAT_MODEL_PREFIXES` and `_is_chat_model()` to filter out
+  non-chat models from discovery results.
+- Model discovery still fetches from both `api.x.ai` (broadest catalog) and
+  CLI proxy (context window metadata), but merges into a single filtered list.
+- `XAI_API_BASE` env var retained for discovery; no longer used for routing.
+- Net change: −101 / +60 lines (simplification).
+
+Verification:
+- `uv run python3 -m py_compile` — passed
+- `uv run ruff check --select F401,F811,F821,E9` — passed
+- Pre-commit hook passed
+- Tested all models against CLI proxy before making the change:
+  `grok-4.3`, `grok-4.5`, `grok-4.20-0309-non-reasoning`,
+  `grok-4.20-0309-reasoning`, `grok-build-0.1`, `grok-composer-2.5-fast`
+  — all returned 200 OK via CLI proxy

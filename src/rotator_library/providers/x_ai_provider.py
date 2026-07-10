@@ -5,16 +5,14 @@
 xAI Grok Provider
 
 Provider for xAI Grok models via OAuth2 authentication (SuperGrok / X Premium+).
-Routes requests through LiteLLM's built-in xAI support (`xai/` prefix).
+Routes all requests through the CLI chat proxy at cli-chat-proxy.grok.com/v1,
+which supports every chat-capable model and ensures traffic is attributed to the
+Grok Build / subscription billing track.
 
-Two API endpoints are supported:
-  - Standard API: https://api.x.ai/v1 (public models like grok-4.3)
-  - CLI Proxy:    https://cli-chat-proxy.grok.com/v1 (agentic models like
-                  grok-composer-2.5-fast and grok-build with 512K context)
-
-Models are discovered from both endpoints.  CLI-proxy-only models are routed
-through the CLI proxy with the required ``User-Agent: grok/<version>`` header;
-all other models go through the standard API.
+Model discovery merges results from both the standard API (api.x.ai) and the
+CLI proxy to build the complete list.  Non-chat models (image generation,
+video generation, multi-agent) are excluded since they are not usable via
+the /chat/completions endpoint.
 """
 
 from __future__ import annotations
@@ -47,6 +45,13 @@ XAI_CLI_PROXY_BASE = os.getenv(
 # Minimum CLI version the proxy accepts (426 Upgrade Required otherwise)
 XAI_CLI_VERSION = os.getenv("XAI_CLI_VERSION", "0.1.202")
 
+# Models that are not usable via /chat/completions (image gen, video gen,
+# multi-agent orchestration).  Excluded from the advertised model list.
+_NON_CHAT_MODEL_PREFIXES = (
+    "grok-imagine-",
+    "grok-4.20-multi-agent",
+)
+
 # Params accepted by litellm.acompletion for xAI (OpenAI-compatible)
 SUPPORTED_PARAMS = {
     "model",
@@ -77,6 +82,11 @@ SUPPORTED_PARAMS = {
 }
 
 
+def _is_chat_model(model_id: str) -> bool:
+    """Return False for image/video/multi-agent models."""
+    return not any(model_id.startswith(p) for p in _NON_CHAT_MODEL_PREFIXES)
+
+
 class XAiProvider(XAiAuthBase, XAiQuotaTracker, ProviderInterface):
     """
     Provider for xAI Grok models using OAuth2 credentials.
@@ -86,9 +96,10 @@ class XAiProvider(XAiAuthBase, XAiQuotaTracker, ProviderInterface):
       - Access token injected as Bearer auth for the OpenAI-compatible API
 
     Model routing:
-      - Standard API models use LiteLLM's `xai/` prefix
-      - CLI proxy models route through cli-chat-proxy.grok.com with version header
-      - Model discovery from both endpoints, merged and deduplicated
+      - All chat completions route through cli-chat-proxy.grok.com
+      - CLI proxy headers (User-Agent, x-xai-token-auth, x-grok-client-version)
+        are injected on every request
+      - Model discovery merges both api.x.ai and CLI proxy, filtered to chat models
     """
 
     provider_env_name = "x-ai"
@@ -114,31 +125,28 @@ class XAiProvider(XAiAuthBase, XAiQuotaTracker, ProviderInterface):
         self.cli_proxy_base = XAI_CLI_PROXY_BASE
         self._cli_version = XAI_CLI_VERSION
         self.model_definitions = ModelDefinitions()
-        # Models that are only available on the CLI proxy (not on api.x.ai)
-        self._cli_proxy_models: set = set()
         # Context window metadata from CLI proxy discovery
         # Maps bare model id -> context_window (e.g. {"grok-build": 512000})
         self._cli_proxy_metadata: dict = {}
         lib_logger.debug(
-            f"XAiProvider initialized: base={self.api_base}, "
-            f"cli_proxy={self.cli_proxy_base}"
+            f"XAiProvider initialized: cli_proxy={self.cli_proxy_base}"
         )
 
     async def get_models(self, api_key: str, client: httpx.AsyncClient) -> List[str]:
         """
-        Return the list of available xAI models.
+        Return the list of available xAI chat models.
 
         Discovery order:
         1. Static override from environment / model_definitions
-        2. Live fetch from both xAI standard API and CLI proxy
+        2. Live fetch from both xAI standard API and CLI proxy, merged
         3. Hardcoded fallback
+
+        Non-chat models (image gen, video gen, multi-agent) are excluded.
         """
-        # 1. Check static model definitions first
         static_models = self.model_definitions.get_all_provider_models("x-ai")
         if static_models:
             return static_models
 
-        # Resolve OAuth credential to token (needed for both endpoints)
         try:
             auth_header = await self.get_auth_header(api_key)
             token = auth_header.get("Authorization", "").replace("Bearer ", "")
@@ -146,10 +154,9 @@ class XAiProvider(XAiAuthBase, XAiQuotaTracker, ProviderInterface):
             lib_logger.warning(f"Failed to resolve xAI OAuth token for model discovery: {e}")
             return ["x-ai/grok-3", "x-ai/grok-3-mini"]
 
-        standard_ids: set = set()
-        cli_proxy_ids: set = set()
+        all_ids: set = set()
 
-        # 2a. Fetch from standard API (api.x.ai)
+        # Fetch from standard API (api.x.ai) — broadest catalog
         try:
             response = await client.get(
                 f"{self.api_base}/models",
@@ -161,6 +168,7 @@ class XAiProvider(XAiAuthBase, XAiQuotaTracker, ProviderInterface):
             standard_ids = {
                 m["id"] for m in data.get("data", []) if m.get("id")
             }
+            all_ids.update(standard_ids)
             if standard_ids:
                 lib_logger.info(
                     f"Discovered {len(standard_ids)} models from xAI standard API"
@@ -168,7 +176,7 @@ class XAiProvider(XAiAuthBase, XAiQuotaTracker, ProviderInterface):
         except Exception as e:
             lib_logger.warning(f"Failed to fetch xAI standard API models: {e}")
 
-        # 2b. Fetch from CLI proxy (cli-chat-proxy.grok.com)
+        # Fetch from CLI proxy — may have additional models + context metadata
         try:
             response = await client.get(
                 f"{self.cli_proxy_base}/models",
@@ -177,53 +185,35 @@ class XAiProvider(XAiAuthBase, XAiQuotaTracker, ProviderInterface):
             )
             response.raise_for_status()
             data = response.json()
+            cli_count = 0
             for m in data.get("data", []):
                 mid = m.get("id")
                 if not mid:
                     continue
-                cli_proxy_ids.add(mid)
-                # Capture context_window metadata from CLI proxy
+                all_ids.add(mid)
+                cli_count += 1
                 ctx = m.get("context_window")
                 if ctx:
                     self._cli_proxy_metadata[mid] = int(ctx)
-            if cli_proxy_ids:
+            if cli_count:
                 lib_logger.info(
-                    f"Discovered {len(cli_proxy_ids)} models from xAI CLI proxy: "
-                    f"{', '.join(sorted(cli_proxy_ids))}"
+                    f"Discovered {cli_count} models from xAI CLI proxy"
                 )
         except Exception as e:
             lib_logger.warning(f"Failed to fetch xAI CLI proxy models: {e}")
 
-        # Determine CLI-proxy-only models.
-        # Some models (like grok-composer-2.5-fast) are listed by the CLI
-        # proxy but also work on the standard API as "hidden" models (not in
-        # /v1/models).  We only treat a model as truly CLI-proxy-only if it
-        # has a name-stem collision with a standard API model that has a
-        # version suffix (e.g. CLI "grok-build" vs standard "grok-build-0.1"),
-        # indicating the CLI proxy exposes a versionless alias.
-        cli_only_candidates = cli_proxy_ids - standard_ids
-        truly_cli_only: set = set()
-        for mid in cli_only_candidates:
-            # Check if standard API has a versioned variant (e.g. mid-0.1)
-            has_versioned_sibling = any(
-                sid.startswith(f"{mid}-") for sid in standard_ids
-            )
-            if has_versioned_sibling:
-                truly_cli_only.add(mid)
-        self._cli_proxy_models = truly_cli_only
-        if self._cli_proxy_models:
-            lib_logger.info(
-                f"CLI-proxy-only models: {', '.join(sorted(self._cli_proxy_models))}"
+        # Filter to chat-capable models only
+        chat_ids = {mid for mid in all_ids if _is_chat_model(mid)}
+        excluded = all_ids - chat_ids
+        if excluded:
+            lib_logger.debug(
+                f"xAI: excluded {len(excluded)} non-chat models: "
+                f"{', '.join(sorted(excluded))}"
             )
 
-        # Merge: all unique model IDs, prefixed with x-ai/
-        # Exclude CLI-proxy aliases (e.g. grok-build) since they're just
-        # versionless aliases for standard API models (e.g. grok-build-0.1).
-        all_ids = (standard_ids | cli_proxy_ids) - truly_cli_only
-        if all_ids:
-            return sorted(f"x-ai/{mid}" for mid in all_ids)
+        if chat_ids:
+            return sorted(f"x-ai/{mid}" for mid in chat_ids)
 
-        # 3. Graceful fallback
         return ["x-ai/grok-3", "x-ai/grok-3-mini"]
 
     def get_model_context_overrides(self) -> dict:
@@ -250,29 +240,20 @@ class XAiProvider(XAiAuthBase, XAiQuotaTracker, ProviderInterface):
         """
         return True
 
-    def _get_grok_build_headers(self) -> dict:
-        """Return User-Agent header identifying as a Grok Build client.
-
-        xAI classifies usage as "Grok Build" vs "API" partly based on the
-        User-Agent.  The openai-python SDK sets ``OpenAI/Python ...`` which
-        gets bucketed as plain API usage.  Overriding with the same UA the
-        Grok Build CLI sends ensures OAuth-subscription traffic is attributed
-        to the Grok Build billing track.
-        """
-        return {"User-Agent": f"grok/{self._cli_version}"}
-
     def _get_cli_proxy_headers(self) -> dict:
-        """Return extra headers required by the CLI chat proxy."""
+        """Return headers for all CLI proxy requests.
+
+        These headers identify the client as a Grok CLI session, which:
+        1. Satisfies the CLI proxy's transport requirements
+        2. Ensures xAI attributes traffic to the subscription billing track
+           (not the pay-per-token API track)
+        """
         ver = self._cli_version
         return {
             "User-Agent": f"grok/{ver}",
             "x-xai-token-auth": "xai-grok-cli",
             "x-grok-client-version": ver,
         }
-
-    def _is_cli_proxy_model(self, model_bare: str) -> bool:
-        """Check if a model should be routed through the CLI proxy."""
-        return model_bare in self._cli_proxy_models
 
     async def acompletion(
         self,
@@ -282,9 +263,7 @@ class XAiProvider(XAiAuthBase, XAiQuotaTracker, ProviderInterface):
         """
         Make a chat completion request to xAI via LiteLLM.
 
-        Resolves the OAuth credential file path into a bearer token.
-        Routes CLI-proxy-only models through cli-chat-proxy.grok.com with
-        the required version header; all other models go through api.x.ai.
+        All requests route through cli-chat-proxy.grok.com with CLI headers.
         """
         credential = kwargs.pop("credential_identifier", "")
         kwargs.pop("transaction_context", None)
@@ -292,7 +271,6 @@ class XAiProvider(XAiAuthBase, XAiQuotaTracker, ProviderInterface):
         model = kwargs.get("model", "")
         model_bare = model.split("/")[-1] if "/" in model else model
 
-        # Resolve OAuth credential to access token
         auth_header = await self.get_auth_header(credential)
         token = auth_header.get("Authorization", "").replace("Bearer ", "")
 
@@ -302,38 +280,20 @@ class XAiProvider(XAiAuthBase, XAiQuotaTracker, ProviderInterface):
                 f"{mask_credential(credential)}"
             )
 
-        # Select endpoint based on model
-        use_cli_proxy = self._is_cli_proxy_model(model_bare)
-        api_base = self.cli_proxy_base if use_cli_proxy else self.api_base
-
-        # Route through LiteLLM as xai/model
         kwargs["model"] = f"xai/{model_bare}"
         kwargs["api_key"] = token
-        kwargs["api_base"] = api_base
+        kwargs["api_base"] = self.cli_proxy_base
         kwargs["custom_llm_provider"] = "xai"
 
-        # Always inject Grok Build User-Agent so xAI attributes traffic to
-        # the subscription billing track instead of the pay-per-token API.
         existing_headers = kwargs.get("extra_headers") or {}
-        extra_headers = {**self._get_grok_build_headers(), **existing_headers}
+        kwargs["extra_headers"] = {**existing_headers, **self._get_cli_proxy_headers()}
 
-        # CLI proxy models need additional transport headers
-        if use_cli_proxy:
-            extra_headers.update(self._get_cli_proxy_headers())
-            lib_logger.debug(
-                f"xai: routing {model_bare} through CLI proxy with version header"
-            )
-
-        kwargs["extra_headers"] = extra_headers
-
-        # Set up async OpenAI client for LiteLLM
         kwargs["client"] = openai.AsyncOpenAI(
             api_key=token,
-            base_url=api_base,
+            base_url=self.cli_proxy_base,
             http_client=client,
         )
 
-        # Strip unsupported params
         unsupported = set(kwargs.keys()) - SUPPORTED_PARAMS
         if unsupported:
             lib_logger.debug(
@@ -357,7 +317,6 @@ class XAiProvider(XAiAuthBase, XAiQuotaTracker, ProviderInterface):
         model = kwargs.get("model", "")
         model_bare = model.split("/")[-1] if "/" in model else model
 
-        # Resolve OAuth credential to access token
         auth_header = await self.get_auth_header(credential)
         token = auth_header.get("Authorization", "").replace("Bearer ", "")
 
@@ -369,16 +328,16 @@ class XAiProvider(XAiAuthBase, XAiQuotaTracker, ProviderInterface):
 
         kwargs["model"] = f"xai/{model_bare}"
         kwargs["api_key"] = token
-        kwargs["api_base"] = self.api_base
+        kwargs["api_base"] = self.cli_proxy_base
         kwargs["custom_llm_provider"] = "xai"
         kwargs["extra_headers"] = {
-            **self._get_grok_build_headers(),
             **(kwargs.get("extra_headers") or {}),
+            **self._get_cli_proxy_headers(),
         }
 
         kwargs["client"] = openai.AsyncOpenAI(
             api_key=token,
-            base_url=self.api_base,
+            base_url=self.cli_proxy_base,
             http_client=client,
         )
 

@@ -160,6 +160,7 @@ with _console.status("[dim]Initializing proxy core...", spinner="dots"):
         build_response_id,
         ResponsesStreamConverter,
     )
+    from proxy_app.sse_keepalive import stream_with_sse_keepalives
 
 print("  → Discovering provider plugins...")
 # Provider lazy loading happens during import, so time it here
@@ -787,10 +788,12 @@ async def streaming_response_wrapper(
     full_response = {}
 
     try:
-        async for chunk_str in response_stream:
-            if await request.is_disconnected():
-                logging.warning("Client disconnected, stopping stream.")
-                break
+        async for chunk_str in stream_with_sse_keepalives(
+            request, response_stream, "chat_completions"
+        ):
+            if chunk_str.startswith(":"):
+                yield chunk_str
+                continue
             yield chunk_str
             if chunk_str.strip() and chunk_str.startswith("data:"):
                 content = chunk_str[len("data:") :].strip()
@@ -1113,6 +1116,7 @@ async def chat_completions(
 
 
 # --- OpenAI Responses API Endpoint ---
+@app.post("/responses")
 @app.post("/v1/responses")
 async def responses_api(
     request: Request,
@@ -1171,10 +1175,12 @@ async def responses_api(
 
             async def responses_stream_wrapper():
                 try:
-                    async for chunk_str in response_generator:
-                        if await request.is_disconnected():
-                            logging.warning("Client disconnected, stopping stream.")
-                            break
+                    async for chunk_str in stream_with_sse_keepalives(
+                        request, response_generator, "responses"
+                    ):
+                        if chunk_str.startswith(":"):
+                            yield chunk_str
+                            continue
                         events = converter.convert_chunk(chunk_str)
                         if events:
                             yield events

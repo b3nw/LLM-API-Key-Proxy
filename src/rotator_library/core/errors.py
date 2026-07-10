@@ -105,6 +105,7 @@ class ProxyExhaustionError(Exception):
         "context_window_exceeded": 400,
         "invalid_request": 400,
         "authentication": 401,
+        "credential_reauth_needed": 401,
         "forbidden": 403,
         "rate_limit": 429,
         "quota_exceeded": 429,

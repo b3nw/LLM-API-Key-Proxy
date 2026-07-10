@@ -188,8 +188,9 @@ class OpenAIOAuthBase:
         self._queue_tracking_lock = asyncio.Lock()
         self._queue_retry_count: Dict[str, int] = {}
 
-        # Configuration
-        self._refresh_timeout_seconds: int = 15
+        # Configuration — refresh timeout must exceed the inner httpx timeout
+        # (30s) plus any Retry-After sleep to avoid cancelling mid-flight.
+        self._refresh_timeout_seconds: int = 45
         self._refresh_interval_seconds: int = 30
         self._refresh_max_retries: int = 3
         self._reauth_timeout_seconds: int = 300
@@ -545,16 +546,18 @@ class OpenAIOAuthBase:
                     return
 
         async with self._queue_tracking_lock:
-            if path not in self._queued_credentials:
+            if needs_reauth:
+                # Reauth escalation always proceeds — a credential already in
+                # the normal refresh queue may have just discovered an
+                # invalid_grant and must be escalated to the reauth queue.
                 self._queued_credentials.add(path)
-
-                if needs_reauth:
-                    self._unavailable_credentials[path] = time.time()
-                    await self._reauth_queue.put(path)
-                    await self._ensure_reauth_processor_running()
-                else:
-                    await self._refresh_queue.put((path, force))
-                    await self._ensure_queue_processor_running()
+                self._unavailable_credentials[path] = time.time()
+                await self._reauth_queue.put(path)
+                await self._ensure_reauth_processor_running()
+            elif path not in self._queued_credentials:
+                self._queued_credentials.add(path)
+                await self._refresh_queue.put((path, force))
+                await self._ensure_queue_processor_running()
 
     async def _ensure_queue_processor_running(self):
         """Lazily starts the queue processor if not already running."""
@@ -582,6 +585,9 @@ class OpenAIOAuthBase:
                 except asyncio.TimeoutError:
                     async with self._queue_tracking_lock:
                         self._queue_retry_count.clear()
+                        # Clear queued set so future _queue_refresh calls
+                        # don't no-op on stale entries from the dead processor.
+                        self._queued_credentials.clear()
                     self._queue_processor_task = None
                     return
 
@@ -682,7 +688,13 @@ class OpenAIOAuthBase:
         await self._refresh_queue.put((path, force))
 
     async def _process_reauth_queue(self):
-        """Background worker that processes re-auth requests."""
+        """Background worker that processes re-auth requests.
+
+        On headless servers (Docker prod), interactive OAuth is impossible.
+        Instead of looping forever, mark the credential as needing manual
+        re-auth and keep it unavailable until the user runs credential_tool.py
+        and restarts.  Mirrors google_oauth_base's [NO AUTO-REAUTH] approach.
+        """
         while True:
             path = None
             try:
@@ -694,30 +706,40 @@ class OpenAIOAuthBase:
                     self._reauth_processor_task = None
                     return
 
+                reauth_succeeded = False
                 try:
-                    lib_logger.info(f"Starting re-auth for '{Path(path).name}'...")
-                    await self.initialize_token(path, force_interactive=True)
-                    lib_logger.info(f"Re-auth SUCCESS for '{Path(path).name}'")
+                    if is_headless_environment():
+                        lib_logger.warning(
+                            f"[NO AUTO-REAUTH] Credential '{Path(path).name}' needs "
+                            f"re-authentication but running in headless environment. "
+                            f"Run 'credential_tool.py' to manually re-authenticate, "
+                            f"then restart the proxy."
+                        )
+                    else:
+                        lib_logger.info(f"Starting re-auth for '{Path(path).name}'...")
+                        await self.initialize_token(path, force_interactive=True)
+                        lib_logger.info(f"Re-auth SUCCESS for '{Path(path).name}'")
+                        reauth_succeeded = True
                 except Exception as e:
                     lib_logger.error(f"Re-auth FAILED for '{Path(path).name}': {e}")
                 finally:
                     async with self._queue_tracking_lock:
                         self._queued_credentials.discard(path)
-                        self._unavailable_credentials.pop(path, None)
+                        if reauth_succeeded:
+                            self._unavailable_credentials.pop(path, None)
+                        # On failure/headless: keep credential in _unavailable_credentials
                     self._reauth_queue.task_done()
 
             except asyncio.CancelledError:
                 if path:
                     async with self._queue_tracking_lock:
                         self._queued_credentials.discard(path)
-                        self._unavailable_credentials.pop(path, None)
                 break
             except Exception as e:
                 lib_logger.error(f"Error in re-auth queue processor: {e}")
                 if path:
                     async with self._queue_tracking_lock:
                         self._queued_credentials.discard(path)
-                        self._unavailable_credentials.pop(path, None)
 
     async def _perform_interactive_oauth(
         self, path: str, creds: Dict[str, Any], display_name: str
@@ -1027,18 +1049,18 @@ class OpenAIOAuthBase:
             )
 
     async def get_auth_header(self, credential_path: str) -> Dict[str, str]:
-        """Get auth header with graceful degradation if refresh fails."""
+        """Get auth header, propagating reauth errors instead of serving dead tokens."""
         try:
             creds = await self._load_credentials(credential_path)
 
-            # Prefer API key if available
             if creds.get("api_key"):
                 return {"Authorization": f"Bearer {creds['api_key']}"}
 
-            # Fall back to access token
             if self._is_token_expired(creds):
                 try:
                     creds = await self._refresh_token(credential_path, creds)
+                except CredentialNeedsReauthError:
+                    raise
                 except Exception as e:
                     cached = self._credentials_cache.get(credential_path)
                     if cached and (cached.get("access_token") or cached.get("api_key")):
@@ -1058,6 +1080,8 @@ class OpenAIOAuthBase:
             token = creds.get("api_key") or creds.get("access_token")
             return {"Authorization": f"Bearer {token}"}
 
+        except CredentialNeedsReauthError:
+            raise
         except Exception as e:
             cached = self._credentials_cache.get(credential_path)
             if cached and (cached.get("access_token") or cached.get("api_key")):

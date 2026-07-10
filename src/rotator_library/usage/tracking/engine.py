@@ -10,7 +10,7 @@ Central component for recording requests, successes, and failures.
 import asyncio
 import logging
 import time
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 if TYPE_CHECKING:
     from ..config import WindowDefinition
@@ -18,8 +18,6 @@ if TYPE_CHECKING:
 from ..types import (
     WindowStats,
     TotalStats,
-    ModelStats,
-    GroupStats,
     CredentialState,
     CooldownInfo,
     FairCycleState,
@@ -29,7 +27,6 @@ from ..types import (
 )
 from ..config import WindowDefinition, ProviderUsageConfig
 from .windows import WindowManager
-from ...error_handler import mask_credential
 from ...error_handler import mask_credential
 
 lib_logger = logging.getLogger("rotator_library")
@@ -601,12 +598,13 @@ class TrackingEngine:
         existing = state.cooldowns.get(key)
         backoff_count = 0
         if existing and existing.is_active:
-            # Preserve original reason/source/started_at - cooldown reason should
-            # reflect why it was originally set, not subsequent updates
-            # Time (until) is updated to the new value as API is authoritative
             backoff_count = existing.backoff_count + 1
-            reason = existing.reason
-            source = existing.source
+            # Never shorten an existing cooldown — take the longer of the two.
+            # Preserve the reason/source from whichever endpoint is further out.
+            if existing.until >= cooldown_until:
+                cooldown_until = existing.until
+                reason = existing.reason
+                source = existing.source
             started_at = existing.started_at
         else:
             started_at = now

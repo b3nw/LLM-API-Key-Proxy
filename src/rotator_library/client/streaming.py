@@ -202,8 +202,8 @@ class StreamingHandler:
                 cred_context.mark_failure(
                     ClassifiedError(
                         error_type="empty_response",
-                        message="Provider returned empty stream",
-                        retry_after=None,
+                        original_exception=Exception("Provider returned empty stream"),
+                        status_code=503,
                     )
                 )
             raise StreamedAPIError("Provider returned empty stream", data=None)

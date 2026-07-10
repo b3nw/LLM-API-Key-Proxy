@@ -227,6 +227,7 @@ ABNORMAL_ERROR_TYPES = frozenset(
     {
         "forbidden",  # 403 - credential access issue
         "authentication",  # 401 - credential invalid/revoked
+        "credential_reauth_needed",  # OAuth token invalidated, needs manual re-auth
         "pre_request_callback_error",  # Internal proxy error
     }
 )
@@ -414,6 +415,7 @@ class RequestErrorAccumulator:
         _PRIORITY = [
             "context_window_exceeded",
             "invalid_request",
+            "credential_reauth_needed",
             "authentication",
             "forbidden",
             "rate_limit",
@@ -876,17 +878,45 @@ def classify_error(e: Exception, provider: Optional[str] = None) -> ClassifiedEr
         if isinstance(payload, dict):
             code = payload.get("code")
             status = str(payload.get("status", "")).upper()
+            msg = str(payload.get("message", "")).lower()
             try:
                 status_code = int(code) if code is not None else None
             except (TypeError, ValueError):
                 status_code = None
+
+            # Map streamed error dicts to the same types as HTTP responses
+            if status_code == 401 or status == "UNAUTHENTICATED" or code == "token_invalidated":
+                return ClassifiedError(
+                    error_type="authentication",
+                    original_exception=Exception(str(payload.get("message", e))),
+                    status_code=401,
+                )
+            if status_code == 403 or status == "PERMISSION_DENIED":
+                return ClassifiedError(
+                    error_type="forbidden",
+                    original_exception=Exception(str(payload.get("message", e))),
+                    status_code=403,
+                )
+            if status_code == 429 or status == "RESOURCE_EXHAUSTED":
+                retry_after = None
+                if "retry" in msg:
+                    import re as _re
+                    m = _re.search(r"(\d+)\s*s", msg)
+                    if m:
+                        retry_after = int(m.group(1))
+                return ClassifiedError(
+                    error_type="rate_limit",
+                    original_exception=Exception(str(payload.get("message", e))),
+                    status_code=429,
+                    retry_after=retry_after,
+                )
             if (status_code is not None and status_code >= 500) or status in {
                 "INTERNAL",
                 "UNAVAILABLE",
             }:
                 return ClassifiedError(
                     error_type="server_error",
-                    original_exception=e,
+                    original_exception=Exception(str(payload.get("message", e))),
                     status_code=status_code or 503,
                 )
 

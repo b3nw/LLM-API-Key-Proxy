@@ -229,3 +229,27 @@ Notes:
 - `RotatingClient.acompletion()` routing logic unchanged
 - `list_models()` and `get_model()` unchanged
 - Ref: b3nw/LLM-API-Key-Proxy#110
+
+---
+
+## 2026-07-09 — Add SSE keepalives for quiet stream gaps
+
+Target: `feat(core): infrastructure improvements - latest aliases, error standardization, and utilities`
+Files:
+- `src/proxy_app/main.py`
+- `src/proxy_app/sse_keepalive.py`
+- `tests/test_sse_keepalive.py`
+
+Working commits before autosquash:
+- PR branch commit for `fix(core): emit SSE keepalives during quiet stream gaps`.
+
+Verification:
+- `uv run python3 -m py_compile src/proxy_app/main.py src/proxy_app/sse_keepalive.py tests/test_sse_keepalive.py` — passed
+- `uv run ruff check src/proxy_app/main.py src/proxy_app/sse_keepalive.py tests/test_sse_keepalive.py --select F401,F811,F821,E9` — passed
+- `uv run --with pytest --with pytest-asyncio pytest tests/test_sse_keepalive.py -q` — passed (`2 passed`)
+- `uv run python .fork/check-stack.py` — failed on pre-existing current-base webui stack metadata, unrelated to this PR's touched files
+
+Notes:
+- Long OpenAI-compatible SSE streams can legitimately have quiet periods while an upstream model reasons or waits on tool work.
+- Some clients abort a stream if no bytes arrive within their read-idle window; emitting SSE comment keepalives keeps the connection byte-active without changing parsed model events.
+- The default interval is 30 seconds and can be disabled with `SSE_KEEPALIVE_INTERVAL_SECONDS=0`.

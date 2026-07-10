@@ -127,8 +127,9 @@ class AnthropicOAuthBase:
         self._queue_tracking_lock = asyncio.Lock()
         self._queue_retry_count: Dict[str, int] = {}
 
-        # Configuration
-        self._refresh_timeout_seconds: int = 15
+        # Configuration — refresh timeout must exceed the inner httpx timeout
+        # (30s) plus any Retry-After sleep to avoid cancelling mid-flight.
+        self._refresh_timeout_seconds: int = 45
         self._refresh_interval_seconds: int = 30
         self._refresh_max_retries: int = 3
         self._reauth_timeout_seconds: int = 300
@@ -548,16 +549,18 @@ class AnthropicOAuthBase:
                     return
 
         async with self._queue_tracking_lock:
-            if path not in self._queued_credentials:
+            if needs_reauth:
+                # Reauth escalation always proceeds — even if already queued
+                # for normal refresh (e.g. invalid_grant during queue-driven
+                # refresh must reach the reauth queue).
                 self._queued_credentials.add(path)
-
-                if needs_reauth:
-                    self._unavailable_credentials[path] = time.time()
-                    await self._reauth_queue.put(path)
-                    await self._ensure_reauth_processor_running()
-                else:
-                    await self._refresh_queue.put((path, force))
-                    await self._ensure_queue_processor_running()
+                self._unavailable_credentials[path] = time.time()
+                await self._reauth_queue.put(path)
+                await self._ensure_reauth_processor_running()
+            elif path not in self._queued_credentials:
+                self._queued_credentials.add(path)
+                await self._refresh_queue.put((path, force))
+                await self._ensure_queue_processor_running()
 
     async def _ensure_queue_processor_running(self):
         if self._queue_processor_task is None or self._queue_processor_task.done():
@@ -583,6 +586,7 @@ class AnthropicOAuthBase:
                 except asyncio.TimeoutError:
                     async with self._queue_tracking_lock:
                         self._queue_retry_count.clear()
+                        self._queued_credentials.clear()
                     self._queue_processor_task = None
                     return
 
@@ -658,7 +662,12 @@ class AnthropicOAuthBase:
         await self._refresh_queue.put((path, force))
 
     async def _process_reauth_queue(self):
-        """Background worker that processes re-auth requests."""
+        """Background worker that processes re-auth requests.
+
+        On headless servers (Docker prod), interactive OAuth is impossible.
+        Mark the credential as needing manual re-auth and keep it unavailable.
+        Mirrors google_oauth_base's [NO AUTO-REAUTH] approach.
+        """
         while True:
             path = None
             try:
@@ -670,30 +679,39 @@ class AnthropicOAuthBase:
                     self._reauth_processor_task = None
                     return
 
+                reauth_succeeded = False
                 try:
-                    lib_logger.info(f"Starting Anthropic re-auth for '{Path(path).name}'...")
-                    await self.initialize_token(path, force_interactive=True)
-                    lib_logger.info(f"Anthropic re-auth SUCCESS for '{Path(path).name}'")
+                    if is_headless_environment():
+                        lib_logger.warning(
+                            f"[NO AUTO-REAUTH] Anthropic credential '{Path(path).name}' needs "
+                            f"re-authentication but running in headless environment. "
+                            f"Run 'credential_tool.py' to manually re-authenticate, "
+                            f"then restart the proxy."
+                        )
+                    else:
+                        lib_logger.info(f"Starting Anthropic re-auth for '{Path(path).name}'...")
+                        await self.initialize_token(path, force_interactive=True)
+                        lib_logger.info(f"Anthropic re-auth SUCCESS for '{Path(path).name}'")
+                        reauth_succeeded = True
                 except Exception as e:
                     lib_logger.error(f"Anthropic re-auth FAILED for '{Path(path).name}': {e}")
                 finally:
                     async with self._queue_tracking_lock:
                         self._queued_credentials.discard(path)
-                        self._unavailable_credentials.pop(path, None)
+                        if reauth_succeeded:
+                            self._unavailable_credentials.pop(path, None)
                     self._reauth_queue.task_done()
 
             except asyncio.CancelledError:
                 if path:
                     async with self._queue_tracking_lock:
                         self._queued_credentials.discard(path)
-                        self._unavailable_credentials.pop(path, None)
                 break
             except Exception as e:
                 lib_logger.error(f"Error in Anthropic re-auth queue processor: {e}")
                 if path:
                     async with self._queue_tracking_lock:
                         self._queued_credentials.discard(path)
-                        self._unavailable_credentials.pop(path, None)
 
     # =========================================================================
     # INTERACTIVE OAUTH FLOW
@@ -939,17 +957,15 @@ class AnthropicOAuthBase:
     # =========================================================================
 
     async def get_anthropic_auth_header(self, credential_path: str) -> Dict[str, str]:
-        """
-        Get auth header for Anthropic OAuth requests.
-
-        Returns Bearer token header for use with Anthropic Messages API.
-        """
+        """Get auth header, propagating reauth errors instead of serving dead tokens."""
         try:
             creds = await self._load_credentials(credential_path)
 
             if self._is_token_expired(creds):
                 try:
                     creds = await self._refresh_token(credential_path, creds)
+                except CredentialNeedsReauthError:
+                    raise
                 except Exception as e:
                     cached = self._credentials_cache.get(credential_path)
                     if cached and cached.get("access_token"):
@@ -964,6 +980,8 @@ class AnthropicOAuthBase:
             token = creds.get("access_token")
             return {"Authorization": f"Bearer {token}"}
 
+        except CredentialNeedsReauthError:
+            raise
         except Exception as e:
             cached = self._credentials_cache.get(credential_path)
             if cached and cached.get("access_token"):

@@ -2136,6 +2136,7 @@ class UsageManager:
                 f"{mask_credential(accessor, style='full')} - API shows quota available "
                 f"(was: {cooldown.reason}, source: {cooldown.source})"
             )
+            await self._save_if_needed()
             return True
 
         return False
@@ -2569,8 +2570,25 @@ class UsageManager:
             cooldown_duration = error.retry_after
             quota_reset = error.quota_reset_timestamp
 
+            if error.error_type in ("authentication", "credential_reauth_needed", "forbidden"):
+                # Auth/forbidden errors: apply escalating global cooldown to
+                # remove the credential from rotation.  The credential may
+                # recover after a forced token refresh, so we don't mark it
+                # permanently exhausted — just cool it off.
+                existing_global = state.cooldowns.get("_global_")
+                backoff = existing_global.backoff_count + 1 if (existing_global and existing_global.is_active) else 0
+                auth_cooldown = min(900 * (2 ** backoff), 14400)  # 15 min → 4h cap
+                if cooldown_duration is None or cooldown_duration < auth_cooldown:
+                    cooldown_duration = auth_cooldown
+                group_key = "_global_"
+                masked = mask_credential(state.accessor, style="full")
+                lib_logger.warning(
+                    f"Auth error ({error.error_type}) on {masked}: "
+                    f"applying {cooldown_duration:.0f}s cooldown (backoff={backoff})"
+                )
+
             # Mark exhausted for quota errors with long cooldown
-            if error.error_type == "quota_exceeded":
+            elif error.error_type == "quota_exceeded":
                 if (
                     cooldown_duration
                     and cooldown_duration >= self._config.exhaustion_cooldown_threshold

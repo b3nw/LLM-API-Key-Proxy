@@ -1135,7 +1135,7 @@ class RequestExecutor:
 
                                     if not should_rotate_on_error(classified):
                                         cred_context.mark_failure(classified)
-                                        raise
+                                        raise TerminalRequestError(e)
 
                                     if not can_retry_stream_after_error(
                                         last_streamed_chunk,
@@ -1230,7 +1230,7 @@ class RequestExecutor:
 
                                     if not should_rotate_on_error(classified):
                                         cred_context.mark_failure(classified)
-                                        raise
+                                        raise TerminalRequestError(e)
 
                                     # Check for small cooldown - retry same key instead of rotating
                                     small_cooldown_threshold = int(

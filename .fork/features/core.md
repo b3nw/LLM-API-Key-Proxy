@@ -83,6 +83,35 @@ Notes:
 - `OpenAICompatibleProvider.get_model_options`: strips provider prefix correctly
   instead of taking only the last segment.
 
+## 2026-07-10 — OAuth error handling and credential lifecycle fixes
+
+Branch: `fix/oauth-error-handling`
+Target: `fix(core): stop invalidated OAuth credentials from rotating forever`
+
+Files (11 modified):
+- `src/rotator_library/usage/manager.py` — auth error cooldown in `_record_failure`, persist `clear_cooldown_if_exists`
+- `src/rotator_library/usage/tracking/engine.py` — `_apply_cooldown` uses `max()` to prevent truncation race
+- `src/rotator_library/error_handler.py` — `credential_reauth_needed` in ABNORMAL_ERROR_TYPES + priority, streamed dict 401/403/429 classification
+- `src/rotator_library/core/errors.py` — `credential_reauth_needed` → HTTP 401 in status map
+- `src/rotator_library/providers/openai_oauth_base.py` — propagate CredentialNeedsReauthError from get_auth_header, NO AUTO-REAUTH on headless, fix reauth queue (keep unavailable on failure), fix _queue_refresh membership gate, idle-exit clears _queued_credentials, timeout 15→45s
+- `src/rotator_library/providers/anthropic_oauth_base.py` — same as OpenAI base
+- `src/rotator_library/providers/google_oauth_base.py` — calendar.timegm for UTC expiry, pop stale token_expiry after refresh, ms/s normalization, idle-exit fix, timeout 15→45s, propagate CredentialNeedsReauthError
+- `src/rotator_library/client/executor.py` — mid-stream non-rotatable errors wrapped in TerminalRequestError
+- `src/rotator_library/client/streaming.py` — fix ClassifiedError constructor (message→original_exception)
+- `src/rotator_library/providers/codex_provider.py` — parse_quota_error uses x-codex-*-reset-at headers
+- `src/rotator_library/providers/utilities/codex_quota_tracker.py` — background refresh applies exhaustion cooldowns
+
+Root causes fixed:
+- RC1: API 401s now apply escalating global cooldown (15m→4h) removing dead credentials from rotation
+- RC2: is_credential_available() still dead code, but _unavailable_credentials now preserved on failed reauth
+- RC3: CredentialNeedsReauthError propagates from get_auth_header instead of serving dead cached tokens
+- RC4: Headless servers log [NO AUTO-REAUTH] and keep cred unavailable (ported from Google base)
+- RC5: Sequential sticky selection broken by RC1 fix (dead creds get global cooldown → filtered by candidate selection)
+
+Verification:
+- `uv run python3 -m py_compile` — passed (all 11 files)
+- `uv run ruff check --select F401,F811,F821,E9` — passed (0 new errors; 5 pre-existing)
+
 ## 2026-06-22 — Sub-provider alias resolution and upstream context overrides
 
 Target: `feat(core): infrastructure improvements - latest aliases, error standardization, and utilities`

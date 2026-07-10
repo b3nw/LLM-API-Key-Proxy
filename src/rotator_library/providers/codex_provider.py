@@ -2032,18 +2032,41 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
                 }
 
             if error_info.get("code") in ("quota_exceeded", "usage_limit_reached"):
-                # usage_limit_reached: Codex returns this when the credential's
-                # usage window quota is exhausted (e.g. 5h rate limit hit).
-                # Must be classified as quota exhaustion so cooldowns are applied
-                # and the credential is skipped during rotation.
                 from ..error_handler import get_retry_after as _get_retry_after
 
-                retry_after = _get_retry_after(error) or 3600  # 1 hour default
+                retry_after = _get_retry_after(error)
+                quota_reset_timestamp = None
+
+                # Prefer x-codex-*-reset-at headers over the flat fallback —
+                # they carry the authoritative reset time for the exhausted window.
+                if hasattr(error, "response") and hasattr(error.response, "headers"):
+                    hdrs = error.response.headers
+                    for hdr_name in (
+                        "x-codex-5h-limit-reset-at",
+                        "x-codex-weekly-limit-reset-at",
+                        "x-codex-monthly-limit-reset-at",
+                    ):
+                        reset_val = hdrs.get(hdr_name)
+                        if reset_val:
+                            try:
+                                reset_ts = float(reset_val)
+                                if reset_ts > 1e12:
+                                    reset_ts = reset_ts / 1000
+                                if reset_ts > time.time():
+                                    quota_reset_timestamp = reset_ts
+                                    retry_after = int(reset_ts - time.time())
+                                    break
+                            except (ValueError, TypeError):
+                                pass
+
+                if retry_after is None:
+                    retry_after = 3600
+
                 return {
                     "retry_after": retry_after,
                     "reason": "QUOTA_EXHAUSTED",
                     "reset_timestamp": None,
-                    "quota_reset_timestamp": time.time() + retry_after,
+                    "quota_reset_timestamp": quota_reset_timestamp or (time.time() + retry_after),
                 }
 
         except Exception:

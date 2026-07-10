@@ -992,12 +992,36 @@ class CodexQuotaTracker:
                         global_exhausted = True
                     break
 
-            if not global_exhausted:
-                short_cred = (
-                    cred_path.split("/")[-1]
-                    if cred_path.startswith("env://")
-                    else Path(cred_path).stem
-                )
+            short_cred = (
+                cred_path.split("/")[-1]
+                if cred_path.startswith("env://")
+                else Path(cred_path).stem
+            )
+            if global_exhausted:
+                # Apply exhaustion cooldown from background refresh, not just
+                # at startup — otherwise credentials detected exhausted on
+                # subsequent refresh cycles never get a cooldown applied.
+                exhausted_tier = None
+                for tier_key in reversed(QUOTA_TIER_HIERARCHY):
+                    wd = window_tiers.get(tier_key)
+                    if wd and wd["used_percent"] >= 100.0 and wd["reset_ts"] > now:
+                        exhausted_tier = tier_key
+                        break
+                if exhausted_tier:
+                    reset_ts = window_tiers[exhausted_tier]["reset_ts"]
+                    cooldown_duration = reset_ts - now
+                    if cooldown_duration > 0:
+                        await usage_manager.apply_cooldown(
+                            cred_path,
+                            duration=cooldown_duration,
+                            reason="quota_exceeded",
+                            model_or_group=exhausted_tier,
+                        )
+                        lib_logger.info(
+                            f"Codex background refresh: {short_cred} exhausted "
+                            f"({exhausted_tier}), applied {cooldown_duration:.0f}s cooldown"
+                        )
+            else:
                 for group in ["codex-global"] + list(window_tiers.keys()):
                     cleared = await usage_manager.clear_cooldown_if_exists(
                         cred_path,

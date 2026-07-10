@@ -3,6 +3,7 @@
 
 # src/rotator_library/providers/google_oauth_base.py
 
+import calendar
 import os
 import re
 import webbrowser
@@ -23,7 +24,6 @@ from rich.text import Text
 from rich.markup import escape as rich_escape
 
 from ..utils.headless_detection import is_headless_environment
-from ..utils.reauth_coordinator import get_reauth_coordinator
 from ..utils.resilient_io import safe_write_json
 from ..error_handler import CredentialNeedsReauthError
 
@@ -234,7 +234,7 @@ class GoogleOAuthBase:
         ] = {}  # Track retry attempts per credential
 
         # Configuration constants
-        self._refresh_timeout_seconds: int = 15  # Max time for single refresh
+        self._refresh_timeout_seconds: int = 45  # Must exceed httpx timeout (30s)
         self._refresh_interval_seconds: int = 30  # Delay between queue items
         self._refresh_max_retries: int = 3  # Attempts before kicked out
 
@@ -423,11 +423,13 @@ class GoogleOAuthBase:
             )
 
     def _is_token_expired(self, creds: Dict[str, Any]) -> bool:
-        expiry = creds.get("token_expiry")  # gcloud format
-        if not expiry:  # gemini-cli format
-            expiry_timestamp = creds.get("expiry_date", 0) / 1000
+        expiry = creds.get("token_expiry")  # gcloud format ("...Z" = UTC)
+        if not expiry:  # gemini-cli format (ms epoch)
+            expiry_timestamp = creds.get("expiry_date", 0)
+            if expiry_timestamp > 1e12:
+                expiry_timestamp = expiry_timestamp / 1000
         else:
-            expiry_timestamp = time.mktime(time.strptime(expiry, "%Y-%m-%dT%H:%M:%SZ"))
+            expiry_timestamp = calendar.timegm(time.strptime(expiry, "%Y-%m-%dT%H:%M:%SZ"))
         return expiry_timestamp < time.time() + self.REFRESH_EXPIRY_BUFFER_SECONDS
 
     async def _refresh_token(
@@ -548,7 +550,11 @@ class GoogleOAuthBase:
             # [FIX 1] Update OAuth token fields from response
             creds["access_token"] = new_token_data["access_token"]
             expiry_timestamp = time.time() + new_token_data["expires_in"]
-            creds["expiry_date"] = expiry_timestamp * 1000  # gemini-cli format
+            creds["expiry_date"] = expiry_timestamp * 1000  # gemini-cli format (ms)
+            # Remove stale gcloud-format expiry so _is_token_expired uses the
+            # fresh expiry_date — token_expiry is never updated by refresh and
+            # would make the credential look expired forever.
+            creds.pop("token_expiry", None)
 
             # [FIX 2] Update refresh_token if server provided a new one (rare but possible with Google OAuth)
             if "refresh_token" in new_token_data:
@@ -635,11 +641,13 @@ class GoogleOAuthBase:
         This is different from _is_token_expired() which uses a buffer for proactive refresh.
         This method checks if the token is actually unusable.
         """
-        expiry = creds.get("token_expiry")  # gcloud format
-        if not expiry:  # gemini-cli format
-            expiry_timestamp = creds.get("expiry_date", 0) / 1000
+        expiry = creds.get("token_expiry")  # gcloud format ("...Z" = UTC)
+        if not expiry:  # gemini-cli format (ms epoch)
+            expiry_timestamp = creds.get("expiry_date", 0)
+            if expiry_timestamp > 1e12:
+                expiry_timestamp = expiry_timestamp / 1000
         else:
-            expiry_timestamp = time.mktime(time.strptime(expiry, "%Y-%m-%dT%H:%M:%SZ"))
+            expiry_timestamp = calendar.timegm(time.strptime(expiry, "%Y-%m-%dT%H:%M:%SZ"))
         return expiry_timestamp < time.time()
 
     def _mark_credential_expired(self, path: str, reason: str) -> None:
@@ -763,10 +771,9 @@ class GoogleOAuthBase:
                 except asyncio.TimeoutError:
                     # Queue is empty and idle for 60s - clean up and exit
                     async with self._queue_tracking_lock:
-                        # Clear any stale retry counts
                         self._queue_retry_count.clear()
+                        self._queued_credentials.clear()
                     self._queue_processor_task = None
-                    # lib_logger.debug("Refresh queue processor idle, shutting down")
                     return
 
                 try:
@@ -1223,14 +1230,15 @@ class GoogleOAuthBase:
             )
 
     async def get_auth_header(self, credential_path: str) -> Dict[str, str]:
-        """Get auth header with graceful degradation if refresh fails."""
+        """Get auth header, propagating reauth errors instead of serving dead tokens."""
         try:
             creds = await self._load_credentials(credential_path)
             if self._is_token_expired(creds):
                 try:
                     creds = await self._refresh_token(credential_path, creds)
+                except CredentialNeedsReauthError:
+                    raise
                 except Exception as e:
-                    # Check if we have a cached token that might still work
                     cached = self._credentials_cache.get(credential_path)
                     if cached and cached.get("access_token"):
                         lib_logger.warning(
@@ -1241,8 +1249,9 @@ class GoogleOAuthBase:
                     else:
                         raise
             return {"Authorization": f"Bearer {creds['access_token']}"}
+        except CredentialNeedsReauthError:
+            raise
         except Exception as e:
-            # Check if any cached credential exists as last resort
             cached = self._credentials_cache.get(credential_path)
             if cached and cached.get("access_token"):
                 lib_logger.error(

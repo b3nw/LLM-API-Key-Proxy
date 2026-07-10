@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import base64
 import json as _json_mod
+import os
 import re as _re_mod
 import secrets
 import time
@@ -82,6 +83,26 @@ def _generate_pkce():
     return verifier, challenge
 
 
+def _resolve_proxy_url(proxy_name: Optional[str]) -> Optional[str]:
+    """Look up a named proxy via the canonical PROXY_LIST + PROXY_NAME_* mechanism.
+
+    Returns the SOCKS URL (e.g. ``socks5h://host:port``) or None.
+    """
+    if not proxy_name:
+        return None
+    from proxy_app.api.config import _parse_named_proxies, _get_env_vars
+    named = _parse_named_proxies(_get_env_vars())
+    return named.get(proxy_name)
+
+
+def _flow_client_kwargs(flow: dict) -> dict:
+    """Return httpx.AsyncClient kwargs for a flow's proxy (if any)."""
+    proxy_url = flow.get("proxy_url")
+    if proxy_url:
+        return {"proxy": proxy_url}
+    return {}
+
+
 # ---------------------------------------------------------------------------
 # GET /v1/admin/oauth/providers  — list providers
 # ---------------------------------------------------------------------------
@@ -105,6 +126,7 @@ async def list_oauth_providers():
 # ---------------------------------------------------------------------------
 class OAuthStartRequest(BaseModel):
     provider: str
+    proxy_name: Optional[str] = None
 
 
 @router.post("/oauth/start")
@@ -114,6 +136,16 @@ async def start_oauth_flow(req: OAuthStartRequest):
     if provider not in get_available_providers():
         raise HTTPException(400, f"Unknown OAuth provider: {provider}")
 
+    proxy_url = _resolve_proxy_url(req.proxy_name)
+    if req.proxy_name and not proxy_url:
+        from proxy_app.api.config import _parse_named_proxies, _get_env_vars
+        available = list(_parse_named_proxies(_get_env_vars()).keys())
+        raise HTTPException(
+            400,
+            f"Unknown proxy name '{req.proxy_name}'. "
+            f"Available: {available}",
+        )
+
     flow_id = secrets.token_urlsafe(16)
     flow: Dict[str, Any] = {
         "provider": provider,
@@ -121,6 +153,8 @@ async def start_oauth_flow(req: OAuthStartRequest):
         "status": "pending",
         "error": None,
         "result": None,
+        "proxy_name": req.proxy_name,
+        "proxy_url": proxy_url,
     }
 
     if provider == "copilot":
@@ -141,7 +175,7 @@ async def _start_copilot_device_flow(flow_id: str, flow: dict):
         "SXYxLmI1MDdhMDhjODdlY2ZlOTg="
     ).decode()
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(**_flow_client_kwargs(flow)) as client:
         resp = await client.post(
             "https://github.com/login/device/code",
             headers={
@@ -185,7 +219,7 @@ async def _poll_copilot_device(flow_id: str):
     interval = flow["interval"]
     max_polls = flow["expires_in"] // interval
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(**_flow_client_kwargs(flow)) as client:
         for _ in range(max_polls):
             await asyncio.sleep(interval)
             if flow_id not in _pending_flows:
@@ -289,14 +323,13 @@ async def _finalize_copilot(flow_id: str, flow: dict, github_token: str, client:
 # xAI Grok: device flow
 # ---------------------------------------------------------------------------
 async def _start_xai_device_flow(flow_id: str, flow: dict):
-    # Reuse xAI provider constants — public client, no client_secret.
     from rotator_library.providers.x_ai_auth_base import (
         XAI_CLIENT_ID,
         XAI_OAUTH_SCOPES,
         XAI_DEVICE_CODE_URL,
     )
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(**_flow_client_kwargs(flow)) as client:
         resp = await client.post(
             XAI_DEVICE_CODE_URL,
             data={
@@ -346,7 +379,7 @@ async def _poll_xai_device(flow_id: str):
     interval = flow["interval"]
     max_polls = flow["expires_in"] // interval
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(**_flow_client_kwargs(flow)) as client:
         for _ in range(max_polls):
             await asyncio.sleep(interval)
             if flow_id not in _pending_flows:
@@ -394,13 +427,13 @@ async def _finalize_xai(
 
     Credential shape mirrors XAiAuthBase._build_credentials_from_token_data
     so the existing provider loader picks them up unchanged.
+    The ``client`` already carries the flow's proxy settings.
     """
     from rotator_library.providers.x_ai_auth_base import XAI_USERINFO_URL
 
     access_token = token_data.get("access_token", "")
     refresh_token = token_data.get("refresh_token", "")
 
-    # Email discovery: id_token JWT → userinfo → sub fallback
     id_claims = _decode_jwt_payload(token_data.get("id_token", "")) or {}
     email = id_claims.get("email", "")
     sub = id_claims.get("sub", "")
@@ -581,7 +614,7 @@ async def _exchange_code(flow_id: str, flow: dict, code: str):
     verifier = flow["code_verifier"]
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(**_flow_client_kwargs(flow)) as client:
             if provider == "anthropic":
                 resp = await client.post(
                     token_url,
@@ -787,7 +820,6 @@ def _save_credential_file(flow: dict, creds: dict):
     replaced_path = _find_existing_credential(oauth_dir, prefix, new_identity)
 
     if replaced_path:
-        # Back up the old file and overwrite in-place
         bak = replaced_path.with_suffix(
             f".json.bak.{time.strftime('%Y%m%d_%H%M%S')}"
         )
@@ -815,6 +847,57 @@ def _save_credential_file(flow: dict, creds: dict):
     flow["saved_path"] = resolved
 
     _hot_load_credential(provider, resolved, replaced_path if replaced_path else None)
+
+    proxy_name = flow.get("proxy_name")
+    proxy_url = flow.get("proxy_url")
+    if proxy_name and proxy_url and new_identity:
+        _auto_assign_proxy(new_identity, proxy_name, proxy_url)
+
+
+def _auto_assign_proxy(identity: str, proxy_name: str, proxy_url: str) -> None:
+    """Write PROXY_URL_CREDENTIAL_<SLUG>=<url> to .env so future refreshes
+    use the same proxy that was selected during the OAuth handshake,
+    then hot-reload the running ProxyConfig in-place.
+    """
+    try:
+        from rotator_library.proxy_config import _slugify_stable_id, load_proxy_config
+        from rotator_library.utils.paths import get_data_file
+        from dotenv import load_dotenv
+
+        slug = _slugify_stable_id(identity)
+        env_key = f"PROXY_URL_CREDENTIAL_{slug}"
+        env_file = str(get_data_file(".env"))
+
+        from proxy_app.api.config import _inplace_set_key
+        _inplace_set_key(env_file, env_key, proxy_url)
+        os.environ[env_key] = proxy_url
+        load_dotenv(env_file, override=True)
+
+        if _app_ref is not None:
+            try:
+                client = getattr(_app_ref.state, "rotating_client", None)
+                if client is not None:
+                    proxy_config = getattr(client, "_proxy_config", None)
+                    if proxy_config is not None:
+                        new_config = load_proxy_config(env=dict(os.environ))
+                        proxy_config.default = new_config.default
+                        proxy_config.provider_proxies = new_config.provider_proxies
+                        proxy_config.credential_proxies = new_config.credential_proxies
+                        proxy_config.rotation_pool = new_config.rotation_pool
+                        proxy_config.rotation_strategy = new_config.rotation_strategy
+                        proxy_config.rotation_scope = new_config.rotation_scope
+            except Exception:
+                lib_logger.warning(
+                    "Could not hot-reload ProxyConfig after proxy auto-assign",
+                    exc_info=True,
+                )
+
+        lib_logger.info(
+            f"Auto-assigned proxy '{proxy_name}' to credential "
+            f"'{identity}' ({env_key})"
+        )
+    except Exception as e:
+        lib_logger.warning(f"Failed to auto-assign proxy: {e}", exc_info=True)
 
 
 def _hot_load_credential(

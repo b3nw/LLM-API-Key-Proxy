@@ -303,7 +303,7 @@ export function Credentials() {
         </Card>
       )}
 
-      <AddOAuthDialog open={addOAuthOpen} onOpenChange={setAddOAuthOpen} onSuccess={refresh} />
+      <AddOAuthDialog open={addOAuthOpen} onOpenChange={setAddOAuthOpen} onSuccess={refresh} proxies={proxies} />
       <AddApiKeyDialog open={addKeyOpen} onOpenChange={setAddKeyOpen} onSuccess={refresh} />
       <AddCustomProviderDialog open={addCustomOpen} onOpenChange={setAddCustomOpen} onSuccess={refresh} />
     </div>
@@ -385,10 +385,12 @@ function AddOAuthDialog({
   open,
   onOpenChange,
   onSuccess,
+  proxies,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   onSuccess: () => void
+  proxies: { name: string; url: string }[]
 }) {
   const [providers, setProviders] = useState<OAuthProviderInfo[]>([])
   const [step, setStep] = useState<"pick" | "flow">("pick")
@@ -400,6 +402,7 @@ function AddOAuthDialog({
   const [submittingCode, setSubmittingCode] = useState(false)
   const [copied, setCopied] = useState(false)
   const [result, setResult] = useState<{ login: string; provider: string } | null>(null)
+  const [selectedProxy, setSelectedProxy] = useState("")
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => {
@@ -411,6 +414,7 @@ function AddOAuthDialog({
       setError("")
       setPasteCode("")
       setResult(null)
+      setSelectedProxy("")
     }
     return () => {
       if (pollRef.current) clearInterval(pollRef.current)
@@ -421,7 +425,7 @@ function AddOAuthDialog({
     setStarting(true)
     setError("")
     try {
-      const data = await startOAuthFlow(providerId)
+      const data = await startOAuthFlow(providerId, selectedProxy || undefined)
       setFlowData(data)
       setStep("flow")
 
@@ -493,7 +497,23 @@ function AddOAuthDialog({
         </DialogHeader>
 
         {step === "pick" && (
-          <div className="space-y-2 mt-2">
+          <div className="space-y-3 mt-2">
+            {proxies.length > 0 && (
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-muted-foreground">Outbound Proxy</label>
+                <select
+                  className="w-full h-8 text-sm rounded-md border bg-background px-2"
+                  value={selectedProxy}
+                  onChange={(e) => setSelectedProxy(e.target.value)}
+                  disabled={starting}
+                >
+                  <option value="">None (direct)</option>
+                  {proxies.map((p) => (
+                    <option key={p.name} value={p.name} title={p.url}>{p.name}</option>
+                  ))}
+                </select>
+              </div>
+            )}
             {providers.map((p) => (
               <button
                 key={p.provider_id}

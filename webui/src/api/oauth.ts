@@ -33,10 +33,12 @@ export async function getOAuthProviders(): Promise<OAuthProvidersResponse> {
   return apiFetch("/v1/admin/oauth/providers")
 }
 
-export async function startOAuthFlow(provider: string): Promise<OAuthStartResponse> {
+export async function startOAuthFlow(provider: string, proxyName?: string): Promise<OAuthStartResponse> {
+  const body: Record<string, string> = { provider }
+  if (proxyName) body.proxy_name = proxyName
   return apiFetch("/v1/admin/oauth/start", {
     method: "POST",
-    body: JSON.stringify({ provider }),
+    body: JSON.stringify(body),
   })
 }
 

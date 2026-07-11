@@ -253,3 +253,10 @@ features:
       - "src/rotator_library/providers/utilities/xai*"
       - "src/proxy_app/api/oauth.py"
       - "webui/**/xai*"
+
+  - id: cline-pass
+    prefix: "feat(cline-pass)"
+    subject: "feat(cline-pass): add ClinePass provider with 3-window quota tracking"
+    files:
+      - "src/rotator_library/providers/cline_pass*"
+      - "src/rotator_library/providers/utilities/cline_pass*"

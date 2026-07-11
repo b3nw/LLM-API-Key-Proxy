@@ -363,8 +363,12 @@ root_logger.addHandler(info_file_handler)
 root_logger.addHandler(console_handler)
 root_logger.addHandler(debug_file_handler)
 
-# Silence other noisy loggers by setting their level higher than root
+# Silence other noisy loggers by setting their level higher than root.
+# The uvicorn.access logger is silenced because our custom
+# ForwardedForAccessLogMiddleware replaces it — it logs the real client IP
+# from X-Forwarded-For instead of just the reverse-proxy TCP address.
 logging.getLogger("uvicorn").setLevel(logging.WARNING)
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # Isolate LiteLLM's logger to prevent it from reaching the console.
@@ -709,6 +713,13 @@ async def lifespan(app: FastAPI):
 
 # --- FastAPI App Setup ---
 app = FastAPI(lifespan=lifespan)
+
+# Access log middleware: replaces uvicorn's default access log with one that
+# exposes the X-Forwarded-For header so the real client IP is visible behind
+# a reverse proxy.
+from proxy_app.access_log_middleware import ForwardedForAccessLogMiddleware
+
+app.add_middleware(ForwardedForAccessLogMiddleware)
 
 # Add CORS middleware to allow all origins, methods, and headers
 app.add_middleware(
@@ -2526,4 +2537,13 @@ if __name__ == "__main__":
 
         import uvicorn
 
-        uvicorn.run(app, host=args.host, port=args.port)
+        uvicorn.run(
+            app,
+            host=args.host,
+            port=args.port,
+            # Respect X-Forwarded-For/X-Forwarded-Proto from the reverse proxy
+            # so scope["client"] reflects the real client when available.
+            proxy_headers=True,
+            # Our ForwardedForAccessLogMiddleware handles access logging.
+            access_log=False,
+        )

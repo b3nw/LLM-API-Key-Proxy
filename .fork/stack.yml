@@ -245,6 +245,12 @@ features:
       - ".github/workflows/**"
       - "scripts/create_release.sh"
 
+  - id: access-log
+    prefix: "feat(access-log)"
+    subject: "feat(access-log): expose X-Forwarded-For in access logs behind reverse proxy"
+    files:
+      - "src/proxy_app/access_log_middleware.py"
+
   - id: xai
     prefix: "feat(xai)"
     subject: "feat(xai): add xAI Grok OAuth provider with PKCE and Device Code flows"

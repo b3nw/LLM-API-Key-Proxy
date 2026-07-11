@@ -1,0 +1,77 @@
+# =========================================================================
+# AI Review — GitHub Actions Workflow for b3nw Repositories
+# =========================================================================
+# This workflow uses Nikita-Filonov/ai-review to run automated PR reviews.
+# It provides a second AI code review alongside the minimax/kilocode reviewer.
+#
+# Upstream requests are routed securely to the local llm-proxy.
+#
+# Pre-requisites (as GitHub Secrets / Variables in the target repo/org):
+#   - Secrets:
+#       - LLM_PROXY_URL      = https://llm-proxy.ext.ben.io/v1 (no trailing slash)
+#       - LLM_PROXY_API_KEY  = *** (your proxy token)
+#   - Variables:
+#       - LLM_PROXY_MODEL     = kilo/minimax/minimax-m3 (or your preferred model alias)
+#
+# Note: LLM_PROXY_URL must NOT have a trailing slash. The tool appends
+# paths like /chat/completions to this base URL.
+# =========================================================================
+
+name: AI PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - dev
+      - main
+
+concurrency:
+  group: ai-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  ai-review:
+    name: Run AI Review
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          # Fetch full history so git diff operates correctly
+          fetch-depth: 0
+
+      - name: Run AI Review
+        uses: Nikita-Filonov/ai-review@v0.69.0
+        env:
+          # --- LLM Provider & Model Configuration ---
+          LLM__PROVIDER: "OPENAI"
+          LLM__META__MODEL: ${{ vars.LLM_PROXY_MODEL }}
+          LLM__META__MAX_TOKENS: "15000"
+          LLM__META__TEMPERATURE: "0.2"
+
+          # --- LLM Proxy Masked Routing ---
+          LLM__HTTP_CLIENT__API_URL: ${{ secrets.LLM_PROXY_URL }}
+          LLM__HTTP_CLIENT__API_TOKEN: ${{ secrets.LLM_PROXY_API_KEY }}
+          # Proxy adds a hop; extend timeout beyond the 120s default
+          LLM__HTTP_CLIENT__TIMEOUT: "180"
+
+          # --- VCS Integration Configuration ---
+          VCS__PROVIDER: "GITHUB"
+          VCS__PIPELINE__OWNER: ${{ github.repository_owner }}
+          VCS__PIPELINE__REPO: ${{ github.event.repository.name }}
+          VCS__PIPELINE__PULL_NUMBER: ${{ github.event.pull_request.number }}
+          VCS__HTTP_CLIENT__API_URL: "https://api.github.com"
+          VCS__HTTP_CLIENT__API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+          # --- Limits and Operational Safeguards ---
+          CORE__CONCURRENCY: 5
+          REVIEW__MODE: "FULL_FILE_DIFF"
+          REVIEW__DRY_RUN: "false"
+          REVIEW__MAX_INLINE_COMMENTS: "5"       # Per file (not per PR)
+          # Reduce noise on non-code changes
+          REVIEW__IGNORE_CHANGES: '["*.md", "*.lock", "docs/*", ".fork/features/*"]'

@@ -51,6 +51,9 @@ rules:
     proxy:
       - "feat(proxy): outbound HTTP/SOCKS5 proxy support with per-provider/credential routing"
       - "fix(proxy): resolve per-credential proxy routing and improve observability"
+    ci:
+      - "feat(ci): fork-aware release notes with incremental topic diff"
+      - "fix(ci): add AI PR review workflow"
     tooling:
       - "feat(tooling): add AGENTS.md and .agent/ config for linear stack workflow"
       - "fix(tooling): scope fork-stack gate to canonical branch and tolerate transient commits"

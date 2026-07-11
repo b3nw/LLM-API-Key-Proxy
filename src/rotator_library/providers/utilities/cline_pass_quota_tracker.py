@@ -148,7 +148,14 @@ def _as_optional_float(value: Any) -> Optional[float]:
 
 
 def _resolve_api_base() -> str:
-    """Resolve the Cline API base (allows override for testing)."""
+    """Resolve the Cline API base (allows override for testing).
+
+    The upstream is rooted at https://api.cline.bot/api/v1 — every
+    endpoint (chat completions, models, usage-limits, plan) lives
+    under that ``/api/v1`` prefix. We do **not** strip the trailing
+    ``/v1``: doing so produces ``https://api.cline.bot/api/...`` which
+    404s on the upstream (caught in deployment 2026-07-11).
+    """
     # ``or`` (not the second arg of getenv) so an empty string falls back to
     # the default — operators occasionally set ``CLINE_PASS_API_BASE=""`` to
     # "reset" and we shouldn't break the tracker when they do.
@@ -158,12 +165,13 @@ def _resolve_api_base() -> str:
 
 
 def _build_billing_url(path: str) -> str:
-    """Join the API base with a path, tolerating a base that already ends with ``/v1``."""
+    """Join the API base with a path.
+
+    The Cline API is a flat ``/api/v1`` namespace; no path rewriting is
+    needed. Path may be passed with or without a leading slash.
+    """
     base = _resolve_api_base()
     suffix = path if path.startswith("/") else f"/{path}"
-    # If the base already includes /v1, strip it so we never produce /v1/v1
-    if base.endswith("/v1"):
-        base = base[:-3]
     return f"{base}{suffix}"
 
 

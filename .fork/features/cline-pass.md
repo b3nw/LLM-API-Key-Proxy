@@ -151,3 +151,71 @@ Notes:
   `SingletonABCMeta` singleton so all test cases share one instance,
   and the `__init__`-built reverse map is reused across cases. No
   cleanup needed (and cleanup would actually break later tests).
+
+## 2026-07-11 — Fix wrong API base path (deployment hotfix)
+
+Target: `feat(cline-pass): add ClinePass provider with 3-window quota tracking`
+Files:
+- `src/rotator_library/providers/cline_pass_provider.py`
+- `src/rotator_library/providers/utilities/cline_pass_quota_tracker.py`
+- `tests/test_cline_pass_quota_tracker.py`
+
+Problem (caught from production deployment on 2026-07-11, 02:34 UTC):
+1. **Chat completions returned 404.** The provider class introduced
+   a separate `CLINE_PASS_LITELLM_BASE = "https://api.cline.bot/v1"`
+   for chat routing (assumption: "Cline is OpenAI-shaped, base is
+   `/v1`"). The actual upstream path is
+   `https://api.cline.bot/api/v1/chat/completions` — the prefix is
+   `/api/v1`, not `/v1`. Every request landed at
+   `https://api.cline.bot/v1/chat/completions` and 404'd.
+2. **Quota card empty in WebUI.** The quota tracker's
+   `_build_billing_url()` defensively stripped a trailing `/v1` from
+   `_resolve_api_base()`, producing
+   `https://api.cline.bot/api/users/me/plan/usage-limits` instead
+   of the correct
+   `https://api.cline.bot/api/v1/users/me/plan/usage-limits`. The
+   upstream call 404'd, baseline writes never happened, and the
+   `/v1/quota-stats` filter (`total_requests == 0 and no quota data`)
+   then dropped the provider from the response.
+
+Root cause (both bugs):
+- Mistakenly assumed "OpenAI-compatible *body*" implied "OpenAI-compatible
+  *path prefix*". Cline's API uses `/api/v1/`, not `/v1/`. The
+  original writeup's `cline.md` documented the quota endpoint URL as
+  `https://api.cline.bot/api/v1/users/me/plan/usage-limits` — if
+  that had been more directly referenced during the first cut, the
+  bug would have been caught.
+- The first cut unhelpfully split into two bases (one for quota, one
+  for chat) and then rewrote the quota URL. The chat URL was wrong
+  by construction; the quota URL was wrong by post-processing.
+
+Fix:
+- Drop `CLINE_PASS_LITELLM_BASE` and the `self.litellm_base`
+  attribute. Chat completions now use `self.api_base`, same as
+  quota and model discovery. `self.api_base` defaults to
+  `https://api.cline.bot/api/v1` and is overridable via
+  `CLINE_PASS_API_BASE`.
+- Remove the trailing-`/v1` strip in `_build_billing_url()`. The
+  upstream is a flat `/api/v1` namespace — the helper just joins
+  base + path.
+- Update the docstring on the constant to call out the path-prefix
+  gotcha so this doesn't regress.
+
+Regression coverage (4 new tests, all pass):
+- `test_build_billing_url_default_base_passes_path_through` — default
+  base yields `https://api.cline.bot/api/v1/users/me/plan`.
+- `test_build_billing_url_preserves_v1_in_api_v1_base` — pinning
+  the no-strip behavior.
+- `test_build_billing_url_trailing_slash_on_base_is_normalised` —
+  trailing slash on the base doesn't double up.
+- `test_provider_api_base_default_uses_documented_upstream` —
+  provider default matches the Cline docs.
+- `test_provider_uses_single_api_base_for_both_models_and_chat` —
+  pinning the single-base invariant so a future split can't
+  reintroduce Bug 1.
+
+Verification:
+- `uv run python3 -m py_compile` — passed (all 3 files)
+- `uv run ruff check --select F401,F811,F821,E9` — passed (all 3 files)
+- `uv run --with pytest python3 -m pytest tests/test_cline_pass_quota_tracker.py -q` — 34 passed
+- `uv run --with pytest --with pytest-asyncio python3 -m pytest tests/ -q` — 493 passed (+3), same 15 pre-existing setup errors and same 2 pre-existing umans/xai test failures as `dev` (unrelated to this PR).

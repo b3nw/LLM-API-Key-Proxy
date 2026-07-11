@@ -76,11 +76,12 @@ DEFAULT_CLINEPASS_MODELS: Dict[str, Dict[str, Any]] = {
     "qwen3.7-plus": {"id": "cline-pass/qwen3.7-plus"},
 }
 
-# The Cline API base includes the ``/api/v1`` path prefix (different from
-# standard OpenAI's ``/v1``). We strip it here and re-add ``/v1`` for
-# LiteLLM's openai/ provider, which expects the conventional shape.
+# The Cline API is rooted at https://api.cline.bot/api/v1 — every endpoint
+# (chat completions, models, usage-limits, plan) lives under that /api/v1
+# prefix. Do NOT use the standard OpenAI ``/v1`` shape here: Cline's path is
+# ``/api/v1/chat/completions``, not ``/v1/chat/completions``. (Deployment
+# 2026-07-11: routing via ``/v1`` produced 404s.)
 CLINE_PASS_DEFAULT_API_BASE = "https://api.cline.bot/api/v1"
-CLINE_PASS_LITELLM_BASE = "https://api.cline.bot/v1"
 
 # Litellm params accepted for the openai/ provider route. Mirrors the
 # x_ai / ollama_cloud allowlists; conservative subset that the Cline API
@@ -151,9 +152,6 @@ class ClinePassProvider(ClinePassQuotaTracker, ProviderInterface):
         self._init_quota_tracker()
         self.api_base = os.getenv(
             "CLINE_PASS_API_BASE", CLINE_PASS_DEFAULT_API_BASE
-        )
-        self.litellm_base = os.getenv(
-            "CLINE_PASS_LITELLM_BASE", CLINE_PASS_LITELLM_BASE
         )
         self.model_definitions = ModelDefinitions()
         # Upstream-id -> display-name reverse map (mirrors Umans pattern).
@@ -371,13 +369,16 @@ class ClinePassProvider(ClinePassQuotaTracker, ProviderInterface):
                 f"(set CLINE_PASS_MODELS or update DEFAULT_CLINEPASS_MODELS)"
             )
 
+        # ``self.api_base`` is rooted at ``/api/v1`` — LiteLLM's openai/
+        # provider appends ``/chat/completions`` to whatever base you give
+        # it, so the resulting URL is ``https://api.cline.bot/api/v1/chat/completions``.
         kwargs["model"] = f"openai/{upstream_id}"
         kwargs["api_key"] = credential
-        kwargs["api_base"] = self.litellm_base
+        kwargs["api_base"] = self.api_base
         kwargs["custom_llm_provider"] = "openai"
         kwargs["client"] = openai.AsyncOpenAI(
             api_key=credential,
-            base_url=self.litellm_base,
+            base_url=self.api_base,
             http_client=client,
         )
 

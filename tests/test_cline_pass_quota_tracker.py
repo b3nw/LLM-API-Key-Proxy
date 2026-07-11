@@ -62,7 +62,32 @@ def test_coerce_percent_rejects_bools():
 # ---------------------------------------------------------------------------
 
 
-def test_build_billing_url_strips_trailing_v1():
+def test_build_billing_url_default_base_passes_path_through():
+    """Default base ``https://api.cline.bot/api/v1`` is the upstream's
+    flat namespace — no path rewriting. The URL helper just joins the
+    base with the caller-supplied path.
+
+    Regression for the deployment on 2026-07-11: the previous
+    implementation stripped a trailing ``/v1`` from the base, producing
+    ``https://api.cline.bot/api/...`` paths that 404'd upstream and
+    meant quota baselines never landed in the UsageManager (the WebUI
+    quota card then had no data to render).
+    """
+    with patch.dict(
+        "os.environ",
+        {"CLINE_PASS_API_BASE": ""},
+        clear=False,
+    ):
+        assert (
+            _build_billing_url("/users/me/plan")
+            == "https://api.cline.bot/api/v1/users/me/plan"
+        )
+
+
+def test_build_billing_url_preserves_v1_in_api_v1_base():
+    """The Cline API is ``/api/v1``, NOT ``/v1``. We must not strip the
+    trailing ``/v1`` from the base — it's part of the upstream namespace.
+    """
     with patch.dict(
         "os.environ",
         {"CLINE_PASS_API_BASE": "https://api.cline.bot/api/v1"},
@@ -70,20 +95,7 @@ def test_build_billing_url_strips_trailing_v1():
     ):
         assert (
             _build_billing_url("/users/me/plan/usage-limits")
-            == "https://api.cline.bot/api/users/me/plan/usage-limits"
-        )
-
-
-def test_build_billing_url_default_base():
-    with patch.dict(
-        "os.environ",
-        {"CLINE_PASS_API_BASE": ""},
-        clear=False,
-    ):
-        # Default base is https://api.cline.bot/api/v1; /v1 should be stripped
-        assert (
-            _build_billing_url("/users/me/plan")
-            == "https://api.cline.bot/api/users/me/plan"
+            == "https://api.cline.bot/api/v1/users/me/plan/usage-limits"
         )
 
 
@@ -95,7 +107,20 @@ def test_build_billing_url_no_leading_slash():
     ):
         assert (
             _build_billing_url("users/me/plan/usage-limits")
-            == "https://api.cline.bot/api/users/me/plan/usage-limits"
+            == "https://api.cline.bot/api/v1/users/me/plan/usage-limits"
+        )
+
+
+def test_build_billing_url_trailing_slash_on_base_is_normalised():
+    with patch.dict(
+        "os.environ",
+        {"CLINE_PASS_API_BASE": "https://api.cline.bot/api/v1/"},
+        clear=False,
+    ):
+        # Base is rstripped so we don't get a doubled slash
+        assert (
+            _build_billing_url("/users/me/plan")
+            == "https://api.cline.bot/api/v1/users/me/plan"
         )
 
 
@@ -607,3 +632,49 @@ def test_normalize_model_unknown_returns_input():
     )
     # Empty
     assert provider.normalize_model_for_tracking("") == ""
+
+
+# ---------------------------------------------------------------------------
+# Routing URLs (regression for deployment 2026-07-11)
+# ---------------------------------------------------------------------------
+
+
+def test_provider_api_base_default_uses_documented_upstream():
+    """Without an env override, the provider should default to the
+    documented Cline API base ``https://api.cline.bot/api/v1``.
+
+    Regression: the previous default introduced a separate
+    ``/v1`` (no ``api/``) base for chat routing, which produced
+    404s on every request — ``https://api.cline.bot/v1/chat/completions``
+    is NOT the Cline API path; the path is ``/api/v1/chat/completions``.
+    """
+    from rotator_library.providers.cline_pass_provider import (
+        ClinePassProvider,
+        CLINE_PASS_DEFAULT_API_BASE,
+    )
+
+    assert CLINE_PASS_DEFAULT_API_BASE == "https://api.cline.bot/api/v1"
+    provider = ClinePassProvider()
+    assert provider.api_base == "https://api.cline.bot/api/v1"
+
+
+def test_provider_uses_single_api_base_for_both_models_and_chat():
+    """The provider must use the SAME base for model discovery and
+    chat completions — the Cline API is rooted at ``/api/v1`` and
+    every endpoint (models, chat completions, usage-limits, plan)
+    lives under that prefix.
+    """
+    from rotator_library.providers.cline_pass_provider import ClinePassProvider
+
+    provider = ClinePassProvider()
+    # ``api_base`` drives both ``get_models`` (fetches ``{api_base}/models``)
+    # and ``acompletion`` (sets litellm ``api_base`` so openai/ builds
+    # ``{api_base}/chat/completions``). If we ever split them again, the
+    # deployment 2026-07-11 failure will recur.
+    api_base = provider.api_base
+    assert api_base == "https://api.cline.bot/api/v1"
+    # Sanity check the constructed URLs the proxy actually hits
+    expected_chat_url = f"{api_base}/chat/completions"
+    assert expected_chat_url == "https://api.cline.bot/api/v1/chat/completions"
+    expected_models_url = f"{api_base.rstrip('/')}/models"
+    assert expected_models_url == "https://api.cline.bot/api/v1/models"

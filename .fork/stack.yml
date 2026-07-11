@@ -26,6 +26,10 @@ rules:
       - "feat(xai): add xAI Grok OAuth provider with PKCE and Device Code flows"
       - "feat(xai): enable xAI Grok device-code OAuth in admin WebUI"
       - "fix(xai): set Grok Build User-Agent on all requests to fix billing classification"
+      - "feat(xai): route all chat completions through CLI proxy"
+    cline-pass:
+      - "fix(cline-pass): correct upstream-id reverse map and API base path"
+      - "feat(cline-pass): add ClinePass provider with 3-window quota tracking"
     umans:
       - "feat(umans): add Umans provider with request-based quota tracking"
       - "fix(umans): normalize API base and show quota without proxy requests"

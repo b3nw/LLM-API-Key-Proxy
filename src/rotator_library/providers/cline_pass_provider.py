@@ -237,25 +237,58 @@ class ClinePassProvider(ClinePassQuotaTracker, ProviderInterface):
         return dict(self._upstream_context)
 
     def normalize_model_for_tracking(self, model: str) -> str:
-        """Map upstream ``cline-pass/<bare>`` IDs back to display names.
+        """Map upstream ``cline-pass/<bare>`` IDs to display names.
 
-        The Cline API returns upstream IDs in error messages and quota
-        breakdowns; the WebUI and pricing lookups use display names.
+        Cline upstream IDs already carry the ``cline-pass/`` prefix
+        (e.g. ``cline-pass/glm-5.2``); the proxy exposes models as
+        ``cline_pass/<bare>``. Callers may pass any of three shapes:
+
+        - ``cline-pass/<bare>`` — raw upstream id from Cline error
+          messages or quota breakdowns.
+        - ``cline_pass/<bare>`` — proxy display name.
+        - ``<bare>`` — bare display name without provider prefix.
+
+        All three map to the canonical ``cline_pass/<bare>`` form so
+        usage records land under the display name regardless of which
+        form the caller started with.
         """
         if not model:
             return model
-        # Allow callers to pass either a display name or an upstream id
+        # Direct hit on the reverse map (e.g. caller passed the raw
+        # upstream id ``cline-pass/<bare>``). Stores keys WITHOUT the
+        # proxy ``cline_pass/`` prefix — see ``_build_reverse_map``.
         if model in self._id_to_display:
             return self._id_to_display[model]
-        # Strip the proxy provider prefix for the lookup
-        if model.startswith("cline_pass/"):
-            upstream = f"cline-pass/{model[len('cline_pass/'):]}"
-            return self._id_to_display.get(upstream, model)
+        # Caller passed the proxy display name ``cline_pass/<bare>`` —
+        # the value in the reverse map.
+        for upstream_key, display_name in self._id_to_display.items():
+            if display_name == model:
+                return display_name
+        # Caller passed the bare display name ``<bare>`` — synthesise
+        # the proxy form and look it up by value.
+        if "/" not in model:
+            for display_name in self._id_to_display.values():
+                if display_name == f"cline_pass/{model}":
+                    return display_name
         return model
 
     @staticmethod
     def _build_reverse_map() -> Dict[str, str]:
-        """Build upstream-id -> display-name reverse map from the active catalog."""
+        """Build upstream-id -> display-name reverse map from the active catalog.
+
+        Returns a dict whose **keys** are the raw upstream IDs (e.g.
+        ``"cline-pass/glm-5.2"`` — already prefixed by the Cline docs)
+        and whose **values** are the proxy display names
+        (``"cline_pass/<bare>"``). Callers that pass either form to
+        ``normalize_model_for_tracking()`` get the canonical display
+        name back.
+
+        The previous implementation wrapped the upstream id with
+        ``f"cline_pass/{upstream_id}"`` again, producing double-prefixed
+        keys like ``"cline_pass/cline-pass/glm-5.2"`` that never matched
+        the upstream-id branch of the normaliser. Caught by Kilo Code
+        review on PR #122.
+        """
         defs = ModelDefinitions()
         provider_models = defs.get_provider_models("cline_pass")
         # If the operator didn't set CLINE_PASS_MODELS, use the shipped defaults
@@ -269,7 +302,7 @@ class ClinePassProvider(ClinePassQuotaTracker, ProviderInterface):
                 else display_key
             )
             if upstream_id != display_key:
-                reverse[f"cline_pass/{upstream_id}"] = f"cline_pass/{display_key}"
+                reverse[upstream_id] = f"cline_pass/{display_key}"
         return reverse
 
     # ------------------------------------------------------------------ Errors

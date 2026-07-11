@@ -103,3 +103,51 @@ Notes:
   (the most restrictive window) so a credential that hits the rolling
   limit short-circuits to the next one. The `weekly` and `monthly`
   groups still render as their own bars in the WebUI.
+
+## 2026-07-11 — Fix double-prefix bug in `_build_reverse_map`
+
+Target: `feat(cline-pass): add ClinePass provider with 3-window quota tracking`
+Files:
+- `src/rotator_library/providers/cline_pass_provider.py`
+- `tests/test_cline_pass_quota_tracker.py`
+
+Problem (caught by Kilo Code review on PR #122):
+- `DEFAULT_CLINEPASS_MODELS` already stores upstream IDs with the
+  `cline-pass/` prefix (e.g. `"cline-pass/glm-5.2"`), because the Cline
+  docs document the upstream model ids in that form.
+- The first cut of `_build_reverse_map()` wrapped those upstream ids
+  with `f"cline_pass/{upstream_id}"` again, producing keys like
+  `"cline_pass/cline-pass/glm-5.2"` that never matched any input to
+  `normalize_model_for_tracking`. As a result, raw upstream IDs from
+  Cline error messages and quota breakdowns were returned unchanged —
+  breaking the very "WebUI/pricing maps upstream -> display" feature
+  the PR description calls out.
+- Umans does not have this bug because its `UMANS_MODELS` upstream ids
+  are bare (`"umans-kimi-k2.6"`); wrapping with `umans/` produces a
+  correct reverse-map key.
+
+Fix:
+- `_build_reverse_map()` now stores keys as the raw upstream id
+  (`"cline-pass/<bare>"`) and values as the proxy display name
+  (`"cline_pass/<bare>"`).
+- `normalize_model_for_tracking()` rewritten to handle all three
+  caller-input shapes — raw upstream id (`cline-pass/<bare>`), proxy
+  display name (`cline_pass/<bare>`), and bare (`<bare>`) — and
+  return the canonical proxy display name. Unknown inputs pass
+  through unchanged.
+
+Verification:
+- `uv run python3 -m py_compile` — passed
+- `uv run ruff check --select F401,F811,F821,E9` — passed
+- `uv run --with pytest python3 -m pytest tests/test_cline_pass_quota_tracker.py -v` — 31 passed (added 5 round-trip regression tests:
+  `test_build_reverse_map_keys_are_raw_upstream_ids`,
+  `test_normalize_model_from_raw_upstream_id`,
+  `test_normalize_model_from_proxy_display_name`,
+  `test_normalize_model_from_bare_name`,
+  `test_normalize_model_unknown_returns_input`)
+
+Notes:
+- Tests use `ClinePassProvider()` directly — the class is a
+  `SingletonABCMeta` singleton so all test cases share one instance,
+  and the `__init__`-built reverse map is reused across cases. No
+  cleanup needed (and cleanup would actually break later tests).

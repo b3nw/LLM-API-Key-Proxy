@@ -500,3 +500,110 @@ def test_resolve_bearer_raw_value():
     """Non-env credentials (e.g. JSON file paths) are passed through as Bearer keys."""
     host = _TrackerHost()
     assert host._resolve_bearer("cv-direct-key-value") == "cv-direct-key-value"
+
+
+# ---------------------------------------------------------------------------
+# Model name round-trip (regression for PR #122 Kilo Code review)
+# ---------------------------------------------------------------------------
+
+
+def test_build_reverse_map_keys_are_raw_upstream_ids():
+    """Regression: upstream ids in DEFAULT_CLINEPASS_MODELS already carry the
+    ``cline-pass/`` prefix. The reverse map keys must NOT be wrapped with
+    ``cline_pass/`` again (the previous implementation produced
+    ``cline_pass/cline-pass/<bare>`` keys that never matched).
+    """
+    from rotator_library.providers.cline_pass_provider import (
+        ClinePassProvider,
+        DEFAULT_CLINEPASS_MODELS,
+    )
+
+    reverse = ClinePassProvider._build_reverse_map()
+    # All upstream ids are already prefixed, so all reverse-map keys must
+    # start with ``cline-pass/`` (NOT ``cline_pass/cline-pass/``).
+    assert reverse, "reverse map should be populated"
+    for upstream_key in reverse:
+        assert upstream_key.startswith("cline-pass/"), (
+            f"reverse-map key {upstream_key!r} should be a raw upstream id"
+        )
+        assert "/" not in upstream_key.removeprefix("cline-pass/"), (
+            f"reverse-map key {upstream_key!r} should not have nested segments"
+        )
+
+    # Every shipped ClinePass model with a non-trivial id must have an entry.
+    for bare, defn in DEFAULT_CLINEPASS_MODELS.items():
+        upstream_id = defn.get("id") if isinstance(defn, dict) else defn
+        if upstream_id != bare:
+            assert upstream_id in reverse, (
+                f"upstream id {upstream_id!r} missing from reverse map"
+            )
+            assert reverse[upstream_id] == f"cline_pass/{bare}"
+
+
+def test_normalize_model_from_raw_upstream_id():
+    """Caller passes a raw Cline upstream id (e.g. error message).
+    Must map to the canonical display name.
+    """
+    from rotator_library.providers.cline_pass_provider import ClinePassProvider
+
+    provider = ClinePassProvider()
+    assert (
+        provider.normalize_model_for_tracking("cline-pass/glm-5.2")
+        == "cline_pass/glm-5.2"
+    )
+    assert (
+        provider.normalize_model_for_tracking("cline-pass/qwen3.7-max")
+        == "cline_pass/qwen3.7-max"
+    )
+
+
+def test_normalize_model_from_proxy_display_name():
+    """Caller passes the proxy display name (``cline_pass/<bare>``).
+    Should be returned unchanged (already canonical)."""
+    from rotator_library.providers.cline_pass_provider import ClinePassProvider
+
+    provider = ClinePassProvider()
+    assert (
+        provider.normalize_model_for_tracking("cline_pass/glm-5.2")
+        == "cline_pass/glm-5.2"
+    )
+    assert (
+        provider.normalize_model_for_tracking("cline_pass/deepseek-v4-flash")
+        == "cline_pass/deepseek-v4-flash"
+    )
+
+
+def test_normalize_model_from_bare_name():
+    """Caller passes a bare display name without provider prefix.
+    Must map to the canonical proxy form."""
+    from rotator_library.providers.cline_pass_provider import ClinePassProvider
+
+    provider = ClinePassProvider()
+    assert provider.normalize_model_for_tracking("glm-5.2") == "cline_pass/glm-5.2"
+    assert (
+        provider.normalize_model_for_tracking("kimi-k2.7-code")
+        == "cline_pass/kimi-k2.7-code"
+    )
+
+
+def test_normalize_model_unknown_returns_input():
+    """Unknown models (not in the catalog) pass through unchanged."""
+    from rotator_library.providers.cline_pass_provider import ClinePassProvider
+
+    provider = ClinePassProvider()
+    # Unknown upstream id
+    assert (
+        provider.normalize_model_for_tracking("cline-pass/totally-fake")
+        == "cline-pass/totally-fake"
+    )
+    # Unknown proxy form
+    assert (
+        provider.normalize_model_for_tracking("cline_pass/totally-fake")
+        == "cline_pass/totally-fake"
+    )
+    # Unknown bare
+    assert (
+        provider.normalize_model_for_tracking("totally-fake") == "totally-fake"
+    )
+    # Empty
+    assert provider.normalize_model_for_tracking("") == ""

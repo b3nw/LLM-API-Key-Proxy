@@ -76,8 +76,10 @@ AVAILABLE_MODELS = [
     "gemini-3-flash-preview",
     "gemini-3-flash",
     "gemini-3.5-flash",
+    "gemini-3.6-flash",
     "gemini-3.1-flash-lite",
     "gemini-3.1-flash-lite-preview",
+    "gemini-3.5-flash-lite",
 ]
 
 # Code Assist API model name remapping.
@@ -86,6 +88,8 @@ AVAILABLE_MODELS = [
 # CCPA_AI_MODEL_MAPPINGS in packages/core/src/config/models.ts.
 CCPA_AI_MODEL_MAPPINGS: dict[str, str] = {
     "gemini-3.5-flash": "gemini-3-flash",
+    "gemini-3.6-flash": "gemini-3-flash",
+    "gemini-3.5-flash-lite": "gemini-3.1-flash-lite",
 }
 
 
@@ -197,19 +201,21 @@ class GeminiCliProvider(
         "pro": ["gemini-2.5-pro", "gemini-3-pro-preview", "gemini-3.1-pro-preview"],
         # All Flash models share a single quota pool across generations.
         # Verified via matching reset timestamps on live quota API responses.
-        # gemini-3.5-flash maps to gemini-3-flash at the CCPA API level.
+        # gemini-3.5-flash and gemini-3.6-flash map to gemini-3-flash at the CCPA API level.
         "flash": [
             "gemini-2.0-flash",
             "gemini-2.5-flash",
             "gemini-3-flash-preview",
             "gemini-3-flash",
             "gemini-3.5-flash",
+            "gemini-3.6-flash",
         ],
         # All Flash Lite models share a single quota pool.
         "flash-lite": [
             "gemini-2.5-flash-lite",
             "gemini-3.1-flash-lite",
             "gemini-3.1-flash-lite-preview",
+            "gemini-3.5-flash-lite",
         ],
     }
 

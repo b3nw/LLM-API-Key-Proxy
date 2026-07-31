@@ -146,6 +146,7 @@ tests/*
 !tests/test_xai_oauth_flow.py
 !tests/test_usage_reconciliation.py
 !tests/test_access_log_middleware.py
+!tests/test_gemini_cli_models.py
 !tests/test_suppress_litellm_warnings.py
 docs/ignored/
 .env

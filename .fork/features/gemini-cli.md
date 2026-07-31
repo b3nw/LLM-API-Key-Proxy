@@ -35,3 +35,26 @@ Verification:
 Notes:
 - The three standalone `fix(gemini-cli)` commits were folded into the owning feature commit so the `dev` stack preserves one clean feature commit for the main gemini-cli feature area.
 - The earlier historical `fix(gemini-cli): fast-fail on non-rotatable errors and pro quota handling` remains documented as an explicit stack exception in `.fork/stack.yml`.
+
+## 2026-07-31 — Register Gemini 3.6 Flash and 3.5 Flash-Lite CCPA aliases
+
+Target: `feat(gemini-cli): add Gemini 3.6 Flash and 3.5 Flash-Lite CCPA mappings`
+
+Files:
+- `.gitignore`
+- `.fork/stack.yml`
+- `src/rotator_library/providers/gemini_cli_provider.py`
+- `tests/test_gemini_cli_models.py`
+
+Working commit before merge:
+- Recorded after commit creation in the investigation state.
+
+Verification:
+- `uv run python3 -m pytest tests/test_gemini_cli_models.py -q` — 2 passed.
+- `uv run python3 -m py_compile src/rotator_library/providers/gemini_cli_provider.py tests/test_gemini_cli_models.py` — passed.
+- `uv run ruff check src/rotator_library/providers/gemini_cli_provider.py tests/test_gemini_cli_models.py --select F401,F811,F821,E9` — passed.
+- `uv run python3 -m pytest tests/ -q` — 517 passed; unrelated existing failures in `test_store_baselines_to_usage_manager` (expects 200, received 400) and `test_parse_period_end_ts_iso_z` (fixture timestamp is already past). A clean-base rerun in `/tmp` was blocked by a native `pydantic_core` mapping error.
+
+Rationale:
+- Dev-stack logs show CCPA returned HTTP 404 with `NOT_FOUND` and `Requested entity was not found.` for both requested IDs. `gemini-3.6-flash` is remapped to existing CCPA ID `gemini-3-flash`; `gemini-3.5-flash-lite` is remapped to existing CCPA ID `gemini-3.1-flash-lite`.
+- Both user-facing IDs are included in discovery and their corresponding shared quota pools.

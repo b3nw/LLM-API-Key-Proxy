@@ -18,6 +18,8 @@ NO network calls, NO API keys needed.
 import os
 from unittest.mock import patch
 
+import pytest
+
 
 from rotator_library.model_alias_registry import (
     ModelAliasRegistry,
@@ -180,6 +182,50 @@ class TestDefaultClaudeAliases:
                 "claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5",
             }
             assert expected.issubset(canonical)
+
+
+class TestDefaultCodex56Aliases:
+    """Test built-in GPT-5.6 aliases for Codex-backed compatibility IDs."""
+
+    @staticmethod
+    def _env_without_model_aliases():
+        return {
+            k: v for k, v in os.environ.items()
+            if not k.startswith("MODEL_ALIAS_")
+        }
+
+    @pytest.mark.parametrize(
+        ("public_id", "target_id"),
+        [
+            ("gpt-5.6-sol", "gpt-5.6-sol"),
+            ("gpt-5.6-terra", "gpt-5.6-terra"),
+            ("gpt-5.6-luna", "gpt-5.6-luna"),
+            ("openai/gpt-5.6-sol", "gpt-5.6-sol"),
+            ("openai/gpt-5.6-terra", "gpt-5.6-terra"),
+            ("openai/gpt-5.6-luna", "gpt-5.6-luna"),
+        ],
+    )
+    def test_default_codex_alias_resolves(self, public_id, target_id):
+        with patch.dict(os.environ, self._env_without_model_aliases(), clear=True):
+            targets = ModelAliasRegistry().resolve(public_id)
+
+        assert targets is not None
+        assert len(targets) == 1
+        assert targets[0].provider == "codex"
+        assert targets[0].model_name == target_id
+
+    def test_default_codex_aliases_are_canonical_models(self):
+        with patch.dict(os.environ, self._env_without_model_aliases(), clear=True):
+            canonical = set(ModelAliasRegistry().get_canonical_models())
+
+        assert {
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "openai/gpt-5.6-sol",
+            "openai/gpt-5.6-terra",
+            "openai/gpt-5.6-luna",
+        }.issubset(canonical)
 
 
 class TestModelLatestRegistry:

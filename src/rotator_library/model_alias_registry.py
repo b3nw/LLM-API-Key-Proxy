@@ -27,9 +27,11 @@ VALID_RETRY_MODES = {"round_robin", "exhaust"}
 
 # Built-in default aliases for clients that send bare or compatibility model IDs.
 #
-# These provide bare-ID routing out of the box so that clients like Claude Code
-# and OpenAI/Codex desktop apps work without requiring the operator to set
-# MODEL_ALIAS_* environment variables.
+# These provide routing out of the box for clients like Claude Code and OpenAI-
+# compatible apps without requiring the operator to set MODEL_ALIAS_* variables.
+#
+# Each value uses the same ``provider:model`` format as env vars.
+# Env vars always override these defaults when set.
 DEFAULT_MODEL_ALIASES: Dict[str, str] = {
     "claude-fable-5": "anthropic:claude-fable-5",
     "claude-opus-4-8": "anthropic:claude-opus-4-8",
@@ -40,12 +42,18 @@ DEFAULT_MODEL_ALIASES: Dict[str, str] = {
     "claude-opus-4-5": "anthropic:claude-opus-4-5-20251101",
     "claude-sonnet-4-5": "anthropic:claude-sonnet-4-5-20250929",
     "claude-haiku-4-5": "anthropic:claude-haiku-4-5-20251001",
+    "gpt-5.6-sol": "codex:gpt-5.6-sol",
+    "gpt-5.6-terra": "codex:gpt-5.6-terra",
+    "gpt-5.6-luna": "codex:gpt-5.6-luna",
     "gpt-5.5": "codex:gpt-5.5",
     "gpt-5.4": "codex:gpt-5.4",
     "gpt-5.4-mini": "codex:gpt-5.4-mini",
     "gpt-5.3-codex": "codex:gpt-5.3-codex",
     "gpt-5.2": "codex:gpt-5.2",
     "codex-auto-review": "codex:codex-auto-review",
+    "openai/gpt-5.6-sol": "codex:gpt-5.6-sol",
+    "openai/gpt-5.6-terra": "codex:gpt-5.6-terra",
+    "openai/gpt-5.6-luna": "codex:gpt-5.6-luna",
     "openai/gpt-5.5": "codex:gpt-5.5",
     "openai/gpt-5.4": "codex:gpt-5.4",
     "openai/gpt-5.4-mini": "codex:gpt-5.4-mini",

@@ -28,7 +28,7 @@ import webbrowser
 from dataclasses import dataclass, field
 from glob import glob
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 import httpx
 from rich.console import Console
@@ -76,6 +76,38 @@ class CredentialSetupResult:
     is_update: bool = False
     error: Optional[str] = None
     credentials: Optional[Dict[str, Any]] = field(default=None, repr=False)
+
+
+@dataclass(frozen=True)
+class OAuthCallbackResult:
+    """Classified localhost OAuth callback request target."""
+
+    kind: Literal["ignore", "code", "error", "incomplete"]
+    code: Optional[str] = None
+    state: Optional[str] = None
+    error: Optional[str] = None
+
+
+def _classify_oauth_callback_target(
+    path_str: str, callback_path: str
+) -> OAuthCallbackResult:
+    """Classify a callback target without treating browser probes as failures."""
+    from urllib.parse import parse_qs, urlparse
+
+    parsed = urlparse(path_str)
+    if parsed.path != callback_path:
+        return OAuthCallbackResult(kind="ignore")
+
+    query_params = parse_qs(parsed.query)
+    if "code" in query_params:
+        return OAuthCallbackResult(
+            kind="code",
+            code=query_params["code"][0],
+            state=query_params.get("state", [None])[0],
+        )
+    if "error" in query_params:
+        return OAuthCallbackResult(kind="error", error=query_params["error"][0])
+    return OAuthCallbackResult(kind="incomplete")
 
 
 def _generate_pkce() -> Tuple[str, str]:
@@ -766,14 +798,20 @@ class OpenAIOAuthBase:
                 while await reader.readline() != b"\r\n":
                     pass
 
-                from urllib.parse import urlparse, parse_qs
-                query_params = parse_qs(urlparse(path_str).query)
+                callback = _classify_oauth_callback_target(
+                    path_str, self.CALLBACK_PATH
+                )
+                if callback.kind == "ignore":
+                    writer.write(
+                        b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n"
+                    )
+                    await writer.drain()
+                    return
 
                 writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n")
 
-                if "code" in query_params:
-                    received_state = query_params.get("state", [None])[0]
-                    if received_state != state:
+                if callback.kind == "code":
+                    if callback.state != state:
                         if not auth_code_future.done():
                             auth_code_future.set_exception(
                                 Exception("OAuth state mismatch")
@@ -782,16 +820,21 @@ class OpenAIOAuthBase:
                             b"<html><body><h1>State Mismatch</h1><p>Security error. Please try again.</p></body></html>"
                         )
                     elif not auth_code_future.done():
-                        auth_code_future.set_result(query_params["code"][0])
+                        auth_code_future.set_result(callback.code)
                         writer.write(
                             b"<html><body><h1>Authentication successful!</h1><p>You can close this window.</p></body></html>"
                         )
-                else:
-                    error = query_params.get("error", ["Unknown error"])[0]
+                elif callback.kind == "error":
                     if not auth_code_future.done():
-                        auth_code_future.set_exception(Exception(f"OAuth failed: {error}"))
+                        auth_code_future.set_exception(
+                            Exception(f"OAuth failed: {callback.error}")
+                        )
                     writer.write(
-                        f"<html><body><h1>Authentication Failed</h1><p>Error: {error}</p></body></html>".encode()
+                        f"<html><body><h1>Authentication Failed</h1><p>Error: {callback.error}</p></body></html>".encode()
+                    )
+                else:
+                    writer.write(
+                        b"<html><body><h1>OAuth callback incomplete</h1><p>Please return to the authorization page and try again.</p></body></html>"
                     )
 
                 await writer.drain()

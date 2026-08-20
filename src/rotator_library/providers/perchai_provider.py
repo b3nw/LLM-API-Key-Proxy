@@ -42,6 +42,7 @@ import hashlib
 import json
 import logging
 import time
+import uuid
 from typing import Any, Dict, List, Optional, TypedDict, Union, final, override
 
 import httpx
@@ -377,35 +378,142 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         response_text = response.text
         if not response_text or not response_text.strip():
             raise LitellmAPIError(
-                f"Perchai returned an empty response body for model {model} "
-                f"(status {response.status_code})",
+                status_code=response.status_code,
+                message=(
+                    f"Perchai returned an empty response body for model {model} "
+                    f"(status {response.status_code})"
+                ),
                 llm_provider="perchai",
                 model=model,
-                response=response,
+                request=response.request,
             )
 
         try:
             response_data = json.loads(response_text)
         except json.JSONDecodeError as exc:
             raise LitellmAPIError(
-                f"Perchai returned malformed JSON for model {model}: {exc}",
+                status_code=response.status_code,
+                message=f"Perchai returned malformed JSON for model {model}: {exc}",
                 llm_provider="perchai",
                 model=model,
-                response=response,
+                request=response.request,
             ) from exc
 
-        if not isinstance(response_data, dict) or "choices" not in response_data:
+        if not isinstance(response_data, dict) or response_data.get("ok") is not True:
+            error_text = (
+                json.dumps(response_data)
+                if isinstance(response_data, dict)
+                else str(response_data)
+            )
+            quota_info = PerchaiProvider.parse_quota_error(
+                Exception(error_text), error_text
+            )
+            if quota_info:
+                reason = quota_info.get("reason")
+                retry_after = quota_info.get("retry_after")
+                raise LitellmAPIError(
+                    status_code=response.status_code,
+                    message=(
+                        f"Perchai rejected request for model {model} "
+                        f"(reason={reason}, retry_after={retry_after}): {error_text}"
+                    ),
+                    llm_provider="perchai",
+                    model=model,
+                    request=response.request,
+                )
             raise LitellmAPIError(
-                f"Perchai response missing 'choices' array for model {model}: "
-                f"{response_data!r}",
+                status_code=response.status_code,
+                message=(
+                    f"Perchai returned unexpected response shape for model {model}: "
+                    f"{response_data!r}"
+                ),
                 llm_provider="perchai",
                 model=model,
-                response=response,
+                request=response.request,
             )
 
-        response_data["model"] = model
+        # Perchai response shape (observed live, not OpenAI-compatible):
+        # {
+        #   "ok": true,
+        #   "text": "..." | null,
+        #   "content": [{"type": "text"|"reasoning"|..., "text": "..."}, ...],
+        #   "reasoning": "..." | null,
+        #   "toolCalls": [...],
+        #   "provider": "meta",
+        #   "model": "muse-spark-1.2",
+        #   "usage": {
+        #     "inputTokens": 12,
+        #     "outputTokens": 549,
+        #     "cacheReadInputTokens": 0,
+        #     "totalTokens": 561,
+        #   },
+        #   ...
+        # }
+        content_text: str = response_data.get("text") or ""
+        reasoning_text: str = (
+            response_data.get("reasoning")
+            or response_data.get("thinking")
+            or ""
+        )
+        content_blocks = response_data.get("content")
+        if not content_text and isinstance(content_blocks, list):
+            parts_text: List[str] = []
+            parts_reasoning: List[str] = []
+            for block in content_blocks:
+                if not isinstance(block, dict):
+                    continue
+                block_text = block.get("text", "")
+                block_type = block.get("type", "")
+                if block_type in ("reasoning", "thinking", "reasoning_content"):
+                    parts_reasoning.append(block_text)
+                elif block_type in ("text",) or not block_type:
+                    parts_text.append(block_text)
+            content_text = "".join(parts_text)
+            if not reasoning_text:
+                reasoning_text = "".join(parts_reasoning)
+
+        usage_data = response_data.get("usage", {}) or {}
+        usage_kwargs: Dict[str, Any] = {}
+        prompt_tokens = usage_data.get("inputTokens")
+        completion_tokens = usage_data.get("outputTokens")
+        total_tokens = usage_data.get("totalTokens")
+        cache_read = usage_data.get("cacheReadInputTokens")
+        if prompt_tokens is not None:
+            usage_kwargs["prompt_tokens"] = prompt_tokens
+        if completion_tokens is not None:
+            usage_kwargs["completion_tokens"] = completion_tokens
+        if total_tokens is not None:
+            usage_kwargs["total_tokens"] = total_tokens
+        if cache_read is not None and prompt_tokens is not None:
+            usage_kwargs["prompt_tokens_details"] = {"cached_tokens": cache_read}
+
+        message_kwargs: Dict[str, Any] = {
+            "role": "assistant",
+            "content": content_text,
+        }
+        if reasoning_text:
+            message_kwargs["reasoning_content"] = reasoning_text
+
+        choices_list = [
+            litellm.Choices(
+                finish_reason="stop",
+                index=0,
+                message=litellm.Message(**message_kwargs),
+            )
+        ]
+
+        model_response = litellm.ModelResponse(
+            id=response_data.get("id") or str(uuid.uuid4()),
+            choices=choices_list,
+            # Preserve the user-requested model id.  Perchai's own "model"
+            # field is the upstream it routed through (e.g. "meta-muse-spark-1-2")
+            # and would silently overwrite what the caller asked for.
+            model=model,
+            usage=litellm.Usage(**usage_kwargs) if usage_kwargs else None,
+        )
+
         file_logger.log_final_response(response_data)
-        return litellm.ModelResponse(**response_data)
+        return model_response
 
     async def _stream_completion(
         self,

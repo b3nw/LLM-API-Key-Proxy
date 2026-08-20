@@ -1417,48 +1417,47 @@ PERCHAI_OAUTH_1=/home/your-user/.perch/cli-auth-session.json
 
 Perchai does **not** publish a public model catalog. The catalog is reverse-engineered from the Perch CLI bundle (`perch.mjs`). As of the latest bundle scan, only **8 models are currently wired** (active option IDs that perchai honors); the other catalog entries resolve to `null` in the bundle and silently fall back to the default model when used.
 
-This means:  
 
-You can only select from these models at the time of writing.  
+| `model` | Tier required |
+|---|---|
+| `perchai/wandb-kimi-k2-6` | Pro |
+| `perchai/wandb-kimi-k2-7-code` | Pro |
+| `perchai/wandb-zai-org-glm-5-2` | Pro |
+| `perchai/wandb-zai-org-glm-5-1` | Pro |
+| `perchai/wandb-qwen3-6-35b-a3b` | Starter |
+| `perchai/wandb-nvidia-nvidia-nemotron-3-ultra-550b-a55b` | Pro |
+| `perchai/wandb-minimax-m3` | Pro |
+| `perchai/wandb-minimax-m2-5` | Starter |
 
-**Currently Wired Models** (verified by direct API probes - all route to the named upstream model when `manualModelOptionId` is set):
+The option ID is passed through to perchai unchanged, so any new option ID they enable (or one we missed here) works the same way - either honored or silently falls back to the default. Example OpenAI-style call:
 
-| User-Facing Name | `manualModelOptionId` | Upstream Model | Provider | Tier |
-|---|---|---|---|---|
-| `kimi-2.6` | `wandb-kimi-k2-6` | `moonshotai/Kimi-K2.6` | `wandb` | Pro |
-| `kimi-2.7` | `wandb-kimi-k2-7-code` | `moonshotai/Kimi-K2.7-Code` | `wandb` | Pro |
-| `glm-5.2` | `wandb-zai-org-glm-5-2` | `zai-org/GLM-5.2` | `wandb` | Pro |
-| `glm-5.1` | `wandb-zai-org-glm-5-1` | `zai-org/GLM-5.1` | `wandb` | Pro |
-| `qwen-3.6` | `wandb-qwen3-6-35b-a3b` | `Qwen/Qwen3.6-35B-A3B` | `wandb` | Starter |
-| `nemotron-ultra` | `wandb-nvidia-nvidia-nemotron-3-ultra-550b-a55b` | `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B` | `wandb` | Pro |
-| `minimax-m3` | `wandb-minimax-m3` | `MiniMaxAI/MiniMax-M3` | `wandb` | Pro |
-| `minimax-m2` | `wandb-minimax-m2-5` | `MiniMaxAI/MiniMax-M2.5` | `wandb` | Starter |
-
-Use either the user-facing name (`perchai/kimi-2.6`) or the option ID (`perchai/wandb-kimi-k2-6`) - the provider accepts both. When you send the user-facing name, the provider maps it to the option ID internally and pins perchai via `manualModelOptionId`.
-
-When perchai enables a new model, its option ID follows the pattern `<provider>-<model-slug>` (e.g. `wandb-<slug>`). If you send a name or option ID not in the table above, the provider passes it through as `manualModelOptionId` and perchai either honors it (model is now wired) or falls back to the default silently.
+```bash
+curl http://localhost:21454/v1/chat/completions \
+  -H "Authorization: Bearer $PROXY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "perchai/wandb-kimi-k2-6",
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'
+```
 
 #### Find out currently available models
 
 ```bash
-# Returns the workspace preset + per-role model ids (note: this endpoint can be
-# stale relative to the actual chat routing - it reports `wandb_kimi` /
-# `wandb-kimi-k2-6` while `model-call` routes to `bedrock_mantle` /
-# `moonshotai.kimi-k2.5` at the time of this writing).
+# Returns the workspace preset + per-role model
 curl -s https://app.perchai.app/api/perch-terminal/public-model-default \
   | python3 -m json.tool
 ```
 
 ```bash
-# Reads the bearer token out of your CLI session file and returns
-# account/quota/subscription details (plan, entitlements, usage windows).
 TOKEN=$(jq -r '.accessToken' ~/.perch/cli-auth-session.json)
 curl -s -H "Authorization: Bearer $TOKEN" \
   https://app.perchai.app/api/perchai/account \
   | python3 -m json.tool
 ```
 
-To probe whether a specific model is currently wired (uses ~50 tokens):
+To probe whether a specific model is currently wired.  
+There is no documentation I could find listing the technical ids for LLMs, so this is an iterative discovery process. The models are listed in plain english on their website, which gives a hint.   
 
 ```bash
 TOKEN=$(jq -r '.accessToken' ~/.perch/cli-auth-session.json)

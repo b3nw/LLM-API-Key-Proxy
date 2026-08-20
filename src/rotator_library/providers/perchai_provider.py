@@ -110,7 +110,8 @@ class PerchaiRequestEnvelope(TypedDict, total=False):
 
     request: Dict[str, Any]
     lane: str
-    preferredModelId: str
+    preferredModelId: Optional[str]
+    manualModelOptionId: Optional[str]
     avoidModelIds: List[str]
     attribution: Optional[Any]
     clientSurface: str
@@ -950,19 +951,26 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
             {
               "request": {...kwargs...},
               "lane": "chat",
-              "preferredModelId": "<model>",
+              "preferredModelId": null,
+              "manualModelOptionId": "<option-id>",
               "avoidModelIds": [],
               "attribution": null,
               "clientSurface": "cli",
               "promoOverflowAccepted": false
             }
+
+        ``preferredModelId`` is the legacy auto-router field and is ignored
+        by perchai; per-request routing is controlled by
+        ``manualModelOptionId``, which must be the upstream option ID
+        (``wandb-kimi-k2-6``) - the part after the ``perchai/`` prefix.
         """
         stripped = model.split("/", 1)[1] if "/" in model else model
         return {
             "request": dict(payload),
             "runId": None,
             "lane": DEFAULT_LANE,
-            "preferredModelId": stripped,
+            "preferredModelId": None,
+            "manualModelOptionId": stripped,
             "avoidModelIds": [],
             "attribution": None,
             "clientSurface": "cli",

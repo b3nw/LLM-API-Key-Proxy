@@ -41,15 +41,15 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import time
 import uuid
-from typing import Any, Dict, List, Optional, TypedDict, Union, final, override
+from typing import Any, AsyncGenerator, Dict, List, Optional, TypedDict, Union, final, override
 
 import httpx
 import litellm
 from litellm.exceptions import APIError as LitellmAPIError
 from litellm.types.utils import ChatCompletionMessageToolCall, Function
-from typing_extensions import AsyncGenerator as _AsyncGenerator
 
 from ..timeout_config import TimeoutConfig
 from ..transaction_logger import ProviderLogger
@@ -193,7 +193,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
     def __init__(self) -> None:
         self._balance_cache: Dict[str, Dict[str, Any]] = {}
         self._quota_refresh_interval: int = int(
-            __import__("os").environ.get("PERCHAI_QUOTA_REFRESH_INTERVAL", "300")
+            os.environ.get("PERCHAI_QUOTA_REFRESH_INTERVAL", "300")
         )
 
         self._model_cache: Dict[str, List[str]] = {}
@@ -255,7 +255,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         self, client: httpx.AsyncClient, **kwargs: Any
     ) -> Union[
         litellm.ModelResponse,
-        _AsyncGenerator[litellm.ModelResponseStream, None],
+        AsyncGenerator[litellm.ModelResponseStream, None],
     ]:
         """Perchai non-stream + stream ``acompletion`` dispatcher.
 
@@ -601,7 +601,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         file_logger: ProviderLogger,
         auth_base_cls: Any = None,
         auth_error_cls: Any = None,
-    ) -> _AsyncGenerator[litellm.ModelResponseStream, None]:
+    ) -> AsyncGenerator[litellm.ModelResponseStream, None]:
         """SSE streaming path: ``client.stream("POST", ...)`` + ``aiter_lines``.
 
         Reactive 401 handling: on the first 401, refresh the access token

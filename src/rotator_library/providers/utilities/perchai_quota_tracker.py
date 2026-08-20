@@ -31,17 +31,18 @@ import asyncio
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import httpx
 
-from rotator_library.providers.provider_interface import UsageResetConfigDef
+from ..provider_interface import UsageResetConfigDef
 
 # Forward-reference UsageManager to avoid circular imports at runtime.
 if TYPE_CHECKING:
-    from rotator_library.usage import UsageManager
+    from ...usage import UsageManager
 
 lib_logger = logging.getLogger("rotator_library")
 lib_logger.propagate = False
@@ -523,9 +524,4 @@ def _parse_iso_to_unix(iso_string: str) -> Optional[float]:
 
 
 def _now_seconds() -> float:
-    """Return ``time.time()`` as a float (imported lazily to keep this
-    module's top-level imports tidy).
-    """
-    import time as _time
-
-    return _time.time()
+    return time.time()

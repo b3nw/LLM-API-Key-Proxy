@@ -195,4 +195,41 @@ set (even when empty dict).
 Fix: always include `function` key. Verified live: 2 tool calls +
 streaming tool calls both work.
 
-Commit: `TBD`
+Commit: `c4d0507`
+
+## 2026-08-21 - manualModelOptionId fix + 29-model docs table
+
+Branch: `feat/provider-app.perchai`
+Commits: `bca84de` (code fix), this commit (docs table + ledger)
+
+**Code fix** (`bca84de`, already committed):
+- `perchai_provider.py` `_build_envelope`: changed `preferredModelId: stripped` to
+  `manualModelOptionId: stripped` + `preferredModelId: None`.
+- Bundle reverse-engineering revealed two selection mechanisms:
+  `preferredModelId` (standard pool, uses `contextOption.id`) and
+  `manualModelOptionId` (founder/manual pin). Only `manualModelOptionId`
+  routes to the requested model; `preferredModelId` with underscore IDs
+  falls back to default.
+- `PerchaiRequestEnvelope` TypedDict updated with
+  `manualModelOptionId: Optional[str]`.
+- Docstring updated with wire format and note that `preferredModelId`
+  is intentionally null.
+
+**Documentation update** (this commit):
+- `DOCUMENTATION.md` Perchai section: expanded model table from 8 to 29
+  verified models, organized by tier (Starter 9, Pro 13, Other 7).
+- Option IDs reverse-engineered from `perch.mjs` v2.4.87 via `Tl(provider, model)`
+  function and verified via live probes.
+- Renamed "Find out currently available models" to "Finding New Models".
+- Added note that models marked `-` are not on pricing page but active.
+- Removed stale "only 8 models are currently wired" text.
+
+Files changed:
+- `src/rotator_library/providers/perchai_provider.py` (in `bca84de`)
+- `DOCUMENTATION.md` (this commit)
+- `.fork/features/perchai.md` (this commit)
+
+Verification:
+- [x] `uv run python3 -m py_compile src/rotator_library/providers/perchai_provider.py` - exit 0
+- [x] `uv run ruff check src/rotator_library/providers/perchai_provider.py --select F401,F811,F821,E9` - exit 0
+- [x] `uv run pytest tests/test_perchai_provider.py -q` - 29/31 pass (2 environmental auth-refresh failures)

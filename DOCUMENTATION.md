@@ -1415,19 +1415,41 @@ PERCHAI_OAUTH_1=/home/your-user/.perch/cli-auth-session.json
 
 #### Available Models
 
-Perchai does **not** publish a public model catalog. The catalog is reverse-engineered from the Perch CLI bundle (`perch.mjs`). As of the latest bundle scan, only **8 models are currently wired** (active option IDs that perchai honors); the other catalog entries resolve to `null` in the bundle and silently fall back to the default model when used.
+Perchai does **not** publish a public model catalog. The option IDs below were reverse-engineered from the Perch CLI bundle (`perch.mjs` v2.4.87) and verified via live probes. **29 models are currently wired** - option IDs not on this list silently fall back to the default model (`bedrock_mantle:moonshotai.kimi-k2.5`).
 
+| Model | `model` value | Tier |
+|---|---|---|
+| Claude 3 Haiku | `perchai/ai-gateway-anthropic-claude-3-haiku` | - |
+| Cohere Command A | `perchai/cohere-command-a-reasoning-08-2025` | - |
+| DeepSeek V3.2 | `perchai/bedrock-mantle-deepseek-v3-2` | - |
+| DeepSeek V4 Flash 0731 | `perchai/wandb-deepseek-ai-deepseek-v4-flash-0731` | Pro |
+| DeepSeek V4 Flash | `perchai/wandb-deepseek-ai-deepseek-v4-flash` | Starter |
+| GLM 5 | `perchai/bedrock-mantle-zai-glm-5` | Starter |
+| GLM 5.1 | `perchai/wandb-zai-org-glm-5-1` | Pro |
+| GLM 5.2 | `perchai/wandb-zai-org-glm-5-2` | Pro |
+| GPT OSS 120B | `perchai/bedrock-mantle-openai-gpt-oss-120b` | - |
+| Gemma 3 12B | `perchai/bedrock-mantle-google-gemma-3-12b-it` | - |
+| Gemma 3 27B | `perchai/bedrock-mantle-google-gemma-3-27b-it` | - |
+| Gemma 4 31B | `perchai/bedrock-mantle-google-gemma-4-31b` | Starter |
+| Gemma 4 E2B | `perchai/bedrock-mantle-google-gemma-4-e2b` | Starter |
+| Grok 4.3 | `perchai/bedrock-mantle-xai-grok-4-3` | Pro |
+| Inkling | `perchai/fireworks-accounts-fireworks-models-inkling` | Pro |
+| Kimi K2.5 (default) | `perchai/bedrock-mantle-moonshotai-kimi-k2-5` | Starter |
+| Kimi K2.6 | `perchai/wandb-kimi-k2-6` | Pro |
+| Kimi K2.7 Code | `perchai/wandb-kimi-k2-7-code` | Pro |
+| MiniMax M2 | `perchai/bedrock-mantle-minimax-minimax-m2` | Starter |
+| MiniMax M2.5 | `perchai/wandb-minimax-m2-5` | Pro |
+| MiniMax M3 | `perchai/wandb-minimax-m3` | Pro |
+| Nemotron 3.5 Lightning | `perchai/wandb-nvidia-nvidia-nemotron-3-5-lightning-30b-a3b` | Pro |
+| Nemotron Super | `perchai/bedrock-mantle-nvidia-nemotron-super-3-120b` | Starter |
+| Nemotron Ultra | `perchai/wandb-nvidia-nvidia-nemotron-3-ultra-550b-a55b` | Pro |
+| Qwen 3.6 | `perchai/wandb-qwen3-6-35b-a3b` | Starter |
+| Qwen 3.7 Plus | `perchai/fireworks-accounts-fireworks-models-qwen3p7-plus` | Pro |
+| Qwen 3.8 27B | `perchai/wandb-qwen-qwen3-8-27b` | Pro |
+| Qwen3 Coder | `perchai/bedrock-mantle-qwen-qwen3-coder-480b-a35b-instruct` | Starter |
+| Qwen3 VL | `perchai/bedrock-mantle-qwen-qwen3-vl-235b-a22b-instruct` | - |
 
-| `model` | Tier required |
-|---|---|
-| `perchai/wandb-kimi-k2-6` | Pro |
-| `perchai/wandb-kimi-k2-7-code` | Pro |
-| `perchai/wandb-zai-org-glm-5-2` | Pro |
-| `perchai/wandb-zai-org-glm-5-1` | Pro |
-| `perchai/wandb-qwen3-6-35b-a3b` | Starter |
-| `perchai/wandb-nvidia-nvidia-nemotron-3-ultra-550b-a55b` | Pro |
-| `perchai/wandb-minimax-m3` | Pro |
-| `perchai/wandb-minimax-m2-5` | Starter |
+Models marked **-** are not listed on Perchai's pricing page but are active in the bundle and respond to probes.
 
 The option ID is passed through to perchai unchanged, so any new option ID they enable (or one we missed here) works the same way - either honored or silently falls back to the default. Example OpenAI-style call:
 
@@ -1441,7 +1463,9 @@ curl http://localhost:21454/v1/chat/completions \
   }'
 ```
 
-#### Find out currently available models
+#### Finding New Models
+
+Perchai may add or remove models at any time. To check what's currently available:
 
 ```bash
 # Returns the workspace preset + per-role model
@@ -1456,8 +1480,7 @@ curl -s -H "Authorization: Bearer $TOKEN" \
   | python3 -m json.tool
 ```
 
-To probe whether a specific model is currently wired.  
-There is no documentation I could find listing the technical ids for LLMs, so this is an iterative discovery process. The models are listed in plain english on their website, which gives a hint.   
+To probe whether a specific option ID is currently wired:
 
 ```bash
 TOKEN=$(jq -r '.accessToken' ~/.perch/cli-auth-session.json)
@@ -1473,7 +1496,7 @@ curl -s -X POST "${PERCHAI_APP_URL:-https://app.perchai.app}/api/perch-terminal/
   }" | jq '.model,.provider,.ok'
 ```
 
-If `.model` matches the upstream model you expected (e.g. `moonshotai/Kimi-K2.6` for `wandb-kimi-k2-6`), the model is wired. If it returns `moonshotai.kimi-k2.5` from `bedrock_mantle`, perchai fell back to the default - the option ID is currently null in their bundle.
+If `.model` matches the upstream model you expected (e.g. `moonshotai/Kimi-K2.6` for `wandb-kimi-k2-6`), the model is wired. If it returns `moonshotai.kimi-k2.5` from `bedrock_mantle`, perchai fell back to the default - the option ID is not currently active.
 
 ---
 

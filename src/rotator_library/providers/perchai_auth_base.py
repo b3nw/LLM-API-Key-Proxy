@@ -30,16 +30,31 @@ Session file format (camelCase, written by perchai CLI v2.4.87):
         "updatedAt": 1234567890    # unix seconds
     }
 
-Refresh endpoint (POST {appUrl}/api/auth/session):
-    Request body:  {"refreshToken": "<refresh_token>"}
-    Response body: {"session": {"access_token": "...",
-                                "refresh_token": "...",
-                                "expires_at": 1234567890,
-                                "user_id": "user_xxx"}}
+Perchai hosts its auth on Supabase GoTrue. The Supabase URL and anon
+key are not stored in the session file; they are discovered once per
+process via a public config endpoint and cached on the instance.
 
-The refresh endpoint uses snake_case in its response (not camelCase as in
-the session file), which is why `_refresh_session_from_response` maps
-between the two encodings.
+Config discovery (GET {appUrl}/api/perch-terminal/cli-auth/config):
+    Response body: {"ok": true,
+                    "appUrl": "https://app.perchai.app",
+                    "supabaseUrl": "https://<id>.supabase.co",
+                    "supabaseAnonKey": "sb_publishable_...",
+                    "providers": ["google", "github"],
+                    "redirectHost": "127.0.0.1"}
+
+Refresh endpoint (POST {supabaseUrl}/auth/v1/token?grant_type=refresh_token):
+    Request headers:
+        apikey:        <supabaseAnonKey>     (required, public anon key)
+        Authorization: Bearer <current_access_token>   (recommended)
+        Content-Type:  application/json
+    Request body:  {"refresh_token": "<refresh_token>"}   (snake_case, single key)
+    Response body (flat snake_case, NOT wrapped in a ``session`` key):
+        {"access_token":  "eyJ...",
+         "token_type":    "bearer",
+         "expires_in":    3600,
+         "expires_at":    1787250252,
+         "refresh_token": "z5kin7gtpbxm",
+         "user":          {"id": "user_xxx", "email": "..."}}
 """
 
 from __future__ import annotations
@@ -125,8 +140,10 @@ class PerchaiAuthBase:
 
     SESSION_FILE: Final[Path] = Path.home() / ".perch" / "cli-auth-session.json"
     DEFAULT_APP_URL: Final[str] = "https://app.perchai.app"
-    REFRESH_PATH: Final[str] = "/api/auth/session"
+    CONFIG_PATH: Final[str] = "/api/perch-terminal/cli-auth/config"
+    REFRESH_PATH: Final[str] = "/auth/v1/token"
     REFRESH_TIMEOUT: Final[float] = 30.0
+    CONFIG_TIMEOUT: Final[float] = 15.0
 
     def __init__(self) -> None:
         self._session: Optional[PerchaiSession] = None
@@ -134,6 +151,8 @@ class PerchaiAuthBase:
         self._model_cache: Dict[str, List[str]] = {}
         self._model_cache_ttl: float = 300.0
         self._model_cache_filled_at: float = 0.0
+        self._supabase_url: Optional[str] = None
+        self._supabase_anon_key: Optional[str] = None
 
     # =========================================================================
     # SESSION LOADING
@@ -260,11 +279,87 @@ class PerchaiAuthBase:
     # TOKEN REFRESH
     # =========================================================================
 
+    async def _ensure_supabase_config(self) -> None:
+        """Populate ``_supabase_url`` and ``_supabase_anon_key`` if not yet cached.
+
+        Perchai does not embed the Supabase endpoint or anon key in the
+        session file; they are served by a public config endpoint on the
+        app host. The first refresh in this process pays the discovery
+        round-trip; every subsequent refresh reuses the cached values.
+
+        Raises:
+            PerchaiAuthError: If the config endpoint is unreachable, returns
+                a non-200 status, returns malformed JSON, or omits one of
+                the two required fields.
+        """
+        if self._supabase_url and self._supabase_anon_key:
+            return
+
+        session = self._ensure_session()
+        app_url = session.get("appUrl") or self.DEFAULT_APP_URL
+        config_url = f"{app_url.rstrip('/')}{self.CONFIG_PATH}"
+
+        try:
+            async with httpx.AsyncClient(timeout=self.CONFIG_TIMEOUT) as client:
+                response = await client.get(
+                    config_url,
+                    headers={"Accept": "application/json"},
+                )
+        except httpx.HTTPError as exc:
+            raise PerchaiAuthError(
+                f"Perchai Supabase config discovery failed at {config_url}: "
+                f"{exc}. Run `perch login` to re-authenticate."
+            ) from exc
+
+        if response.status_code != 200:
+            snippet = response.text[:200] if response.text else "<empty>"
+            raise PerchaiAuthError(
+                f"Perchai Supabase config endpoint returned HTTP "
+                f"{response.status_code}: {snippet}. Run `perch login` to "
+                f"re-authenticate."
+            )
+
+        try:
+            payload = response.json()
+        except json.JSONDecodeError as exc:
+            raise PerchaiAuthError(
+                f"Perchai Supabase config endpoint returned invalid JSON: "
+                f"{exc}. Run `perch login` to re-authenticate."
+            ) from exc
+
+        if not isinstance(payload, dict):
+            raise PerchaiAuthError(
+                "Perchai Supabase config response is not a JSON object. "
+                "Run `perch login` to re-authenticate."
+            )
+
+        supabase_url = payload.get("supabaseUrl")
+        supabase_anon_key = payload.get("supabaseAnonKey")
+        if (
+            not isinstance(supabase_url, str)
+            or not supabase_url
+            or not isinstance(supabase_anon_key, str)
+            or not supabase_anon_key
+        ):
+            raise PerchaiAuthError(
+                "Perchai Supabase config response is missing 'supabaseUrl' "
+                "or 'supabaseAnonKey'. Run `perch login` to re-authenticate."
+            )
+
+        self._supabase_url = supabase_url
+        self._supabase_anon_key = supabase_anon_key
+        lib_logger.debug(
+            f"Discovered perchai Supabase config "
+            f"(supabaseUrl={supabase_url!r})"
+        )
+
     async def refresh_token(self) -> str:
         """Refresh the access token using the cached refresh token.
 
-        POSTs to `{appUrl}/api/auth/session` with
-        `{"refreshToken": "<token>"}`. Parses the snake_case response,
+        Discovers perchai's Supabase GoTrue endpoint via the public config
+        endpoint (once per process, then cached), then POSTs the refresh
+        grant to ``{supabaseUrl}/auth/v1/token?grant_type=refresh_token``
+        with the ``apikey`` header. Parses the flat snake_case response,
         writes the new tokens back to the session file atomically, updates
         the in-memory cache, and returns the new access token.
 
@@ -272,27 +367,34 @@ class PerchaiAuthBase:
             The new access token string.
 
         Raises:
-            PerchaiAuthError: If no session is loaded, the network call
-                fails, or the response is malformed.
+            PerchaiAuthError: If no session is loaded, the Supabase config
+                or refresh network call fails, or the response is malformed.
         """
         session = self._ensure_session()
         refresh_token = session.get("refreshToken")
-        app_url = session.get("appUrl") or self.DEFAULT_APP_URL
         if not refresh_token:
             raise PerchaiAuthError(
                 "Perchai session has no refreshToken. "
                 "Run `perch login` to re-authenticate."
             )
 
-        endpoint = f"{app_url.rstrip('/')}{self.REFRESH_PATH}"
-        lib_logger.debug(f"Refreshing perchai token via {endpoint}")
+        await self._ensure_supabase_config()
+
+        assert self._supabase_url and self._supabase_anon_key
+        refresh_url = (
+            f"{self._supabase_url.rstrip('/')}{self.REFRESH_PATH}"
+            f"?grant_type=refresh_token"
+        )
+        lib_logger.debug(f"Refreshing perchai token via {refresh_url}")
 
         try:
             async with httpx.AsyncClient(timeout=self.REFRESH_TIMEOUT) as client:
                 response = await client.post(
-                    endpoint,
-                    json={"refreshToken": refresh_token},
+                    refresh_url,
+                    json={"refresh_token": refresh_token},
                     headers={
+                        "apikey": self._supabase_anon_key,
+                        "Authorization": f"Bearer {self._get_access_token()}",
                         "Content-Type": "application/json",
                         "Accept": "application/json",
                     },
@@ -319,21 +421,30 @@ class PerchaiAuthBase:
                 f"Run `perch login` to re-authenticate."
             ) from exc
 
-        new_session_payload = payload.get("session")
-        if not isinstance(new_session_payload, dict):
+        if not isinstance(payload, dict):
             raise PerchaiAuthError(
-                "Perchai token refresh response is missing the 'session' "
-                "object. Run `perch login` to re-authenticate."
+                "Perchai token refresh response is not a JSON object. "
+                "Run `perch login` to re-authenticate."
             )
 
-        new_access = new_session_payload.get("access_token")
-        new_refresh = new_session_payload.get("refresh_token", refresh_token)
-        new_expires_at = new_session_payload.get("expires_at")
-        new_user_id = new_session_payload.get("user_id", session.get("userId"))
+        new_access = payload.get("access_token")
+        new_refresh = payload.get("refresh_token", refresh_token)
+        new_expires_at = payload.get("expires_at")
+        if new_expires_at is None:
+            expires_in = payload.get("expires_in")
+            if isinstance(expires_in, (int, float)) and expires_in > 0:
+                new_expires_at = int(time.time() + expires_in)
+
+        user_payload = payload.get("user")
+        new_user_id = (
+            user_payload.get("id")
+            if isinstance(user_payload, dict)
+            else None
+        ) or session.get("userId")
 
         if not new_access or not isinstance(new_access, str):
             raise PerchaiAuthError(
-                "Perchai token refresh response is missing 'session.access_token'. "
+                "Perchai token refresh response is missing 'access_token'. "
                 "Run `perch login` to re-authenticate."
             )
 

@@ -1465,15 +1465,9 @@ curl http://localhost:21454/v1/chat/completions \
 
 #### Discovering New Models
 
-Perchai may add or remove models at any time. To find what is currently wired, the option IDs must be reverse-engineered from the Perch CLI bundle (`perch.mjs`) and verified via live probes. The `scripts/perchai_discover_models.py` script does both:
+Perchai may add or remove models at any time. The option IDs above were reverse-engineered from the Perch CLI bundle (`perch.mjs` v2.4.87) and verified via live probes; here is the method an LLM can reproduce without a checked-in tool.
 
-```bash
-uv run python3 scripts/perchai_discover_models.py
-```
-
-**How it works.**
-
-The Perch CLI bundle generates option IDs from `(provider, upstream_model)` pairs via a single helper function. Extracted from `perch.mjs` v2.4.87:
+**The cartesian product.** The Perch CLI bundle generates every option ID from `(provider, upstream_model)` pairs via one helper function:
 
 ```javascript
 function Tl(e, t) {
@@ -1484,7 +1478,7 @@ function Tl(e, t) {
 }
 ```
 
-That is the entire "cartesian product": for each `(provider, model)` pair, apply `Tl(provider, model)`:
+For each `(provider, model)` pair, apply `Tl(provider, model)`:
 
 | `provider` | `upstream_model` | `Tl(provider, model)` |
 |---|---|---|
@@ -1493,9 +1487,27 @@ That is the entire "cartesian product": for each `(provider, model)` pair, apply
 | `ai_gateway` | `anthropic/claude-3-haiku` | `ai-gateway-anthropic-claude-3-haiku` |
 | `fireworks` | `accounts/fireworks/models/inkling` | `fireworks-accounts-fireworks-models-inkling` |
 
-Each `(provider, model)` pair is the input; the result is the option ID the proxy passes as `manualModelOptionId`. The script enumerates every `Tl(...)` call site from the bundle (39 entries as of v2.4.87), computes each option ID, then probes them all in parallel batches of 10 against `POST /api/perch-terminal/model-call`. A successful probe (`{"ok": true, "model": "...", "provider": "..."}`) means the option ID is wired; a response that falls back to `moonshotai.kimi-k2.5` means the option ID is not currently active.
+**Inputs.** Every `Tl(...)` call site in the latest `perch.mjs` is one `(provider, model)` pair. As of v2.4.87 there are 39 such call sites (under `wandb`, `bedrock_mantle`, `ai_gateway`, `claude_code_oauth`, `codex_oauth`, `cohere`, `fireworks`, `grok_oauth`, `meta`, `nvidia_nim`). Grep `perch.mjs` for `Tl(` to enumerate them when a new bundle ships.
 
-**Adding new pairs to the script.** When Perch adds a new model, find the new `Tl(...)` call in the latest `perch.mjs` (e.g. `Tl("wandb", "openai/gpt-6-preview")`) and append `("wandb", "openai/gpt-6-preview")` to `TL_PAIRS` in `scripts/perchai_discover_models.py`. Re-run the script and look for new `ROUTED` lines.
+**Probe to verify.** Each computed option ID is verified by posting a minimal chat completion to `POST /api/perch-terminal/model-call` with the option ID as `manualModelOptionId`:
+
+```json
+{
+  "request": {"model": "probe", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 2, "stream": false},
+  "runId": null,
+  "lane": "chat",
+  "preferredModelId": null,
+  "manualModelOptionId": "<option-id>"
+}
+```
+
+A response of `{"ok": true, "model": "<expected upstream>", "provider": "<expected provider>"}` confirms the option ID is wired. A response whose `model`/`provider` is `moonshotai.kimi-k2.5` / `bedrock_mantle` means perchai silently fell back to the default - the option ID is not currently active. Any other error (`{"ok": false, "error": "..."}`) means the option ID exists in the bundle but the upstream is exhausted or otherwise unavailable to this account.
+
+**Rate.** Probe in parallel batches of 10 with fresh-token refresh (Supabase GoTrue: `POST {supabaseUrl}/auth/v1/token?grant_type=refresh_token`, anon key from `GET /api/perch-terminal/cli-auth/config`). 10-in-flight is empirically the fastest rate below the 401-lockout threshold; sustained higher rates trigger a ~2 hour auth cooldown.
+
+**Authentication.** Use the access token from the local session file (`~/.perch/cli-auth-session.json`) refreshed via the Supabase GoTrue flow above. Refresh the token once at script start, then reuse for the whole batch run.
+
+**Adding new pairs.** When Perch ships a new model, grep the latest `perch.mjs` for `Tl(<provider>, "<upstream_model>")`, add that pair to your enumeration, and re-probe. A successful probe will return the upstream model the option ID routes to.
 
 #### Probing Pricing
 
@@ -1536,6 +1548,18 @@ TOKEN=$(jq -r '.accessToken' ~/.perch/cli-auth-session.json)
 curl -s -H "Authorization: Bearer $TOKEN" \
   https://app.perchai.app/api/perchai/account \
   | python3 -m json.tool
+```
+
+#### Tests
+
+The Perchai suite is tagged with `@pytest.mark.perchai` and skips cleanly at collection time when no session file exists, so the rest of the repo's tests run unaffected.
+
+```bash
+# all tests
+uv run pytest tests/ -v
+
+# Perchai suite only (requires ~/.perch/cli-auth-session.json)
+uv run pytest tests/test_perchai_provider.py -v -m perchai
 ```
 
 ---

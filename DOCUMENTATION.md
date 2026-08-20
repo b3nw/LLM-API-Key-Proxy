@@ -1387,6 +1387,95 @@ QUOTA_GROUPS_GEMINI_CLI_3_FLASH="gemini-3-flash-preview"
 *   **Thinking Parameter**: Automatically handles the `thinking` parameter transformation required for Gemini 2.5 models (`thinking` -> `gemini-2.5-pro` reasoning parameter).
 *   **Safety Settings**: Ensures default safety settings (blocking nothing) are applied if not provided, preventing over-sensitive refusals.
 
+### 3.3. Perchai (`perchai_provider.py`)
+
+The `PerchaiProvider` wraps [Perch](https://app.perchai.app) (perchai.app) - an OAuth-authenticated gateway that exposes a multi-model catalog under a single Bearer token. Perchai is **not** OpenAI-compatible: requests go in a perchai-specific envelope, and the wire format uses perchai's custom SSE event shape (translated to litellm types).
+
+#### Installation
+
+**1. Subscribe at [app.perchai.app](https://app.perchai.app)** (Starter or Pro tier).
+
+**2. Install the Perch CLI and log in.** `perch login` writes a session file the proxy replays against the upstream API:
+
+```bash
+curl -fsSL https://app.perchai.app/install.sh | sh   # use the official URL
+perch login
+perch status
+ls -l ~/.perch/cli-auth-session.json
+```
+
+**3. Point the proxy at the session file** in `.env`:
+
+```env
+PERCHAI_OAUTH_1=/home/your-user/.perch/cli-auth-session.json
+# multiple accounts: PERCHAI_OAUTH_2, PERCHAI_OAUTH_3, ...
+# non-production deployment override (rare):
+# PERCHAI_APP_URL=https://app.perchai.app
+```
+
+#### Available Models
+
+Perchai does **not** publish a public model catalog. The catalog is reverse-engineered from the Perch CLI bundle (`perch.mjs`). As of the latest bundle scan, only **8 models are currently wired** (active option IDs that perchai honors); the other catalog entries resolve to `null` in the bundle and silently fall back to the default model when used.
+
+This means:  
+
+You can only select from these models at the time of writing.  
+
+**Currently Wired Models** (verified by direct API probes - all route to the named upstream model when `manualModelOptionId` is set):
+
+| User-Facing Name | `manualModelOptionId` | Upstream Model | Provider | Tier |
+|---|---|---|---|---|
+| `kimi-2.6` | `wandb-kimi-k2-6` | `moonshotai/Kimi-K2.6` | `wandb` | Pro |
+| `kimi-2.7` | `wandb-kimi-k2-7-code` | `moonshotai/Kimi-K2.7-Code` | `wandb` | Pro |
+| `glm-5.2` | `wandb-zai-org-glm-5-2` | `zai-org/GLM-5.2` | `wandb` | Pro |
+| `glm-5.1` | `wandb-zai-org-glm-5-1` | `zai-org/GLM-5.1` | `wandb` | Pro |
+| `qwen-3.6` | `wandb-qwen3-6-35b-a3b` | `Qwen/Qwen3.6-35B-A3B` | `wandb` | Starter |
+| `nemotron-ultra` | `wandb-nvidia-nvidia-nemotron-3-ultra-550b-a55b` | `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B` | `wandb` | Pro |
+| `minimax-m3` | `wandb-minimax-m3` | `MiniMaxAI/MiniMax-M3` | `wandb` | Pro |
+| `minimax-m2` | `wandb-minimax-m2-5` | `MiniMaxAI/MiniMax-M2.5` | `wandb` | Starter |
+
+Use either the user-facing name (`perchai/kimi-2.6`) or the option ID (`perchai/wandb-kimi-k2-6`) - the provider accepts both. When you send the user-facing name, the provider maps it to the option ID internally and pins perchai via `manualModelOptionId`.
+
+When perchai enables a new model, its option ID follows the pattern `<provider>-<model-slug>` (e.g. `wandb-<slug>`). If you send a name or option ID not in the table above, the provider passes it through as `manualModelOptionId` and perchai either honors it (model is now wired) or falls back to the default silently.
+
+#### Find out currently available models
+
+```bash
+# Returns the workspace preset + per-role model ids (note: this endpoint can be
+# stale relative to the actual chat routing - it reports `wandb_kimi` /
+# `wandb-kimi-k2-6` while `model-call` routes to `bedrock_mantle` /
+# `moonshotai.kimi-k2.5` at the time of this writing).
+curl -s https://app.perchai.app/api/perch-terminal/public-model-default \
+  | python3 -m json.tool
+```
+
+```bash
+# Reads the bearer token out of your CLI session file and returns
+# account/quota/subscription details (plan, entitlements, usage windows).
+TOKEN=$(jq -r '.accessToken' ~/.perch/cli-auth-session.json)
+curl -s -H "Authorization: Bearer $TOKEN" \
+  https://app.perchai.app/api/perchai/account \
+  | python3 -m json.tool
+```
+
+To probe whether a specific model is currently wired (uses ~50 tokens):
+
+```bash
+TOKEN=$(jq -r '.accessToken' ~/.perch/cli-auth-session.json)
+curl -s -X POST "${PERCHAI_APP_URL:-https://app.perchai.app}/api/perch-terminal/model-call" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"request\": {\"model\": \"probe\", \"messages\": [{\"role\":\"user\",\"content\":\"hi\"}], \"max_tokens\": 5, \"stream\": false},
+    \"runId\": null,
+    \"lane\": \"chat\",
+    \"preferredModelId\": null,
+    \"manualModelOptionId\": \"<option-id-to-probe>\"
+  }" | jq '.model,.provider,.ok'
+```
+
+If `.model` matches the upstream model you expected (e.g. `moonshotai/Kimi-K2.6` for `wandb-kimi-k2-6`), the model is wired. If it returns `moonshotai.kimi-k2.5` from `bedrock_mantle`, perchai fell back to the default - the option ID is currently null in their bundle.
+
 ---
 
 ## 4. Logging & Debugging

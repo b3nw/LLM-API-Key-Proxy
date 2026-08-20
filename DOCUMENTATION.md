@@ -1417,39 +1417,39 @@ PERCHAI_OAUTH_1=/home/your-user/.perch/cli-auth-session.json
 
 Perchai does **not** publish a public model catalog. The option IDs below were reverse-engineered from the Perch CLI bundle (`perch.mjs` v2.4.87) and verified via live probes. **29 models are currently wired** - option IDs not on this list silently fall back to the default model (`bedrock_mantle:moonshotai.kimi-k2.5`).
 
-| Model | `model` value | Tier |
-|---|---|---|
-| Claude 3 Haiku | `perchai/ai-gateway-anthropic-claude-3-haiku` | - |
-| Cohere Command A | `perchai/cohere-command-a-reasoning-08-2025` | - |
-| DeepSeek V3.2 | `perchai/bedrock-mantle-deepseek-v3-2` | - |
-| DeepSeek V4 Flash 0731 | `perchai/wandb-deepseek-ai-deepseek-v4-flash-0731` | Pro |
-| DeepSeek V4 Flash | `perchai/wandb-deepseek-ai-deepseek-v4-flash` | Starter |
-| GLM 5 | `perchai/bedrock-mantle-zai-glm-5` | Starter |
-| GLM 5.1 | `perchai/wandb-zai-org-glm-5-1` | Pro |
-| GLM 5.2 | `perchai/wandb-zai-org-glm-5-2` | Pro |
-| GPT OSS 120B | `perchai/bedrock-mantle-openai-gpt-oss-120b` | - |
-| Gemma 3 12B | `perchai/bedrock-mantle-google-gemma-3-12b-it` | - |
-| Gemma 3 27B | `perchai/bedrock-mantle-google-gemma-3-27b-it` | - |
-| Gemma 4 31B | `perchai/bedrock-mantle-google-gemma-4-31b` | Starter |
-| Gemma 4 E2B | `perchai/bedrock-mantle-google-gemma-4-e2b` | Starter |
-| Grok 4.3 | `perchai/bedrock-mantle-xai-grok-4-3` | Pro |
-| Inkling | `perchai/fireworks-accounts-fireworks-models-inkling` | Pro |
-| Kimi K2.5 (default) | `perchai/bedrock-mantle-moonshotai-kimi-k2-5` | Starter |
-| Kimi K2.6 | `perchai/wandb-kimi-k2-6` | Pro |
-| Kimi K2.7 Code | `perchai/wandb-kimi-k2-7-code` | Pro |
-| MiniMax M2 | `perchai/bedrock-mantle-minimax-minimax-m2` | Starter |
-| MiniMax M2.5 | `perchai/wandb-minimax-m2-5` | Pro |
-| MiniMax M3 | `perchai/wandb-minimax-m3` | Pro |
-| Nemotron 3.5 Lightning | `perchai/wandb-nvidia-nvidia-nemotron-3-5-lightning-30b-a3b` | Pro |
-| Nemotron Super | `perchai/bedrock-mantle-nvidia-nemotron-super-3-120b` | Starter |
-| Nemotron Ultra | `perchai/wandb-nvidia-nvidia-nemotron-3-ultra-550b-a55b` | Pro |
-| Qwen 3.6 | `perchai/wandb-qwen3-6-35b-a3b` | Starter |
-| Qwen 3.7 Plus | `perchai/fireworks-accounts-fireworks-models-qwen3p7-plus` | Pro |
-| Qwen 3.8 27B | `perchai/wandb-qwen-qwen3-8-27b` | Pro |
-| Qwen3 Coder | `perchai/bedrock-mantle-qwen-qwen3-coder-480b-a35b-instruct` | Starter |
-| Qwen3 VL | `perchai/bedrock-mantle-qwen-qwen3-vl-235b-a22b-instruct` | - |
+| Model | `model` value | Tier | On pricing page |
+|---|---|---|---|
+| Claude 3 Haiku | `perchai/ai-gateway-anthropic-claude-3-haiku` | - | No |
+| Cohere Command A | `perchai/cohere-command-a-reasoning-08-2025` | - | No |
+| DeepSeek V3.2 | `perchai/bedrock-mantle-deepseek-v3-2` | - | No |
+| DeepSeek V4 Flash 0731 | `perchai/wandb-deepseek-ai-deepseek-v4-flash-0731` | Pro | Yes |
+| DeepSeek V4 Flash | `perchai/wandb-deepseek-ai-deepseek-v4-flash` | Starter | Yes |
+| GLM 5 | `perchai/bedrock-mantle-zai-glm-5` | Starter | Yes |
+| GLM 5.1 | `perchai/wandb-zai-org-glm-5-1` | Pro | Yes |
+| GLM 5.2 | `perchai/wandb-zai-org-glm-5-2` | Pro | Yes |
+| GPT OSS 120B | `perchai/bedrock-mantle-openai-gpt-oss-120b` | - | No |
+| Gemma 3 12B | `perchai/bedrock-mantle-google-gemma-3-12b-it` | - | No |
+| Gemma 3 27B | `perchai/bedrock-mantle-google-gemma-3-27b-it` | - | No |
+| Gemma 4 31B | `perchai/bedrock-mantle-google-gemma-4-31b` | Starter | Yes |
+| Gemma 4 E2B | `perchai/bedrock-mantle-google-gemma-4-e2b` | Starter | Yes |
+| Grok 4.3 | `perchai/bedrock-mantle-xai-grok-4.3` | Pro | Yes |
+| Inkling | `perchai/fireworks-accounts-fireworks-models-inkling` | Pro | Yes |
+| Kimi K2.5 (default) | `perchai/bedrock-mantle-moonshotai-kimi-k2-5` | Starter | Yes |
+| Kimi K2.6 | `perchai/wandb-kimi-k2-6` | Pro | Yes |
+| Kimi K2.7 Code | `perchai/wandb-kimi-k2-7-code` | Pro | Yes |
+| MiniMax M2 | `perchai/bedrock-mantle-minimax-minimax-m2` | Starter | Yes |
+| MiniMax M2.5 | `perchai/wandb-minimax-m2-5` | Pro | Yes |
+| MiniMax M3 | `perchai/wandb-minimax-m3` | Pro | Yes |
+| Nemotron 3.5 Lightning | `perchai/wandb-nvidia-nvidia-nemotron-3-5-lightning-30b-a3b` | Pro | Yes |
+| Nemotron Super | `perchai/bedrock-mantle-nvidia-nemotron-super-3-120b` | Starter | Yes |
+| Nemotron Ultra | `perchai/wandb-nvidia-nvidia-nemotron-3-ultra-550b-a55b` | Pro | Yes |
+| Qwen 3.6 | `perchai/wandb-qwen3-6-35b-a3b` | Starter | Yes |
+| Qwen 3.7 Plus | `perchai/fireworks-accounts-fireworks-models-qwen3p7-plus` | Pro | Yes |
+| Qwen 3.8 27B | `perchai/wandb-qwen-qwen3-8-27b` | Pro | Yes |
+| Qwen3 Coder | `perchai/bedrock-mantle-qwen-qwen3-coder-480b-a35b-instruct` | Starter | Yes |
+| Qwen3 VL | `perchai/bedrock-mantle-qwen-qwen3-vl-235b-a22b-instruct` | - | No |
 
-Models marked **-** are not listed on Perchai's pricing page but are active in the bundle and respond to probes.
+Models marked **No** under "On pricing page" are not advertised by Perchai but are active in the bundle and respond to probes - they work, but you may need to discover them yourself.
 
 The option ID is passed through to perchai unchanged, so any new option ID they enable (or one we missed here) works the same way - either honored or silently falls back to the default. Example OpenAI-style call:
 
@@ -1463,24 +1463,57 @@ curl http://localhost:21454/v1/chat/completions \
   }'
 ```
 
-#### Finding New Models
+#### Discovering New Models
 
-Perchai may add or remove models at any time. To check what's currently available:
-
-```bash
-# Returns the workspace preset + per-role model
-curl -s https://app.perchai.app/api/perch-terminal/public-model-default \
-  | python3 -m json.tool
-```
+Perchai may add or remove models at any time. To find what is currently wired, the option IDs must be reverse-engineered from the Perch CLI bundle (`perch.mjs`) and verified via live probes. The `scripts/perchai_discover_models.py` script does both:
 
 ```bash
-TOKEN=$(jq -r '.accessToken' ~/.perch/cli-auth-session.json)
-curl -s -H "Authorization: Bearer $TOKEN" \
-  https://app.perchai.app/api/perchai/account \
-  | python3 -m json.tool
+uv run python3 scripts/perchai_discover_models.py
 ```
 
-To probe whether a specific option ID is currently wired:
+**How it works.**
+
+The Perch CLI bundle generates option IDs from `(provider, upstream_model)` pairs via a single helper function. Extracted from `perch.mjs` v2.4.87:
+
+```javascript
+function Tl(e, t) {
+  return e.replace(/_/g, "-") + "-" +
+         t.replace(/[^a-zA-Z0-9]+/g, "-")
+          .replace(/^-+|-+$/g, "")
+          .toLowerCase();
+}
+```
+
+That is the entire "cartesian product": for each `(provider, model)` pair, apply `Tl(provider, model)`:
+
+| `provider` | `upstream_model` | `Tl(provider, model)` |
+|---|---|---|
+| `wandb` | `deepseek-ai/DeepSeek-V4-Flash` | `wandb-deepseek-ai-deepseek-v4-flash` |
+| `bedrock_mantle` | `moonshotai.kimi-k2.5` | `bedrock-mantle-moonshotai-kimi-k2-5` |
+| `ai_gateway` | `anthropic/claude-3-haiku` | `ai-gateway-anthropic-claude-3-haiku` |
+| `fireworks` | `accounts/fireworks/models/inkling` | `fireworks-accounts-fireworks-models-inkling` |
+
+Each `(provider, model)` pair is the input; the result is the option ID the proxy passes as `manualModelOptionId`. The script enumerates every `Tl(...)` call site from the bundle (39 entries as of v2.4.87), computes each option ID, then probes them all in parallel batches of 10 against `POST /api/perch-terminal/model-call`. A successful probe (`{"ok": true, "model": "...", "provider": "..."}`) means the option ID is wired; a response that falls back to `moonshotai.kimi-k2.5` means the option ID is not currently active.
+
+**Adding new pairs to the script.** When Perch adds a new model, find the new `Tl(...)` call in the latest `perch.mjs` (e.g. `Tl("wandb", "openai/gpt-6-preview")`) and append `("wandb", "openai/gpt-6-preview")` to `TL_PAIRS` in `scripts/perchai_discover_models.py`. Re-run the script and look for new `ROUTED` lines.
+
+#### Probing Pricing
+
+Perchai does **not** expose per-model pricing via its API. What the endpoints do return:
+
+- `GET /api/perch-terminal/usage` - monthly aggregate (`monthly.usageUsd`, `monthly.limitUsd`, `monthly.resetAt`). Aggregate only, no per-model breakdown.
+- `POST /api/perch-terminal/model-call` response `usage` - `inputTokens`, `outputTokens`, `totalTokens`, `cacheReadInputTokens`. **No cost field.**
+
+So per-model pricing has to be inferred from Perchai's website, the `perch` CLI bundle if a cost field ever appears, or experimental measurement (call the model with `N` input tokens, divide the monthly cost delta by `N` - approximate only).
+
+The `scripts/perchai_probe_prices.py` script dumps whatever the two endpoints return so you can see what's available and spot any new cost fields Perchai adds:
+
+```bash
+uv run python3 scripts/perchai_probe_prices.py bedrock-mantle-moonshotai-kimi-k2-5
+# pass any option ID (with or without the perchai/ prefix) as the argument
+```
+
+#### Probing a Single Option ID by Hand
 
 ```bash
 TOKEN=$(jq -r '.accessToken' ~/.perch/cli-auth-session.json)
@@ -1497,6 +1530,20 @@ curl -s -X POST "${PERCHAI_APP_URL:-https://app.perchai.app}/api/perch-terminal/
 ```
 
 If `.model` matches the upstream model you expected (e.g. `moonshotai/Kimi-K2.6` for `wandb-kimi-k2-6`), the model is wired. If it returns `moonshotai.kimi-k2.5` from `bedrock_mantle`, perchai fell back to the default - the option ID is not currently active.
+
+To check what the workspace currently exposes (no auth needed):
+
+```bash
+curl -s https://app.perchai.app/api/perch-terminal/public-model-default \
+  | python3 -m json.tool
+```
+
+```bash
+TOKEN=$(jq -r '.accessToken' ~/.perch/cli-auth-session.json)
+curl -s -H "Authorization: Bearer $TOKEN" \
+  https://app.perchai.app/api/perchai/account \
+  | python3 -m json.tool
+```
 
 ---
 

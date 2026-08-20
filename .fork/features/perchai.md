@@ -233,3 +233,58 @@ Verification:
 - [x] `uv run python3 -m py_compile src/rotator_library/providers/perchai_provider.py` - exit 0
 - [x] `uv run ruff check src/rotator_library/providers/perchai_provider.py --select F401,F811,F821,E9` - exit 0
 - [x] `uv run pytest tests/test_perchai_provider.py -q` - 29/31 pass (2 environmental auth-refresh failures)
+
+## 2026-08-21 - Discovery + pricing probe scripts
+
+Branch: `feat/provider-app.perchai`
+
+Added two durable scripts under `scripts/` so future contributors can
+re-discover option IDs when Perch adds models, and inspect whatever
+pricing fields the API exposes.
+
+**`scripts/perchai_discover_models.py`** - the breakthrough workflow
+distilled into a single command:
+- Lists all 39 `(provider, upstream_model)` pairs extracted from
+  every `Tl(...)` call site in `perch.mjs` v2.4.87.
+- Mirrors the `Tl(provider, model)` function in Python (regex transform
+  of underscores, non-alphanumeric runs, trim, lowercase, join).
+- Computes each option ID, then probes them all in parallel batches
+  of 10 against `POST /api/perch-terminal/model-call`.
+- Marks each probe `ROUTED`, `fallback`, or `ERROR` based on the
+  upstream `model`/`provider` in the response.
+- Documents the protocol for adding new pairs when Perch adds models.
+
+**`scripts/perchai_probe_prices.py`** - dump whatever pricing fields
+the API actually returns:
+- `GET /api/perch-terminal/usage` - shows monthly aggregate
+  (`monthly.usageUsd`, `monthly.limitUsd`, `monthly.resetAt`).
+- `POST /api/perch-terminal/model-call` - shows full response minus
+  the noisy `text` field, highlights any `cost`/`usd`/`price` keys
+  found in `usage` so contributors can spot new cost fields when
+  Perchai adds them.
+- Accepts any option ID as `argv[1]`; defaults to the default model.
+
+**`DOCUMENTATION.md` Perchai section** expanded to:
+- Added `On pricing page` column to the 29-model table (Yes for
+  Starter/Pro, No for the 7 unadvertised models).
+- New `Discovering New Models` section with the `Tl` function in JS,
+  a worked-example table, and a reference to the discovery script.
+- New `Probing Pricing` section explaining what the API does and
+  doesn't expose, with a reference to the price probe script.
+- Kept the manual `curl` probe recipe for one-off verification.
+
+Files changed:
+- `scripts/perchai_discover_models.py` (new)
+- `scripts/perchai_probe_prices.py` (new)
+- `DOCUMENTATION.md` (modified)
+- `.fork/features/perchai.md` (this entry)
+
+Verification:
+- [x] `uv run python3 -m py_compile` on both scripts - exit 0
+- [x] `uv run ruff check` on both scripts with
+      `--select F401,F811,F821,E9` - exit 0
+- [x] Both scripts import cleanly; `tl()` produces expected IDs
+      (`wandb-deepseek-ai-deepseek-v4-flash`,
+      `bedrock-mantle-moonshotai-kimi-k2-5`).
+- [x] `DOCUMENTATION.md` Perchai section still references correct
+      option IDs from prior commits.

@@ -171,3 +171,14 @@ trigger a second `finish_reason="stop"` chunk - that would deliver
 two terminating finish reasons in one stream. The `saw_tool_call`
 flag (set when any yielded chunk carries `finish_reason="tool_calls"`)
 short-circuits both the `[DONE]` and the post-loop synthesis paths.
+
+## 2026-08-20 - Refresh endpoint fix
+
+**Problem**: 2/31 pytest tests failing (`test_given_expired_token_*_refreshes_and_retries`).
+Initial bundle grep had wrong endpoint - `/api/auth/session` returns 405.
+
+**Fix** (`96f1a7f`): Switched to Supabase GoTrue endpoint
+`POST {supabaseUrl}/auth/v1/token?grant_type=refresh_token` with config
+discovery via `GET /api/perch-terminal/cli-auth/config`.
+
+**Verification**: 31/31 tests pass, live refresh probe shows token rotation.

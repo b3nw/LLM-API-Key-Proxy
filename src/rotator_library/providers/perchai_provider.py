@@ -307,10 +307,13 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
             return self._stream_completion(
                 client=client,
                 url=url,
-                headers=_headers(token),
+                build_headers=_headers,
+                token=token,
                 payload=payload,
                 model=raw_model,
                 file_logger=file_logger,
+                auth_base_cls=PerchaiAuthBase,
+                auth_error_cls=LitellmAuthenticationError,
             )
 
         return await self._non_stream_completion(
@@ -519,68 +522,85 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         self,
         client: httpx.AsyncClient,
         url: str,
-        headers: Dict[str, str],
+        build_headers: Any,
+        token: str,
         payload: Dict[str, Any],
         model: str,
         file_logger: ProviderLogger,
+        auth_base_cls: Any = None,
+        auth_error_cls: Any = None,
     ) -> _AsyncGenerator[litellm.ModelResponseStream, None]:
         """SSE streaming path: ``client.stream("POST", ...)`` + ``aiter_lines``.
 
-        Yields one ``litellm.ModelResponseStream`` per upstream event.
-        The upstream terminates with ``[DONE]``; we end the generator
-        with a final chunk carrying ``finish_reason="stop"``.  If the
-        stream ends without a ``[DONE]`` sentinel (truncated response,
-        TCP reset) we still synthesize a final ``stop`` chunk so
-        downstream consumers always observe a terminating finish reason.
-
-        Note: this method does NOT do reactive 401 refresh - the executor
-        rotates the credential on stream failure (proxy handles retries).
+        Reactive 401 handling: on the first 401, refresh the access token
+        via ``auth_base_cls.refresh_on_401`` and retry the stream once.
+        Mirrors the non-streaming path's 401 handler so the proxy does
+        not exhaust the credential on a single expired-token event.
         """
         envelope = self._build_envelope(model=model, payload=payload)
 
         body = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
-        stream_headers = dict(headers)
-        stream_headers["Content-Type"] = "application/json; charset=utf-8"
 
         saw_done = False
         stream_id = f"chatcmpl-perchai-stream-{int(time.time())}"
 
-        async with client.stream(
-            "POST",
-            url,
-            headers=stream_headers,
-            content=body,
-            timeout=TimeoutConfig.streaming(),
-        ) as response:
-            await self._raise_for_status(response, model)
+        for attempt in range(2):
+            stream_headers = dict(build_headers(token))
+            stream_headers["Content-Type"] = "application/json; charset=utf-8"
 
-            async for line in response.aiter_lines():
-                file_logger.log_response_chunk(line)
+            ctx = client.stream(
+                "POST",
+                url,
+                headers=stream_headers,
+                content=body,
+                timeout=TimeoutConfig.streaming(),
+            )
+            response = await ctx.__aenter__()
 
-                if not line.startswith("data:"):
-                    continue
+            if (
+                response.status_code == 401
+                and attempt == 0
+                and auth_base_cls is not None
+            ):
+                await response.aread()
+                await ctx.__aexit__(None, None, None)
+                auth = auth_base_cls()
+                token = await auth.refresh_on_401(client, token)
+                continue
 
-                data_str = line[len("data:"):].strip()
-                if data_str == "[DONE]":
-                    saw_done = True
-                    yield litellm.ModelResponseStream(
-                        id=stream_id,
-                        created=int(time.time()),
-                        model=model,
-                        object="chat.completion.chunk",
-                        choices=[
-                            {
-                                "index": 0,
-                                "delta": {},
-                                "finish_reason": "stop",
-                            }
-                        ],
-                    )
-                    return
+            try:
+                await self._raise_for_status(response, model)
 
-                stream_chunk = self._parse_sse_line(line, model)
-                if stream_chunk is not None:
-                    yield stream_chunk
+                async for line in response.aiter_lines():
+                    file_logger.log_response_chunk(line)
+
+                    if not line.startswith("data:"):
+                        continue
+
+                    data_str = line[len("data:"):].strip()
+                    if data_str == "[DONE]":
+                        saw_done = True
+                        yield litellm.ModelResponseStream(
+                            id=stream_id,
+                            created=int(time.time()),
+                            model=model,
+                            object="chat.completion.chunk",
+                            choices=[
+                                {
+                                    "index": 0,
+                                    "delta": {},
+                                    "finish_reason": "stop",
+                                }
+                            ],
+                        )
+                        return
+
+                    stream_chunk = self._parse_sse_line(line, model)
+                    if stream_chunk is not None:
+                        yield stream_chunk
+            finally:
+                await ctx.__aexit__(None, None, None)
+            break
 
         if not saw_done:
             lib_logger.debug(

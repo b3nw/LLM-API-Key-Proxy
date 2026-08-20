@@ -1389,7 +1389,7 @@ QUOTA_GROUPS_GEMINI_CLI_3_FLASH="gemini-3-flash-preview"
 
 ### 3.3. Perchai (`perchai_provider.py`)
 
-The `PerchaiProvider` wraps [Perch](https://app.perchai.app) (perchai.app) - an OAuth-authenticated gateway that exposes a multi-model catalog under a single Bearer token. Perchai is **not** OpenAI-compatible: requests go in a perchai-specific envelope, and the wire format uses perchai's custom SSE event shape (translated to litellm types).
+The `PerchaiProvider` wraps [Perch](https://app.perchai.app) (perchai.app) - an OAuth-authenticated gateway that exposes a multi-model catalog under a single Bearer token.
 
 #### Installation
 
@@ -1449,18 +1449,7 @@ Perchai does **not** publish a public model catalog. **29 models are currently w
 
 #### Discovering New Models
 
-Perchai may add or remove models at any time. Option IDs come from `(provider, upstream_model)` pairs joined by this helper in the Perch CLI bundle:
-
-```javascript
-function Tl(e, t) {
-  return e.replace(/_/g, "-") + "-" +
-         t.replace(/[^a-zA-Z0-9]+/g, "-")
-          .replace(/^-+|-+$/g, "")
-          .toLowerCase();
-}
-```
-
-Grep `perch.mjs` for `Tl(` to enumerate every pair. Verify each by sending it as `manualModelOptionId` to `POST /api/perch-terminal/model-call`:
+Perchai does not publish option IDs anywhere public. To find new ones (or verify ones we missed), reverse-engineer them from the Perch CLI bundle (`perch.mjs`) and probe each candidate against `POST /api/perch-terminal/model-call`. **Task an LLM with this section** and your session file path - it will enumerate candidates from the bundle and probe them in batches.
 
 ```json
 {"request": {"model": "probe", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 2, "stream": false},
@@ -1470,7 +1459,9 @@ Grep `perch.mjs` for `Tl(` to enumerate every pair. Verify each by sending it as
 
 `{"ok": true, ...}` = wired. Response falling back to `moonshotai.kimi-k2.5` / `bedrock_mantle` = not currently active. Probe in parallel batches of 10; refresh the access token via Supabase GoTrue (`POST {supabaseUrl}/auth/v1/token?grant_type=refresh_token`) once at the start, then reuse - sustained higher rates trigger a ~2 hour auth cooldown.
 
-#### Probing a Single Option ID by Hand
+#### Debug a Single Option ID
+
+Useful when you've found one candidate from the bundle and want to confirm it works before adding it to the table above - or to debug why an entry that used to work now silently falls back to the default model.
 
 ```bash
 TOKEN=$(jq -r '.accessToken' ~/.perch/cli-auth-session.json)
@@ -1486,7 +1477,7 @@ curl -s -X POST "${PERCHAI_APP_URL:-https://app.perchai.app}/api/perch-terminal/
   }" | jq '.model,.provider,.ok'
 ```
 
-To check what the workspace currently exposes (no auth needed):
+To see what the workspace's current default model is (no auth needed):
 
 ```bash
 curl -s https://app.perchai.app/api/perch-terminal/public-model-default \

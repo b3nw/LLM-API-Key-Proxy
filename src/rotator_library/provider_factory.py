@@ -8,6 +8,7 @@ from .providers.openai_oauth_base import OpenAIOAuthBase
 from .providers.anthropic_oauth_base import AnthropicOAuthBase
 from .providers.copilot_auth_base import CopilotAuthBase
 from .providers.x_ai_auth_base import XAiAuthBase
+from .providers.perchai_auth_base import PerchaiAuthBase
 
 PROVIDER_MAP = {
     "gemini_cli": GeminiAuthBase,
@@ -15,6 +16,7 @@ PROVIDER_MAP = {
     "anthropic": AnthropicOAuthBase,
     "copilot": CopilotAuthBase,
     "x-ai": XAiAuthBase,
+    "perchai": PerchaiAuthBase,
 }
 
 def get_provider_auth_class(provider_name: str):

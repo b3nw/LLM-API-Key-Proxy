@@ -6,6 +6,7 @@ from typing import Optional
 
 # A comprehensive map of provider names to their base URLs.
 PROVIDER_URL_MAP = {
+    "perchai": "https://app.perchai.app",
     "perplexity": "https://api.perplexity.ai",
     "anyscale": "https://api.endpoints.anyscale.com/v1",
     "deepinfra": "https://api.deepinfra.com/v1/openai",

@@ -206,6 +206,12 @@ LITELLM_PROVIDERS: Dict[str, Dict[str, Any]] = {
         "category": "cloud",
     },
     # =========================================================================
+    # SUBSCRIPTION - Flat-fee subscription services (OAuth-based, not per-token)
+    # =========================================================================
+    "perchai": {
+        "category": "subscription",
+    },
+    # =========================================================================
     # ENTERPRISE / COMPLEX AUTH - Major cloud providers (may need extra config)
     # =========================================================================
     "azure": {
@@ -488,6 +494,7 @@ PROVIDER_CATEGORIES = [
     ("custom_openai", "Custom OpenAI-Compatible"),
     ("popular", "Popular"),
     ("cloud", "Cloud Platforms"),
+    ("subscription", "Subscription"),
     ("enterprise", "Enterprise / Complex Auth"),
     ("specialized", "Specialized (Image/Audio/Embeddings)"),
     ("regional", "Regional"),

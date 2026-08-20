@@ -18,6 +18,7 @@ DEFAULT_OAUTH_DIRS = {
     "anthropic": Path.home() / ".claude",
     "copilot": Path.home() / ".copilot",
     "x-ai": Path.home() / ".x-ai",
+    "perchai": Path.home() / ".perch",
 }
 
 # OAuth providers that support environment variable-based credentials
@@ -28,6 +29,7 @@ ENV_OAUTH_PROVIDERS = {
     "anthropic": "ANTHROPIC_OAUTH",
     "copilot": "COPILOT",
     "x-ai": "X_AI_OAUTH",
+    "perchai": "PERCHAI",
 }
 
 # Precompiled credential patterns (avoid recompiling on every method call)

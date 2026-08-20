@@ -1504,14 +1504,7 @@ Perchai does **not** expose per-model pricing via its API. What the endpoints do
 - `GET /api/perch-terminal/usage` - monthly aggregate (`monthly.usageUsd`, `monthly.limitUsd`, `monthly.resetAt`). Aggregate only, no per-model breakdown.
 - `POST /api/perch-terminal/model-call` response `usage` - `inputTokens`, `outputTokens`, `totalTokens`, `cacheReadInputTokens`. **No cost field.**
 
-So per-model pricing has to be inferred from Perchai's website, the `perch` CLI bundle if a cost field ever appears, or experimental measurement (call the model with `N` input tokens, divide the monthly cost delta by `N` - approximate only).
-
-The `scripts/perchai_probe_prices.py` script dumps whatever the two endpoints return so you can see what's available and spot any new cost fields Perchai adds:
-
-```bash
-uv run python3 scripts/perchai_probe_prices.py bedrock-mantle-moonshotai-kimi-k2-5
-# pass any option ID (with or without the perchai/ prefix) as the argument
-```
+Per-model pricing has to be inferred from Perchai's website, the `perch` CLI bundle if a cost field ever appears, or experimental measurement (call the model with `N` input tokens, divide the monthly cost delta by `N` - approximate only).
 
 #### Probing a Single Option ID by Hand
 

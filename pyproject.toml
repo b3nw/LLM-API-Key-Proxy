@@ -39,7 +39,6 @@ asyncio_mode = "auto"
 markers = [
     "unit: Pure logic tests, no I/O, no network (<1s each)",
     "integration: Component interaction with mocked HTTP",
-    "perchai: Perchai provider tests (skip when no ~/.perch/cli-auth-session.json)",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning:litellm",

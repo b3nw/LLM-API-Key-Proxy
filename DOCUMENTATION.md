@@ -1550,18 +1550,6 @@ curl -s -H "Authorization: Bearer $TOKEN" \
   | python3 -m json.tool
 ```
 
-#### Tests
-
-The Perchai suite is tagged with `@pytest.mark.perchai` and skips cleanly at collection time when no session file exists, so the rest of the repo's tests run unaffected.
-
-```bash
-# all tests
-uv run pytest tests/ -v
-
-# Perchai suite only (requires ~/.perch/cli-auth-session.json)
-uv run pytest tests/test_perchai_provider.py -v -m perchai
-```
-
 ---
 
 ## 4. Logging & Debugging

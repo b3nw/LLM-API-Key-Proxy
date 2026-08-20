@@ -48,6 +48,7 @@ from typing import Any, Dict, List, Optional, TypedDict, Union, final, override
 import httpx
 import litellm
 from litellm.exceptions import APIError as LitellmAPIError
+from litellm.types.utils import ChatCompletionMessageToolCall, Function
 from typing_extensions import AsyncGenerator as _AsyncGenerator
 
 from ..timeout_config import TimeoutConfig
@@ -439,9 +440,22 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         # {
         #   "ok": true,
         #   "text": "..." | null,
-        #   "content": [{"type": "text"|"reasoning"|..., "text": "..."}, ...],
+        #   "content": [
+        #     {"type": "text",       "text": "..."},
+        #     {"type": "reasoning",  "text": "..."},
+        #     {"type": "tool_use",   "id": "...", "name": "...", "input": {...}},
+        #   ],
         #   "reasoning": "..." | null,
-        #   "toolCalls": [...],
+        #   "toolCalls": [
+        #     {
+        #       "id": "call_d474d351-...",
+        #       "name": "get_weather",
+        #       "sealed": true,
+        #       "arguments": {"city": "Paris"},          <-- DICT, must JSON-stringify
+        #       "argumentParseStatus": "parsed_ok",
+        #       "requiredArguments": ["city"],
+        #     },
+        #   ],
         #   "provider": "meta",
         #   "model": "muse-spark-1.2",
         #   "usage": {
@@ -452,6 +466,12 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         #   },
         #   ...
         # }
+        # The canonical tool-call source is ``toolCalls``; the ``content``
+        # array's ``tool_use`` blocks mirror the same data.  When the model
+        # emits tool calls, ``finish_reason`` must be ``"tool_calls"`` (not
+        # ``"stop"``) so litellm and downstream consumers (Anthropic compat,
+        # Responses API translator) dispatch the tool instead of treating the
+        # turn as complete.
         content_text: str = response_data.get("text") or ""
         reasoning_text: str = (
             response_data.get("reasoning")
@@ -469,11 +489,61 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                 block_type = block.get("type", "")
                 if block_type in ("reasoning", "thinking", "reasoning_content"):
                     parts_reasoning.append(block_text)
+                elif block_type in ("tool_use", "tool_call"):
+                    # tool_use blocks duplicate the toolCalls[] entry.
+                    # Skip them when accumulating text content; the
+                    # canonical tool-call fields live under toolCalls[].
+                    continue
                 elif block_type in ("text",) or not block_type:
                     parts_text.append(block_text)
             content_text = "".join(parts_text)
             if not reasoning_text:
                 reasoning_text = "".join(parts_reasoning)
+
+        # Tool calls: perchai returns ``arguments`` as a dict, but litellm's
+        # OpenAI-compatible contract requires it as a JSON-encoded string.
+        # ``argumentParseStatus`` may be ``"parsed_ok"`` or ``"raw"`` (failed
+        # parse upstream) - we honour whatever shape the upstream gave us
+        # and stringify it as-is; downstream consumers re-parse.
+        raw_tool_calls = response_data.get("toolCalls")
+        tool_calls_list: Optional[List[ChatCompletionMessageToolCall]] = None
+        if isinstance(raw_tool_calls, list) and raw_tool_calls:
+            tool_calls_list = []
+            for tc in raw_tool_calls:
+                if not isinstance(tc, dict):
+                    continue
+                tc_id = tc.get("id")
+                tc_name = tc.get("name")
+                tc_arguments = tc.get("arguments", {})
+                if not tc_id or not tc_name:
+                    lib_logger.debug(
+                        "Perchai non-stream: skipping malformed toolCall "
+                        f"missing id or name: {tc!r}"
+                    )
+                    continue
+                # Normalize arguments: dict -> json string; str -> pass through;
+                # anything else -> empty object string.  litellm expects a
+                # stringified JSON object so downstream parsers can ``loads``
+                # it uniformly.
+                if isinstance(tc_arguments, str):
+                    arguments_str = tc_arguments
+                elif isinstance(tc_arguments, dict):
+                    arguments_str = json.dumps(tc_arguments, ensure_ascii=False)
+                else:
+                    arguments_str = json.dumps({}, ensure_ascii=False)
+                tool_calls_list.append(
+                    ChatCompletionMessageToolCall(
+                        id=tc_id,
+                        type="function",
+                        function=Function(
+                            name=tc_name,
+                            arguments=arguments_str,
+                        ),
+                    )
+                )
+
+        has_tool_calls = bool(tool_calls_list)
+        finish_reason = "tool_calls" if has_tool_calls else "stop"
 
         usage_data = response_data.get("usage", {}) or {}
         usage_kwargs: Dict[str, Any] = {}
@@ -496,10 +566,12 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         }
         if reasoning_text:
             message_kwargs["reasoning_content"] = reasoning_text
+        if tool_calls_list:
+            message_kwargs["tool_calls"] = tool_calls_list
 
         choices_list = [
             litellm.Choices(
-                finish_reason="stop",
+                finish_reason=finish_reason,
                 index=0,
                 message=litellm.Message(**message_kwargs),
             )
@@ -542,6 +614,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         body = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
 
         saw_done = False
+        saw_tool_call = False
         stream_id = f"chatcmpl-perchai-stream-{int(time.time())}"
 
         for attempt in range(2):
@@ -580,6 +653,15 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                     data_str = line[len("data:"):].strip()
                     if data_str == "[DONE]":
                         saw_done = True
+                        # The terminating chunk's finish_reason depends on
+                        # whether the stream emitted any tool calls (in
+                        # which case ``tool_use_end`` already yielded the
+                        # final ``tool_calls`` chunk, so we skip emitting
+                        # a redundant stop chunk).  Without tool calls we
+                        # yield the conventional stop chunk so downstream
+                        # consumers always see a terminating finish reason.
+                        if saw_tool_call:
+                            return
                         yield litellm.ModelResponseStream(
                             id=stream_id,
                             created=int(time.time()),
@@ -597,6 +679,29 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
 
                     stream_chunk = self._parse_sse_line(line, model)
                     if stream_chunk is not None:
+                        # Inspect the chunk's finish_reason to track
+                        # whether the stream terminated with a tool call.
+                        # ``_parse_sse_line`` emits ``finish_reason=
+                        # "tool_calls"`` from ``tool_use_end`` events; we
+                        # use that signal to skip the redundant stop
+                        # chunk when [DONE] (or post-loop synthesis) fires.
+                        chunk_finish_reason: Optional[str] = None
+                        try:
+                            chunk_choices = stream_chunk.choices
+                            if chunk_choices:
+                                first_choice = chunk_choices[0]
+                                if isinstance(first_choice, dict):
+                                    chunk_finish_reason = first_choice.get(
+                                        "finish_reason"
+                                    )
+                                else:
+                                    chunk_finish_reason = getattr(
+                                        first_choice, "finish_reason", None
+                                    )
+                        except Exception:
+                            chunk_finish_reason = None
+                        if chunk_finish_reason == "tool_calls":
+                            saw_tool_call = True
                         yield stream_chunk
             finally:
                 await ctx.__aexit__(None, None, None)
@@ -607,6 +712,10 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                 "Perchai stream ended without [DONE] sentinel; "
                 "synthesizing final stop chunk"
             )
+            if saw_tool_call:
+                # ``tool_use_end`` already yielded the terminating
+                # ``tool_calls`` chunk; do not emit a redundant stop.
+                return
             yield litellm.ModelResponseStream(
                 id=stream_id,
                 created=int(time.time()),
@@ -916,12 +1025,71 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
 
         event_type = parsed_event.get("type") or parsed_event.get("event") or ""
 
-        if event_type in ("tool_call_delta", "tool_use_end"):
-            lib_logger.debug(
-                f"Perchai stream: stripping {event_type!r} event "
-                "(tool calls not supported in v1)"
+        if event_type == "tool_call_delta":
+            # Tool-call streaming event.  Wire shape inferred from OpenAI's
+            # standard and perchai's existing event naming; not yet observed
+            # in the live SSE stream (perchai returns the full
+            # ``toolCalls[]`` array in the non-stream response, so the stream
+            # path may never emit ``tool_call_delta``).  Map defensively:
+            # ``arguments`` may arrive as either a dict (already parsed by
+            # perchai) or a JSON-encoded string (OpenAI-style incremental
+            # delta).  Normalize to a JSON string for litellm parity with
+            # the non-stream path.
+            tc_id = parsed_event.get("id")
+            tc_name = parsed_event.get("name")
+            tc_arguments = parsed_event.get("arguments")
+            tc_index = parsed_event.get("index", 0)
+            if isinstance(tc_arguments, dict):
+                arguments_str = json.dumps(tc_arguments, ensure_ascii=False)
+            elif isinstance(tc_arguments, str):
+                arguments_str = tc_arguments
+            else:
+                arguments_str = ""
+            function_delta: Dict[str, Any] = {}
+            if tc_name is not None:
+                function_delta["name"] = tc_name
+            if tc_arguments is not None:
+                function_delta["arguments"] = arguments_str
+            tool_call_delta: Dict[str, Any] = {
+                "index": tc_index,
+                "type": "function",
+            }
+            if tc_id is not None:
+                tool_call_delta["id"] = tc_id
+            if function_delta:
+                tool_call_delta["function"] = function_delta
+            return litellm.ModelResponseStream(
+                id=f"chatcmpl-perchai-stream-{int(time.time())}",
+                created=int(time.time()),
+                model=model,
+                object="chat.completion.chunk",
+                choices=[
+                    {
+                        "index": 0,
+                        "delta": {"tool_calls": [tool_call_delta]},
+                        "finish_reason": None,
+                    }
+                ],
             )
-            return None
+
+        if event_type == "tool_use_end":
+            # Final chunk for a tool-calling turn.  Per OpenAI streaming
+            # convention the final chunk carries ``finish_reason="tool_calls"``
+            # with an empty delta so downstream consumers know to dispatch
+            # the tool instead of treating the turn as complete.
+            return litellm.ModelResponseStream(
+                id=f"chatcmpl-perchai-stream-{int(time.time())}",
+                created=int(time.time()),
+                model=model,
+                object="chat.completion.chunk",
+                choices=[
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+            )
 
         if event_type in ("answer_delta", "text_delta"):
             text = (parsed_event.get("text") or "").rstrip()

@@ -40,13 +40,16 @@ Commit subject: `feat(perchai): add Perchai provider with OAuth auth and quota t
 Files changed:
 - `src/rotator_library/providers/perchai_provider.py` (new, ~1020 lines)
   - `PerchaiProvider(PerchaiQuotaTracker, ProviderInterface)`, `@final`
-  - `has_custom_logic() -> True`, `provider_env_name = "perchai"`
+  - `  has_custom_logic() -> True`, `provider_env_name = "perchai"`
   - `skip_cost_calculation = True`, `default_rotation_mode = "sequential"`
   - Dynamic `get_models()` from `GET /api/perchai/account` with 300s cache TTL
   - Custom `acompletion()`: envelope wrap, POST `/api/perch-terminal/model-call`,
-    JSON-to-litellm mapping for non-streaming; SSE parser for streaming
-    (`text_delta`, `reasoning_delta`, `answer_delta`, finish detection,
-    401 -> refresh + retry)
+    JSON-to-litellm mapping for non-streaming (including `toolCalls[]` ->
+    OpenAI-format `tool_calls` with JSON-stringified `arguments`,
+    `finish_reason="tool_calls"` when tools emitted); SSE parser for streaming
+    (`answer_delta`/`text_delta`, `reasoning_delta`, `tool_call_delta` ->
+    `delta.tool_calls`, `tool_use_end` -> final `finish_reason="tool_calls"`,
+    finish detection, 401 -> refresh + retry)
   - `parse_quota_error()` @staticmethod mapping all 10 perchai error codes
     (`usage_limit_reached`, `promo_overflow_decision`, `starter_model_blocked`,
     `byo_feature_blocked`, `context_overflow`, `not_authenticated`, `api_error`,
@@ -113,3 +116,58 @@ Notes:
 - The single commit groups scaffold + core implementation + registration +
   ledger. The PR squash-merge to `dev` produces exactly the feature subject
   registered in `.fork/stack.yml` for the `perchai` feature ID.
+
+## 2026-08-20 - Tool call support (non-stream + stream)
+
+Branch: `feat/provider-app.perchai`
+Files changed:
+- `src/rotator_library/providers/perchai_provider.py` - non-stream extracts
+  `toolCalls[]` from perchai response and builds litellm
+  `ChatCompletionMessageToolCall` with `Function(arguments=json.dumps(...))`;
+  `finish_reason` flips from `"stop"` to `"tool_calls"` when tool calls exist.
+  Stream parser handles `tool_call_delta` -> `delta.tool_calls` chunks and
+  `tool_use_end` -> final `finish_reason="tool_calls"` chunk with empty delta.
+  `_stream_completion` tracks `saw_tool_call` flag and suppresses the
+  redundant `[DONE]` stop chunk when tools already terminated the stream.
+
+Verified:
+- [x] `uv run python3 -m py_compile src/rotator_library/providers/perchai_provider.py`
+- [x] `uv run ruff check src/rotator_library/providers/perchai_provider.py
+      --select F401,F811,F821,E9` - exit 0
+- [x] `uv run pytest tests/test_perchai_provider.py -v` - 31/31 pass
+- [x] Live e2e via `/tmp/perchai-tool-probe.sh` against `app.perchai.app`:
+      `tool_calls` populated, `finish_reason="tool_calls"`,
+      `function.arguments='{"city": "Paris"}'` (JSON-stringified dict)
+- [x] Streaming parser unit probe (synthetic `tool_call_delta` +
+      `tool_use_end` events): emits chunks with correct `delta.tool_calls`
+      and `finish_reason="tool_calls"` final chunk
+
+Key wire-format facts:
+- Perchai `toolCalls[].arguments` is a DICT (not a JSON string) - the
+  adapter must `json.dumps` it before passing to litellm, which expects
+  the OpenAI-conformant JSON-stringified form.
+- Perchai `content[]` arrays include `tool_use` blocks that mirror the
+  `toolCalls[]` data; the adapter skips them when accumulating text
+  content (the canonical source is `toolCalls[]`).
+- Live `tool_call_delta` SSE events were NOT observed - perchai returns
+  the full `toolCalls[]` array in the non-streaming response. The
+  streaming parser implementation is defensive (based on OpenAI
+  standard) and ready if perchai later emits incremental events.
+
+Decision - tool_use block filtering: The `content` array's `tool_use`
+blocks duplicate `toolCalls[]` data. Filtering them from text
+accumulation prevents double-counting. The canonical source remains
+`toolCalls[]` to avoid ID mismatch between the two representations.
+
+Decision - finish_reason override: When `toolCalls[]` is non-empty,
+`finish_reason` is forced to `"tool_calls"` regardless of any
+perchai-supplied `finishReason` field. This matches OpenAI semantics
+that litellm and downstream consumers (Anthropic compat, Responses
+API translator) rely on to dispatch tool execution.
+
+Decision - stream [DONE] suppression: When `tool_use_end` already
+yielded the final `tool_calls` chunk, the `[DONE]` sentinel must NOT
+trigger a second `finish_reason="stop"` chunk - that would deliver
+two terminating finish reasons in one stream. The `saw_tool_call`
+flag (set when any yielded chunk carries `finish_reason="tool_calls"`)
+short-circuits both the `[DONE]` and the post-loop synthesis paths.

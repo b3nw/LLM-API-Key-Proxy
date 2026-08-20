@@ -182,3 +182,17 @@ Initial bundle grep had wrong endpoint - `/api/auth/session` returns 405.
 discovery via `GET /api/perch-terminal/cli-auth/config`.
 
 **Verification**: 31/31 tests pass, live refresh probe shows token rotation.
+
+## 2026-08-20 - Streaming tool_call_delta fix
+
+Live e2e `/tmp/perchai-401-tools.sh` (expired token + 2 tools) revealed
+pydantic ValidationError on streaming path. Root cause: conditional
+`if function_delta:` guard skipped `function` key when empty.
+
+`litellm.ChatCompletionDeltaToolCall` requires `function` field to be
+set (even when empty dict).
+
+Fix: always include `function` key. Verified live: 2 tool calls +
+streaming tool calls both work.
+
+Commit: `TBD`

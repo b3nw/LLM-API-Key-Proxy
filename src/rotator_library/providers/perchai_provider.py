@@ -1056,8 +1056,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
             }
             if tc_id is not None:
                 tool_call_delta["id"] = tc_id
-            if function_delta:
-                tool_call_delta["function"] = function_delta
+            tool_call_delta["function"] = function_delta
             return litellm.ModelResponseStream(
                 id=f"chatcmpl-perchai-stream-{int(time.time())}",
                 created=int(time.time()),

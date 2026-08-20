@@ -1,0 +1,629 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 b3nw
+#
+# E2E tests for the Perchai (Perch) provider.
+#
+# These tests exercise the *real* provider classes against the *real*
+# registration dicts populated by the implementation tasks (T1-T12).
+# They never mock httpx, litellm, or the upstream API.
+#
+# When a real OAuth session exists at ``~/.perch/cli-auth-session.json``
+# the live network paths (get_models, acompletion, background_job) are
+# also exercisable; when the session is missing the file the entire
+# module is skipped at collection time so a dev environment without
+# `perch login` never fails the suite.
+
+"""
+Perchai provider e2e tests - given_when_then style, no mocks.
+
+Skip the entire module at collection time when no OAuth session file
+is present at ``~/.perch/cli-auth-session.json``, so dev environments
+without ``perch login`` never fail the suite.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+import pytest
+
+# ---------------------------------------------------------------------------
+# Real imports - NO mocks, NO patches. The whole point of this suite is to
+# pin the public surface of the perchai provider and its registration
+# dictionaries against the actual code paths other modules depend on.
+# ---------------------------------------------------------------------------
+
+from rotator_library.providers import PROVIDER_PLUGINS
+from rotator_library.providers.perchai_provider import (
+    MODEL_CACHE_TTL_SECONDS,
+    MODEL_CALL_PATH,
+    USAGE_PATH,
+    PerchaiProvider,
+)
+from rotator_library.providers.utilities.perchai_quota_tracker import (
+    PerchaiQuotaTracker,
+)
+from rotator_library.credential_manager import (
+    DEFAULT_OAUTH_DIRS,
+    ENV_OAUTH_PROVIDERS,
+)
+from rotator_library.provider_factory import PROVIDER_MAP
+from rotator_library.provider_config import LITELLM_PROVIDERS
+from proxy_app.provider_urls import PROVIDER_URL_MAP
+
+
+# ---------------------------------------------------------------------------
+# Session gate - skip the entire module when `perch login` has not run.
+# ---------------------------------------------------------------------------
+
+PERCHAI_SESSION: Path = Path.home() / ".perch" / "cli-auth-session.json"
+HAS_SESSION: bool = PERCHAI_SESSION.is_file()
+
+pytestmark = [
+    pytest.mark.skipif(
+        not HAS_SESSION,
+        reason="No perchai session - run `perch login`",
+    ),
+]
+
+# Async tests rely on the global asyncio_mode = "auto" setting in
+# pyproject.toml, so we don't need an explicit @pytest.mark.asyncio
+# decorator. The mark is still applied explicitly below for clarity.
+
+
+# ---------------------------------------------------------------------------
+# Parametrized fixture data: all 10 upstream perchai error codes and the
+# expected mapping from ``PerchaiProvider._classify_perchai_error``.
+# Mirrors the ``lKe`` mapping documented in perchai_provider.py.
+# ---------------------------------------------------------------------------
+
+PERCHAI_ERROR_CODE_CASES = [
+    pytest.param(
+        "usage_limit_reached",
+        {"reason": "rate_limit", "retry_after": 3600},
+        id="usage_limit_reached",
+    ),
+    pytest.param(
+        "promo_overflow_decision",
+        {"reason": "rate_limit", "retry_after": 3600},
+        id="promo_overflow_decision",
+    ),
+    pytest.param(
+        "starter_model_blocked",
+        {"reason": "forbidden", "retry_after": None},
+        id="starter_model_blocked",
+    ),
+    pytest.param(
+        "byo_feature_blocked",
+        {"reason": "forbidden", "retry_after": None},
+        id="byo_feature_blocked",
+    ),
+    pytest.param(
+        "not_authenticated",
+        {"reason": "authentication", "retry_after": None},
+        id="not_authenticated",
+    ),
+    pytest.param("context_overflow", None, id="context_overflow"),
+    pytest.param("api_error", None, id="api_error"),
+    pytest.param("timeout", None, id="timeout"),
+    pytest.param("aborted", None, id="aborted"),
+    pytest.param("vision_model_error", None, id="vision_model_error"),
+]
+
+
+# =========================================================================
+# TEST CASES
+# =========================================================================
+
+
+def test_given_perchai_provider_when_loaded_then_perchai_in_plugins() -> None:
+    """Given the providers package is imported, when the plugin auto-discovery
+    runs, then the ``perchai`` plugin must be registered in PROVIDER_PLUGINS.
+    """
+    given_plugins = PROVIDER_PLUGINS
+    when_checked = "perchai"
+    then_asserted = when_checked in given_plugins
+    assert then_asserted, (
+        f"perchai plugin missing from PROVIDER_PLUGINS: "
+        f"{sorted(given_plugins.keys())!r}"
+    )
+
+
+def test_given_provider_class_when_instantiated_then_has_custom_logic_true() -> None:
+    """Given the PerchaiProvider class, when instantiated (singleton), then
+    ``has_custom_logic()`` must return ``True`` so the rotator knows to
+    route through our custom acompletion() implementation.
+    """
+    given_provider = PerchaiProvider()
+    when_called = given_provider.has_custom_logic()
+    then_returned = when_called is True
+    assert then_returned, (
+        f"PerchaiProvider.has_custom_logic() returned {when_called!r}; "
+        f"expected True"
+    )
+
+
+def test_given_class_when_inspected_then_mro_includes_quota_tracker() -> None:
+    """Given the PerchaiProvider class, when its MRO is inspected, then
+    PerchaiQuotaTracker must appear before ProviderInterface so the
+    mixin's __init__ side effects run first.
+    """
+    from rotator_library.providers.provider_interface import ProviderInterface
+
+    given_mro = PerchaiProvider.__mro__
+    when_checked = PerchaiQuotaTracker in given_mro
+    then_asserted = when_checked
+    assert then_asserted, (
+        f"PerchaiQuotaTracker missing from MRO: {[c.__name__ for c in given_mro]!r}"
+    )
+    given_mixin_idx = given_mro.index(PerchaiQuotaTracker)
+    given_iface_idx = given_mro.index(ProviderInterface)
+    then_order = given_mixin_idx < given_iface_idx
+    assert then_order, (
+        f"PerchaiQuotaTracker must come before ProviderInterface in MRO "
+        f"(mixin idx={given_mixin_idx}, interface idx={given_iface_idx})"
+    )
+
+
+@pytest.mark.parametrize("error_code,expected", PERCHAI_ERROR_CODE_CASES)
+def test_given_all_error_codes_when_parsed_then_correct_category(
+    error_code: str,
+    expected: Optional[Dict[str, Any]],
+) -> None:
+    """Given any of the 10 upstream perchai error codes, when
+    ``parse_quota_error`` is called with a body containing that
+    ``errorCode``, then the returned dict (or ``None``) must match the
+    documented classification.
+    """
+    given_body = json.dumps({"errorCode": error_code, "error": "synthetic test body"})
+    given_error = Exception("synthetic")
+    when_parsed = PerchaiProvider.parse_quota_error(given_error, given_body)
+    then_returned = when_parsed
+    assert then_returned == expected, (
+        f"errorCode={error_code!r}: expected {expected!r}, got {then_returned!r}"
+    )
+
+
+def test_given_429_status_when_parsed_then_rate_limit() -> None:
+    """Given an Exception whose ``args[0]`` is the string ``"429"`` (no
+    upstream body), when ``parse_quota_error`` is called, then the
+    HTTP-status fallback must yield ``{"reason": "rate_limit",
+    "retry_after": 3600}``.
+    """
+    given_error = Exception("429")
+    given_body = ""
+    when_parsed = PerchaiProvider.parse_quota_error(given_error, given_body)
+    then_returned = when_parsed
+    assert then_returned == {"reason": "rate_limit", "retry_after": 3600}, (
+        f"HTTP 429 fallback should produce rate_limit dict, got {then_returned!r}"
+    )
+
+
+def test_given_malformed_body_when_parsed_then_returns_none() -> None:
+    """Given a syntactically-broken JSON body, when ``parse_quota_error``
+    is called, then the defensive parser must return ``None`` rather
+    than raise.
+    """
+    given_error = Exception("synthetic")
+    given_body = "{this is not valid json"
+    when_parsed = PerchaiProvider.parse_quota_error(given_error, given_body)
+    then_returned = when_parsed
+    assert then_returned is None, (
+        f"Malformed body should parse to None, got {then_returned!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_given_empty_messages_when_acompletion_then_raises_valueerror() -> None:
+    """Given acompletion() is called with empty messages, when the provider
+    validates input, then it must raise ``ValueError`` BEFORE attempting
+    any HTTP I/O.
+    """
+    given_client = None
+    given_kwargs: Dict[str, Any] = {
+        "model": "perchai/test-model",
+        "messages": [],
+    }
+    when_called = PerchaiProvider().acompletion(given_client, **given_kwargs)
+    with pytest.raises(ValueError) as exc_info:
+        await when_called
+    then_message = str(exc_info.value)
+    assert "messages" in then_message.lower(), (
+        f"ValueError message should mention 'messages', got {then_message!r}"
+    )
+
+
+def test_given_malformed_sse_line_when_parsed_then_returns_none() -> None:
+    """Given a malformed JSON SSE ``data:`` line, when ``_parse_sse_line``
+    runs, then the defensive parser must return ``None`` (not raise).
+    """
+    given_line = "data: {not valid json"
+    given_model = "perchai/test-model"
+    when_parsed = PerchaiProvider._parse_sse_line(given_line, given_model)
+    then_returned = when_parsed
+    assert then_returned is None, (
+        f"Malformed SSE line should parse to None, got {then_returned!r}"
+    )
+
+
+def test_given_unknown_event_type_when_parsed_then_skipped() -> None:
+    """Given an SSE line whose ``type`` field is not in the recognized set,
+    when ``_parse_sse_line`` runs, then it must return ``None`` so the
+    stream loop continues.
+    """
+    given_line = 'data: {"type":"future_event_type","payload":"ignored"}'
+    given_model = "perchai/test-model"
+    when_parsed = PerchaiProvider._parse_sse_line(given_line, given_model)
+    then_returned = when_parsed
+    assert then_returned is None, (
+        f"Unknown event type should parse to None, got {then_returned!r}"
+    )
+
+
+def test_given_text_delta_when_parsed_then_content_chunk() -> None:
+    """Given an ``answer_delta`` SSE event (the raw wire format from
+    ``/api/perch-terminal/model-call``), when ``_parse_sse_line`` runs,
+    then the returned ``ModelResponseStream`` must carry the text in
+    ``choices[0].delta.content``.
+    """
+    given_line = 'data: {"type":"answer_delta","text":"hello world"}'
+    given_model = "perchai/test-model"
+    when_parsed = PerchaiProvider._parse_sse_line(given_line, given_model)
+    then_chunk = when_parsed
+    assert then_chunk is not None, "answer_delta should produce a chunk, got None"
+    then_choices = then_chunk.choices
+    assert then_choices, "chunk has no choices"
+    then_delta = then_choices[0].get("delta") if isinstance(then_choices[0], dict) else then_choices[0].delta
+    then_content = then_delta.get("content") if isinstance(then_delta, dict) else then_delta.content
+    assert then_content == "hello world", (
+        f"answer_delta.content should be 'hello world', got {then_content!r}"
+    )
+
+
+def test_given_reasoning_delta_when_parsed_then_reasoning_chunk() -> None:
+    """Given a ``reasoning_delta`` SSE event, when ``_parse_sse_line``
+    runs, then the returned ``ModelResponseStream`` must carry the text
+    in ``choices[0].delta.reasoning_content``.
+    """
+    given_line = 'data: {"type":"reasoning_delta","text":"thinking step"}'
+    given_model = "perchai/test-model"
+    when_parsed = PerchaiProvider._parse_sse_line(given_line, given_model)
+    then_chunk = when_parsed
+    assert then_chunk is not None, "reasoning_delta should produce a chunk, got None"
+    then_choices = then_chunk.choices
+    assert then_choices, "chunk has no choices"
+    then_delta = then_choices[0].get("delta") if isinstance(then_choices[0], dict) else then_choices[0].delta
+    then_reasoning = then_delta.get("reasoning_content") if isinstance(then_delta, dict) else then_delta.reasoning_content
+    assert then_reasoning == "thinking step", (
+        f"reasoning_delta.reasoning_content should be 'thinking step', "
+        f"got {then_reasoning!r}"
+    )
+
+
+def test_given_registration_when_checked_then_perchai_in_oauth_dirs() -> None:
+    """Given the credential manager module is loaded, when DEFAULT_OAUTH_DIRS
+    is inspected, then ``perchai`` must be present pointing at
+    ``~/.perch`` (the actual CLI directory, not ``~/.perchai``).
+    """
+    given_dirs = DEFAULT_OAUTH_DIRS
+    when_checked = "perchai"
+    then_present = when_checked in given_dirs
+    assert then_present, (
+        f"perchai missing from DEFAULT_OAUTH_DIRS: {sorted(given_dirs.keys())!r}"
+    )
+    then_path = given_dirs[when_checked]
+    assert then_path == Path.home() / ".perch", (
+        f"DEFAULT_OAUTH_DIRS['perchai'] should be ~/.perch, got {then_path!r}"
+    )
+
+
+def test_given_registration_when_checked_then_perchai_in_env_oauth() -> None:
+    """Given ENV_OAUTH_PROVIDERS is populated, when checked, then
+    ``perchai`` must map to the ``PERCHAI`` env-var prefix for stateless
+    deployments (PERCHAI_ACCESS_TOKEN / PERCHAI_N_ACCESS_TOKEN).
+    """
+    given_env_map = ENV_OAUTH_PROVIDERS
+    when_checked = "perchai"
+    then_present = when_checked in given_env_map
+    assert then_present, (
+        f"perchai missing from ENV_OAUTH_PROVIDERS: {sorted(given_env_map.keys())!r}"
+    )
+    then_prefix = given_env_map[when_checked]
+    assert then_prefix == "PERCHAI", (
+        f"ENV_OAUTH_PROVIDERS['perchai'] should be 'PERCHAI', got {then_prefix!r}"
+    )
+
+
+def test_given_registration_when_checked_then_perchai_in_provider_factory() -> None:
+    """Given the provider factory module is loaded, when PROVIDER_MAP is
+    inspected, then ``perchai`` must be present and resolve to a real
+    auth class (PerchaiAuthBase) - not ``None`` or a placeholder.
+    """
+    given_map = PROVIDER_MAP
+    when_checked = "perchai"
+    then_present = when_checked in given_map
+    assert then_present, (
+        f"perchai missing from PROVIDER_MAP: {sorted(given_map.keys())!r}"
+    )
+    then_auth_class = given_map[when_checked]
+    assert then_auth_class is not None, (
+        "PROVIDER_MAP['perchai'] resolved to None"
+    )
+    assert callable(then_auth_class), (
+        f"PROVIDER_MAP['perchai'] should be a class, got {type(then_auth_class)!r}"
+    )
+
+
+def test_given_provider_config_when_checked_then_perchai_listed() -> None:
+    """Given the provider_config module is loaded, when LITELLM_PROVIDERS
+    is inspected, then ``perchai`` must be present with a real category
+    dict (not missing, not ``None``).
+    """
+    given_config = LITELLM_PROVIDERS
+    when_checked = "perchai"
+    then_present = when_checked in given_config
+    assert then_present, (
+        f"perchai missing from LITELLM_PROVIDERS: {sorted(given_config.keys())!r}"
+    )
+    then_entry = given_config[when_checked]
+    assert isinstance(then_entry, dict) and then_entry, (
+        f"LITELLM_PROVIDERS['perchai'] should be a non-empty dict, got {then_entry!r}"
+    )
+
+
+def test_given_provider_urls_when_checked_then_perchai_url() -> None:
+    """Given the proxy_app provider_urls module is loaded, when
+    PROVIDER_URL_MAP is inspected, then ``perchai`` must be present
+    pointing at the upstream app URL.
+    """
+    given_url_map = PROVIDER_URL_MAP
+    when_checked = "perchai"
+    then_present = when_checked in given_url_map
+    assert then_present, (
+        f"perchai missing from PROVIDER_URL_MAP: {sorted(given_url_map.keys())!r}"
+    )
+    then_url = given_url_map[when_checked]
+    assert then_url and then_url.startswith("https://"), (
+        f"PROVIDER_URL_MAP['perchai'] should be an https URL, got {then_url!r}"
+    )
+
+
+def test_given_get_background_job_config_when_called_then_returns_valid_dict() -> None:
+    """Given the background-job config static method is called, when
+    invoked on either PerchaiProvider or PerchaiQuotaTracker, then the
+    returned dict must contain ``interval`` and ``name`` keys (the
+    fields the executor scheduler reads).
+    """
+    when_called = PerchaiQuotaTracker.get_background_job_config()
+    then_returned = when_called
+    assert then_returned is not None, (
+        "PerchaiQuotaTracker.get_background_job_config() returned None"
+    )
+    then_interval = then_returned.get("interval")
+    then_name = then_returned.get("name")
+    assert isinstance(then_interval, int) and then_interval > 0, (
+        f"interval should be a positive int, got {then_interval!r}"
+    )
+    assert isinstance(then_name, str) and then_name, (
+        f"name should be a non-empty str, got {then_name!r}"
+    )
+
+
+def test_given_model_quota_groups_when_checked_then_monthly_group() -> None:
+    """Given PerchaiQuotaTracker.model_quota_groups, when inspected, then
+    the ``monthly($)`` quota group must be present (TUI surfaces this
+    under the dollar-balance view).
+    """
+    given_groups = PerchaiQuotaTracker.model_quota_groups
+    when_checked = "monthly($)"
+    then_present = when_checked in given_groups
+    assert then_present, (
+        f"monthly($) missing from model_quota_groups: {sorted(given_groups.keys())!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_given_run_background_job_with_invalid_token_when_called_then_no_crash() -> None:
+    """Given ``run_background_job`` is called with an invalid credential
+    path and no usable session token, when it executes, then it must
+    swallow the resolution failure and return without raising.
+    """
+    given_provider = PerchaiProvider()
+    given_invalid_credential = "/tmp/does-not-exist-perchai-session.json"
+    given_credentials = [given_invalid_credential]
+
+    when_called = given_provider.run_background_job(
+        usage_manager=None,
+        credentials=given_credentials,
+    )
+
+    await when_called
+
+    then_no_crash = True
+    assert then_no_crash, "run_background_job raised on invalid credential"
+
+
+# ---------------------------------------------------------------------------
+# Reactive 401 refresh: streaming + non-streaming paths must both
+# refresh the access token on the first 401 and retry the request.
+# The streaming path previously had NO 401 handler (only the non-streaming
+# path did), causing credential exhaustion in the proxy when the token
+# expired between calls.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_given_expired_token_when_non_stream_chat_then_refreshes_and_retries() -> None:
+    """Given an expired access token passed as ``credential_identifier``,
+    when non-streaming ``acompletion`` is called, then the provider must
+    refresh the token via ``PerchaiAuthBase.refresh_on_401`` on the first
+    401 and retry, returning a ``ModelResponse`` with non-empty content.
+    """
+    import httpx
+
+    given_expired_token = "perchai-expired-token-will-401"
+    given_provider = PerchaiProvider()
+
+    when_responded = await given_provider.acompletion(
+        httpx.AsyncClient(),
+        model="perchai/nemotron-3.5-lightning",
+        messages=[{"role": "user", "content": "Say hello in one word"}],
+        credential_identifier=given_expired_token,
+        stream=False,
+    )
+
+    then_content = when_responded.choices[0].message.content
+    assert then_content, (
+        "Non-streaming with expired token should refresh and return content, "
+        f"got {then_content!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_given_expired_token_when_stream_chat_then_refreshes_and_retries() -> None:
+    """Given an expired access token passed as ``credential_identifier``,
+    when streaming ``acompletion`` is called, then the provider must
+    refresh the token via ``PerchaiAuthBase.refresh_on_401`` on the first
+    401 and retry the stream, yielding at least one content chunk and a
+    final chunk with ``finish_reason="stop"``.
+    """
+    import httpx
+
+    given_expired_token = "perchai-expired-token-will-401"
+    given_provider = PerchaiProvider()
+
+    when_streamed = await given_provider.acompletion(
+        httpx.AsyncClient(),
+        model="perchai/nemotron-3.5-lightning",
+        messages=[{"role": "user", "content": "Say hello in one word"}],
+        credential_identifier=given_expired_token,
+        stream=True,
+    )
+
+    then_chunks = []
+    async for chunk in when_streamed:
+        then_chunks.append(chunk)
+
+    then_has_chunks = len(then_chunks) > 0
+    then_last_finish = (
+        then_chunks[-1].choices[0].finish_reason if then_chunks else None
+    )
+    assert then_has_chunks, (
+        "Streaming with expired token should refresh and yield chunks, "
+        f"got {len(then_chunks)} chunks"
+    )
+    assert then_last_finish == "stop", (
+        f"Last chunk should have finish_reason='stop', got {then_last_finish!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# E2E routing verification: option IDs listed in the docs must actually route
+# to a real upstream, not silently fall back to the workspace default
+# (bedrock_mantle:moonshotai.kimi-k2.5). Pinned to 2 cheap Starter-tier
+# models to keep cost minimal.
+# ---------------------------------------------------------------------------
+
+
+PROBE_OPTION_IDS = [
+    pytest.param(
+        "bedrock-mantle-google-gemma-4-e2b",
+        id="gemma-4-e2b",
+    ),
+    pytest.param(
+        "wandb-deepseek-ai-deepseek-v4-flash",
+        id="deepseek-v4-flash",
+    ),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("option_id", PROBE_OPTION_IDS)
+async def test_given_option_id_when_probed_then_routes_to_real_upstream(
+    option_id: str,
+) -> None:
+    """Given a perchai option ID from the docs, when probed against the real
+    API with ``manualModelOptionId``, then the response's ``model``/``provider``
+    must NOT be the default-fallback pair (``moonshotai.kimi-k2.5`` /
+    ``bedrock_mantle``) - otherwise the proxy would silently serve the
+    default model while the caller thinks they got the requested one.
+    """
+    import httpx
+
+    from rotator_library.providers.perchai_auth_base import PerchaiAuthBase
+
+    given_auth = PerchaiAuthBase()
+    given_token = await given_auth.refresh_token()
+    given_url = f"{given_auth.get_app_url().rstrip('/')}{MODEL_CALL_PATH}"
+    given_body = {
+        "request": {
+            "model": "probe",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 2,
+            "stream": False,
+        },
+        "runId": None,
+        "lane": "chat",
+        "preferredModelId": None,
+        "manualModelOptionId": option_id,
+    }
+
+    async with httpx.AsyncClient() as probe_client:
+        given_response = await probe_client.post(
+            given_url,
+            headers={
+                "Authorization": f"Bearer {given_token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            json=given_body,
+            timeout=30.0,
+        )
+
+    then_status = given_response.status_code
+    then_body = given_response.json()
+
+    assert then_status == 200, (
+        f"Probe HTTP {then_status} for option_id={option_id!r}: {then_body!r}"
+    )
+    assert then_body.get("ok") is True, (
+        f"Probe ok=false for option_id={option_id!r}: "
+        f"{then_body.get('error')!r}"
+    )
+
+    then_model = then_body.get("model")
+    then_provider = then_body.get("provider")
+    then_not_fallback = not (
+        then_model == "moonshotai.kimi-k2.5" and then_provider == "bedrock_mantle"
+    )
+    assert then_not_fallback, (
+        f"option_id={option_id!r} silently fell back to default upstream "
+        f"({then_provider}:{then_model}) - this option ID is NOT currently "
+        f"wired and must be removed from the docs"
+    )
+
+
+# =========================================================================
+# MODULE-LEVEL SANITY CHECKS (cheap, always run when module is collected)
+# =========================================================================
+
+
+def test_given_module_constants_when_imported_then_paths_nonempty() -> None:
+    """Given the module-level constants are imported, when their values
+    are checked, then the path constants must be non-empty strings so
+    callers can build URLs without needing to re-discover them.
+    """
+    given_cache_ttl = MODEL_CACHE_TTL_SECONDS
+    given_model_call_path = MODEL_CALL_PATH
+    given_usage_path = USAGE_PATH
+    assert isinstance(given_cache_ttl, int) and given_cache_ttl > 0, (
+        f"MODEL_CACHE_TTL_SECONDS should be positive int, got {given_cache_ttl!r}"
+    )
+    assert isinstance(given_model_call_path, str) and given_model_call_path.startswith("/"), (
+        f"MODEL_CALL_PATH should be an absolute path str, got {given_model_call_path!r}"
+    )
+    assert isinstance(given_usage_path, str) and given_usage_path.startswith("/"), (
+        f"USAGE_PATH should be an absolute path str, got {given_usage_path!r}"
+    )

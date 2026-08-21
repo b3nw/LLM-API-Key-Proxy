@@ -183,7 +183,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         file_logger.log_request({"envelope_request": payload, "model": raw_model})
 
         stream_mode = bool(payload.get("stream"))
-        token = credential_identifier or self._resolve_session_token()
+        token = self._resolve_credential_token(credential_identifier)
 
         def _headers(using_token: str) -> Dict[str, str]:
             return {
@@ -203,6 +203,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                 payload=payload,
                 model=raw_model,
                 file_logger=file_logger,
+                credential_identifier=credential_identifier,
                 auth_base_cls=PerchaiAuthBase,
                 auth_error_cls=LitellmAuthenticationError,
             )
@@ -232,7 +233,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         auth_error_cls: Any,
     ) -> litellm.ModelResponse:
         envelope = self._build_envelope(model=model, payload=payload)
-        token = credential_identifier or self._resolve_session_token()
+        token = self._resolve_credential_token(credential_identifier)
 
         body = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
 
@@ -249,7 +250,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         response = await _post(token)
 
         if response.status_code == 401:
-            auth = auth_base_cls()
+            auth = auth_base_cls(credential_path=credential_identifier)
             new_token = await auth.refresh_on_401(client, token)
             response = await _post(new_token)
 
@@ -430,6 +431,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         payload: Dict[str, Any],
         model: str,
         file_logger: ProviderLogger,
+        credential_identifier: str = "",
         auth_base_cls: Any = None,
         auth_error_cls: Any = None,
     ) -> AsyncGenerator[litellm.ModelResponseStream, None]:
@@ -461,7 +463,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
             ):
                 await response.aread()
                 await ctx.__aexit__(None, None, None)
-                auth = auth_base_cls()
+                auth = auth_base_cls(credential_path=credential_identifier)
                 token = await auth.refresh_on_401(client, token)
                 continue
 
@@ -945,6 +947,25 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
             raise PerchaiAuthError(
                 "Perchai session has no accessToken. "
                 "Run `perch login` to re-authenticate."
+            )
+        return token
+
+    def _resolve_credential_token(self, credential_identifier: str) -> str:
+        if not credential_identifier:
+            return self._resolve_session_token()
+
+        from .perchai_auth_base import PerchaiAuthBase
+
+        session = PerchaiAuthBase(
+            credential_path=credential_identifier
+        ).load_session()
+        token = session.get("accessToken")
+        if not token:
+            from .perchai_auth_base import PerchaiAuthError
+
+            raise PerchaiAuthError(
+                f"Perchai credential at {credential_identifier} has no accessToken. "
+                f"Run `perch login` to re-authenticate."
             )
         return token
 

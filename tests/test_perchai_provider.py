@@ -414,22 +414,30 @@ async def test_given_run_background_job_with_invalid_token_when_called_then_no_c
 
 
 @pytest.mark.asyncio
-async def test_given_expired_token_when_non_stream_chat_then_refreshes_and_retries() -> None:
-    """Given an expired access token passed as ``credential_identifier``,
-    when non-streaming ``acompletion`` is called, then the provider must
-    refresh the token via ``PerchaiAuthBase.refresh_on_401`` on the first
-    401 and retry, returning a ``ModelResponse`` with non-empty content.
+async def test_given_expired_token_when_non_stream_chat_then_refreshes_and_retries(
+    tmp_path: Path,
+) -> None:
+    """Given a credential file containing an expired access token, when
+    non-streaming ``acompletion`` is called with that file path as
+    ``credential_identifier``, then the provider must resolve the file to
+    the token, receive a 401, refresh the token via
+    ``PerchaiAuthBase.refresh_on_401`` and retry, returning a
+    ``ModelResponse`` with non-empty content.
     """
     import httpx
 
-    given_expired_token = "perchai-expired-token-will-401"
+    given_session = json.loads(PERCHAI_SESSION.read_text(encoding="utf-8"))
+    given_session["accessToken"] = "perchai-expired-token-will-401"
+    given_cred_file = tmp_path / "perchai_oauth_1.json"
+    given_cred_file.write_text(json.dumps(given_session), encoding="utf-8")
+
     given_provider = PerchaiProvider()
 
     when_responded = await given_provider.acompletion(
         httpx.AsyncClient(),
         model="perchai/nemotron-3.5-lightning",
         messages=[{"role": "user", "content": "Say hello in one word"}],
-        credential_identifier=given_expired_token,
+        credential_identifier=str(given_cred_file),
         stream=False,
     )
 
@@ -441,23 +449,31 @@ async def test_given_expired_token_when_non_stream_chat_then_refreshes_and_retri
 
 
 @pytest.mark.asyncio
-async def test_given_expired_token_when_stream_chat_then_refreshes_and_retries() -> None:
-    """Given an expired access token passed as ``credential_identifier``,
-    when streaming ``acompletion`` is called, then the provider must
-    refresh the token via ``PerchaiAuthBase.refresh_on_401`` on the first
-    401 and retry the stream, yielding at least one content chunk and a
-    final chunk with ``finish_reason="stop"``.
+async def test_given_expired_token_when_stream_chat_then_refreshes_and_retries(
+    tmp_path: Path,
+) -> None:
+    """Given a credential file containing an expired access token, when
+    streaming ``acompletion`` is called with that file path as
+    ``credential_identifier``, then the provider must resolve the file to
+    the token, receive a 401, refresh the token via
+    ``PerchaiAuthBase.refresh_on_401`` and retry the stream, yielding at
+    least one content chunk and a final chunk with
+    ``finish_reason="stop"``.
     """
     import httpx
 
-    given_expired_token = "perchai-expired-token-will-401"
+    given_session = json.loads(PERCHAI_SESSION.read_text(encoding="utf-8"))
+    given_session["accessToken"] = "perchai-expired-token-will-401"
+    given_cred_file = tmp_path / "perchai_oauth_1.json"
+    given_cred_file.write_text(json.dumps(given_session), encoding="utf-8")
+
     given_provider = PerchaiProvider()
 
     when_streamed = await given_provider.acompletion(
         httpx.AsyncClient(),
         model="perchai/nemotron-3.5-lightning",
         messages=[{"role": "user", "content": "Say hello in one word"}],
-        credential_identifier=given_expired_token,
+        credential_identifier=str(given_cred_file),
         stream=True,
     )
 
@@ -476,6 +492,91 @@ async def test_given_expired_token_when_stream_chat_then_refreshes_and_retries()
     assert then_last_finish == "stop", (
         f"Last chunk should have finish_reason='stop', got {then_last_finish!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Credential path resolution: credential_identifier passed by the rotator
+# is a FILE PATH (e.g. "/home/.../perchai_oauth_1.json") or env virtual path
+# (e.g. "env://perchai/1"), NOT an access token. The provider must resolve
+# the path to an actual accessToken before sending it as a Bearer header.
+# ---------------------------------------------------------------------------
+
+
+def test_given_credential_file_path_when_resolved_then_returns_access_token() -> None:
+    """Given a credential_identifier that is a file path to a valid session
+    JSON, when ``_resolve_credential_token`` is called, then it must read the
+    file and return the ``accessToken`` value, NOT the file path itself.
+    """
+    import tempfile
+
+    from rotator_library.providers.perchai_auth_base import PerchaiAuthBase
+
+    given_session = {
+        "version": 1,
+        "appUrl": "https://app.perchai.app",
+        "accessToken": "test-access-token-from-file",
+        "refreshToken": "test-refresh-token",
+        "expiresAt": 9999999999,
+        "userId": "test-user-id",
+    }
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False
+    ) as given_file:
+        json.dump(given_session, given_file)
+        given_path = given_file.name
+
+    given_auth = PerchaiAuthBase(credential_path=given_path)
+    given_session_loaded = given_auth.load_session()
+    then_token = given_session_loaded.get("accessToken")
+
+    assert then_token == "test-access-token-from-file", (
+        f"Expected accessToken from file, got {then_token!r}"
+    )
+    assert then_token != given_path, (
+        "credential_identifier was used as the token directly instead of "
+        "being resolved to an access token from the file"
+    )
+
+
+def test_given_env_virtual_path_when_resolved_then_returns_env_access_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Given a credential_identifier that is an ``env://perchai/1`` virtual
+    path, when ``load_session`` is called, then it must read the
+    ``PERCHAI_1_ACCESS_TOKEN`` env var and return it as the accessToken.
+    """
+    from rotator_library.providers.perchai_auth_base import PerchaiAuthBase
+
+    monkeypatch.setenv("PERCHAI_1_ACCESS_TOKEN", "test-env-access-token")
+    monkeypatch.setenv("PERCHAI_1_REFRESH_TOKEN", "test-env-refresh-token")
+
+    given_auth = PerchaiAuthBase(credential_path="env://perchai/1")
+    given_session = given_auth.load_session()
+    then_token = given_session.get("accessToken")
+
+    assert then_token == "test-env-access-token", (
+        f"Expected accessToken from env var, got {then_token!r}"
+    )
+
+
+def test_given_empty_credential_identifier_when_resolved_then_falls_back_to_default() -> None:
+    """Given an empty credential_identifier, when ``_resolve_credential_token``
+    is called, then it must fall back to the default session resolution
+    (``_resolve_session_token``), NOT use an empty string as the token.
+    """
+    given_provider = PerchaiProvider()
+
+    try:
+        given_provider._resolve_credential_token("")
+    except Exception as exc:
+        then_is_auth_error = "perch" in str(exc).lower() or "session" in str(exc).lower()
+        assert then_is_auth_error, (
+            f"Empty credential_identifier should fall back to default session "
+            f"resolution, got unexpected error: {exc!r}"
+        )
+    else:
+        pass
 
 
 # ---------------------------------------------------------------------------

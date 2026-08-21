@@ -71,7 +71,7 @@ class PerchaiAuthBase:
     REFRESH_TIMEOUT: Final[float] = 30.0
     CONFIG_TIMEOUT: Final[float] = 15.0
 
-    def __init__(self) -> None:
+    def __init__(self, credential_path: str = "") -> None:
         self._session: Optional[PerchaiSession] = None
         self._refresh_lock: Optional[asyncio.Lock] = None
         self._model_cache: Dict[str, List[str]] = {}
@@ -79,9 +79,16 @@ class PerchaiAuthBase:
         self._model_cache_filled_at: float = 0.0
         self._supabase_url: Optional[str] = None
         self._supabase_anon_key: Optional[str] = None
+        # When set, load_session / _persist_session use this path instead of
+        # auto-discovering. Supports file paths and env:// virtual paths.
+        self._credential_path: str = credential_path
 
     def load_session(self) -> PerchaiSession:
         if self._session is not None:
+            return self._session
+
+        if self._credential_path:
+            self._session = self._load_session_from_path(self._credential_path)
             return self._session
 
         session_path = _resolve_session_file()
@@ -172,6 +179,89 @@ class PerchaiAuthBase:
                 "Run `perch login` to re-authenticate."
             )
         return token
+
+    @staticmethod
+    def _parse_env_credential_path(path: str) -> Optional[str]:
+        if not path.startswith("env://"):
+            return None
+        parts = path[6:].split("/")
+        if len(parts) >= 2:
+            return parts[1]
+        return "0"
+
+    @staticmethod
+    def _load_session_from_env(index: str) -> PerchaiSession:
+        prefix = f"PERCHAI_{index}" if index and index != "0" else "PERCHAI"
+        access_token = os.getenv(f"{prefix}_ACCESS_TOKEN")
+        if not access_token:
+            raise PerchaiAuthError(
+                f"Environment variable {prefix}_ACCESS_TOKEN not set. "
+                f"Run `perch login` to re-authenticate."
+            )
+        refresh_token = os.getenv(f"{prefix}_REFRESH_TOKEN", "")
+        app_url = os.getenv("PERCHAI_APP_URL", PerchaiAuthBase.DEFAULT_APP_URL)
+        return PerchaiSession(
+            version=1,
+            appUrl=app_url,
+            accessToken=access_token,
+            refreshToken=refresh_token,
+            expiresAt=None,
+            userId=None,
+        )
+
+    def _load_session_from_path(self, path: str) -> PerchaiSession:
+        env_index = self._parse_env_credential_path(path)
+        if env_index is not None:
+            return self._load_session_from_env(env_index)
+
+        session_path = Path(path).expanduser()
+        if not session_path.is_file():
+            raise PerchaiAuthError(
+                f"Perchai credential file not found at {session_path}. "
+                f"Run `perch login` to re-authenticate."
+            )
+        try:
+            raw = session_path.read_text(encoding="utf-8")
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise PerchaiAuthError(
+                f"Perchai credential file at {session_path} is corrupted "
+                f"(invalid JSON at line {exc.lineno} column {exc.colno}): {exc.msg}. "
+                f"Run `perch login` to re-authenticate."
+            ) from exc
+        except OSError as exc:
+            raise PerchaiAuthError(
+                f"Could not read perchai credential file at {session_path}: {exc}. "
+                f"Check file permissions or run `perch login` again."
+            ) from exc
+
+        if not isinstance(data, dict):
+            raise PerchaiAuthError(
+                f"Perchai credential file at {session_path} is malformed: "
+                f"expected a JSON object, got {type(data).__name__}. "
+                f"Run `perch login` to re-authenticate."
+            )
+
+        access_token = data.get("accessToken")
+        if not access_token or not isinstance(access_token, str):
+            raise PerchaiAuthError(
+                f"Perchai credential file at {session_path} is missing accessToken. "
+                f"Run `perch login` to re-authenticate."
+            )
+
+        session: PerchaiSession = {
+            "version": int(data.get("version", 1)),
+            "appUrl": data.get("appUrl") or self.DEFAULT_APP_URL,
+            "accessToken": access_token,
+            "refreshToken": data.get("refreshToken", ""),
+            "expiresAt": data.get("expiresAt"),
+            "userId": data.get("userId"),
+        }
+        lib_logger.debug(
+            f"Loaded perchai session from {session_path} "
+            f"(userId={session['userId']!r}, expiresAt={session['expiresAt']!r})"
+        )
+        return session
 
     async def _ensure_supabase_config(self) -> None:
         # Perchai does not embed Supabase config in the session file;
@@ -352,9 +442,14 @@ class PerchaiAuthBase:
             return await self.refresh_token()
 
     def _persist_session(self, session: PerchaiSession) -> None:
-        # Atomic: write to .tmp then os.replace to avoid half-written files
-        # if killed mid-write.
-        session_path = _resolve_session_file()
+        if self._credential_path and self._credential_path.startswith("env://"):
+            return
+
+        if self._credential_path:
+            session_path = Path(self._credential_path).expanduser()
+        else:
+            session_path = _resolve_session_file()
+
         try:
             session_path.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = session_path.with_suffix(session_path.suffix + ".tmp")

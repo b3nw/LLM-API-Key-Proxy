@@ -413,7 +413,28 @@ Examples:
 - env://gemini_cli/0  → GEMINI_CLI_ACCESS_TOKEN (legacy single credential)
 ```
 
-#### 2.6.3. Credential Tool Integration
+#### 2.6.3. Perchai OAuth: Manual Credential Path Required
+
+Unlike other OAuth providers, perchai's `~/.perch/` is not auto-scanned.
+The default-directory scan is disabled in `credential_manager.py` (lines 222-226)
+to enforce local-first credential management.
+
+**File-based:**
+
+```env
+PERCHAI_OAUTH_1=/home/<user>/.perch/cli-auth-session.json
+```
+
+**Env-based (stateless, no file):**
+
+```env
+PERCHAI_1_ACCESS_TOKEN=<jwt>
+PERCHAI_1_REFRESH_TOKEN=<refresh_token>
+```
+
+Without either, perchai won't appear in the provider count at startup.
+
+#### 2.6.4. Credential Tool Integration
 
 The `credential_tool.py` provides a user-friendly CLI interface to the `CredentialManager`:
 

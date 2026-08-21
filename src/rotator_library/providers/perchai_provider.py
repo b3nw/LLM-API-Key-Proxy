@@ -123,7 +123,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
             return list(self._model_cache[cache_key])
 
         try:
-            app_url = self._resolve_app_url()
+            app_url = self._resolve_app_url(api_key)
 
             response = await client.get(
                 f"{app_url.rstrip('/')}/api/perchai/account",
@@ -176,7 +176,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         raw_model = kwargs.get("model", "")
         model_name = raw_model.split("/", 1)[1] if "/" in raw_model else raw_model
         payload = self._build_payload(model_name=model_name, kwargs=kwargs)
-        app_url = self._resolve_app_url()
+        app_url = self._resolve_app_url(credential_identifier)
         url = f"{app_url.rstrip('/')}{MODEL_CALL_PATH}"
 
         file_logger = ProviderLogger(transaction_context)
@@ -931,10 +931,17 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
             return False
         return (time.time() - timestamp) < MODEL_CACHE_TTL_SECONDS
 
-    def _resolve_app_url(self) -> str:
+    def _resolve_app_url(self, credential_identifier: str = "") -> str:
         from .perchai_auth_base import PerchaiAuthBase
 
-        return PerchaiAuthBase().get_app_url()
+        if credential_identifier:
+            return PerchaiAuthBase(
+                credential_path=credential_identifier
+            ).get_app_url()
+        try:
+            return PerchaiAuthBase().get_app_url()
+        except Exception:
+            return PerchaiAuthBase.DEFAULT_APP_URL
 
     def _resolve_session_token(self) -> str:
         from .perchai_auth_base import PerchaiAuthBase

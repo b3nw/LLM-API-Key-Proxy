@@ -1,30 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # Copyright (c) 2026 Mirrowel
 
-"""
-Perchai Dollar-Based Quota Tracking Mixin
-
-Provides quota tracking for the Perchai provider using a dollar-based
-monthly allowance system.  Perchai's Pro plan includes a monthly included
-usage allowance that resets on the first day of each calendar month at
-00:00 UTC.
-
-The usage endpoint at ``GET/POST {appUrl}/api/perch-terminal/usage`` returns
-the current month's dollar usage (and other limits).  Perchai's wire
-response shape is not yet pinned, so this implementation walks several
-candidate field paths defensively and falls back to a zero-valued baseline
-if nothing matches.
-
-Usage::
-
-    class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
-        ...
-
-The provider class must initialize these instance attributes in ``__init__``:
-    - self._balance_cache: Dict[str, Dict[str, Any]] = {}
-    - self._quota_refresh_interval: int = 300
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -60,13 +36,7 @@ USAGE_FETCH_CONCURRENCY: int = 5
 USAGE_FETCH_TIMEOUT: float = 15.0
 
 
-# =========================================================================
-# CREDENTIAL RESOLUTION HELPERS (module-level; used by mixin methods)
-# =========================================================================
-
-
 def _safe_int(value: Any, default: int = 0) -> int:
-    """Coerce ``value`` to ``int``; return ``default`` on failure/None."""
     if value is None:
         return default
     try:
@@ -76,17 +46,10 @@ def _safe_int(value: Any, default: int = 0) -> int:
 
 
 def _is_env_path(credential: str) -> bool:
-    """Return True if ``credential`` is a virtual ``env://perchai/N`` path."""
     return isinstance(credential, str) and credential.startswith("env://perchai/")
 
 
 def _parse_env_index(credential: str) -> Optional[int]:
-    """Extract the numeric index from an ``env://perchai/N`` path.
-
-    Returns ``None`` if the path doesn't match the expected shape.  The
-    legacy single-credential env-var form (index 0) is preserved by
-    returning ``0`` for ``env://perchai/0``.
-    """
     if not _is_env_path(credential):
         return None
     parts = credential[len("env://perchai/"):].split("/")
@@ -97,22 +60,12 @@ def _parse_env_index(credential: str) -> Optional[int]:
 
 
 def _get_credential_identifier(credential: str) -> str:
-    """Return a short identifier for logs (env path stays full; file path -> basename)."""
     if credential.startswith("env://"):
         return credential
     return Path(credential).name
 
 
 def _resolve_env_credentials(credential: str) -> Optional[Tuple[str, str]]:
-    """Resolve ``env://perchai/N`` to ``(access_token, app_url)``.
-
-    Reads:
-        - ``PERCHAI_N_ACCESS_TOKEN``  (or ``PERCHAI_ACCESS_TOKEN`` for index 0)
-        - ``PERCHAI_N_APP_URL``       (or ``PERCHAI_APP_URL`` for index 0)
-
-    Returns ``None`` if either token or app URL is missing (caller treats
-    that as "skip this credential" and logs a warning).
-    """
     idx = _parse_env_index(credential)
     if idx is None:
         return None
@@ -137,12 +90,7 @@ def _resolve_env_credentials(credential: str) -> Optional[Tuple[str, str]]:
 
 
 def _read_session_file(credential: str) -> Optional[Tuple[str, str]]:
-    """Read an OAuth session file path and extract ``(access_token, app_url)``.
-
-    Returns ``None`` if the file is missing, unreadable, or malformed.  All
-    exceptions are swallowed and converted to ``None`` so background
-    polling never crashes the host.
-    """
+    # Swallow exceptions to None so background polling never crashes the host.
     try:
         path = Path(credential).expanduser()
         if not path.is_file():
@@ -165,46 +113,18 @@ def _read_session_file(credential: str) -> Optional[Tuple[str, str]]:
 
 
 class PerchaiQuotaTracker:
-    """
-    Mixin class providing dollar-based quota tracking for the Perchai provider.
-
-    This mixin adds:
-    - Model quota groups for the TUI (``monthly($)`` group)
-    - Calendar-month-UTC usage reset configuration
-    - Background job config polled every 5 minutes by the executor
-    - Real ``run_background_job()`` that fetches per-credential usage from
-      the ``/api/perch-terminal/usage`` endpoint and pushes baselines into
-      the ``UsageManager`` as cents-based counters.
-
-    Usage::
-
-        class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
-            ...
-
-    The provider class must initialize these instance attributes in ``__init__``:
-        self._balance_cache: Dict[str, Dict[str, Any]] = {}
-        self._quota_refresh_interval: int = 300
-    """
 
     # Type hints for attributes provided by the provider instance
     _balance_cache: Dict[str, Dict[str, Any]]
     _quota_refresh_interval: int
-
-    # =========================================================================
-    # QUOTA GROUPING
-    # =========================================================================
 
     # Single monthly dollar quota group - TUI surfaces this under "monthly($)".
     model_quota_groups: Dict[str, List[str]] = {
         "monthly($)": ["_balance_monthly"],
     }
 
-    # =========================================================================
-    # USAGE RESET CONFIG (Calendar Month UTC)
-    # =========================================================================
-
-    # ``window_seconds`` here is a placeholder; the runtime value is computed
-    # per-call by ``get_usage_reset_config()`` based on time-to-next-month UTC.
+    # ``window_seconds`` is a placeholder; runtime value is computed per-call
+    # by ``get_usage_reset_config()`` based on time-to-next-month UTC.
     usage_reset_configs: Dict[Any, Any] = {
         "default": UsageResetConfigDef(
             window_seconds=2592000,  # ~30d placeholder; actual value computed at runtime
@@ -216,54 +136,22 @@ class PerchaiQuotaTracker:
 
     @staticmethod
     def _seconds_until_next_month_utc() -> int:
-        """
-        Return the number of seconds until the next 1st-of-month 00:00 UTC.
-
-        Used by ``get_usage_reset_config`` so the runtime window always
-        reflects the time remaining in the current calendar month rather
-        than a fixed 30-day guess.
-
-        Returns:
-            Seconds until the next month boundary (UTC).  Always > 0.
-        """
         now_utc = datetime.now(timezone.utc)
         year = now_utc.year
         month = now_utc.month
 
-        # First day of next month at 00:00 UTC
         if month == 12:
             next_month_start = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
         else:
             next_month_start = datetime(year, month + 1, 1, tzinfo=timezone.utc)
 
         delta = next_month_start - now_utc
-        # Guard against sub-second drift producing a zero/negative value.
         seconds = int(delta.total_seconds())
         return seconds if seconds > 0 else 1
-
-    # =========================================================================
-    # PROVIDER INTERFACE OVERRIDES
-    # =========================================================================
 
     def get_usage_reset_config(
         self, credential: str
     ) -> Optional[Dict[str, Any]]:
-        """
-        Return usage reset configuration for Perchai credentials.
-
-        Pro plan resets on the calendar month boundary (00:00 UTC on the
-        1st of each month).  The window is reported in ``per_model`` mode
-        so UsageManager tracks each model group against its own window.
-
-        Args:
-            credential: API key / identifier for the credential being checked.
-                Currently unused - Perchai uses a single global reset window
-                shared across all Pro credentials.
-
-        Returns:
-            Dict with ``mode`` and ``window_seconds`` keys, or None if
-            usage tracking is disabled for this credential.
-        """
         return {
             "mode": "per_model",
             "window_seconds": self._seconds_until_next_month_utc(),
@@ -271,52 +159,17 @@ class PerchaiQuotaTracker:
 
     @staticmethod
     def get_background_job_config() -> Optional[Dict[str, Any]]:
-        """
-        Return configuration for the periodic Perchai quota refresh job.
-
-        Returns:
-            None if no background job, otherwise a dict with ``interval``,
-            ``name``, and ``run_on_start`` keys.
-
-        Notes:
-            Exposed as ``@staticmethod`` so the executor can read it
-            without instantiating the mixin.  The mixin is intended to be
-            composed into the concrete provider via MRO
-            ``(PerchaiQuotaTracker, ProviderInterface)``.
-        """
         return {
             "interval": 300,
             "name": "perchai_quota_refresh",
             "run_on_start": True,
         }
 
-    # =========================================================================
-    # BACKGROUND JOB (REAL IMPLEMENTATION)
-    # =========================================================================
-
     async def run_background_job(
         self,
         usage_manager: "UsageManager",
         credentials: List[str],
     ) -> None:
-        """
-        Refresh Perchai usage baselines for each credential.
-
-        For every credential path or ``env://perchai/N`` virtual path, this
-        resolves the bearer token + app URL, GETs the upstream
-        ``/api/perch-terminal/usage`` endpoint, parses the monthly dollar
-        usage + cap + reset timestamp, and pushes a cents-based baseline
-        into the shared ``UsageManager`` under the ``perchai/_balance_monthly``
-        quota group.
-
-        All errors are caught and logged; this method never raises into
-        the background refresher loop.
-
-        Args:
-            usage_manager: The shared ``UsageManager`` instance.
-            credentials: List of credential paths or ``env://perchai/N``
-                virtual paths.
-        """
         if not credentials:
             return
 
@@ -334,11 +187,6 @@ class PerchaiQuotaTracker:
         usage_manager: "UsageManager",
         credential: str,
     ) -> None:
-        """Fetch usage for a single credential and push to UsageManager.
-
-        Errors are caught and logged at warning level - this method never
-        raises into the background refresher loop.
-        """
         identifier = _get_credential_identifier(credential)
         try:
             resolved = self._resolve_credential_path(credential)
@@ -391,15 +239,6 @@ class PerchaiQuotaTracker:
     def _resolve_credential_path(
         self, credential: str
     ) -> Optional[Tuple[str, str]]:
-        """Resolve ``credential`` to ``(access_token, app_url)``.
-
-        Handles two shapes:
-        - ``env://perchai/N`` - read from environment variables
-        - file path           - parse the perchai session file
-
-        Returns ``None`` if no usable credentials can be found (caller
-        treats this as "skip").
-        """
         if _is_env_path(credential):
             return _resolve_env_credentials(credential)
         return _read_session_file(credential)
@@ -407,12 +246,6 @@ class PerchaiQuotaTracker:
     async def _fetch_usage_data(
         self, credential: str, token: str, app_url: str
     ) -> Optional[Dict[str, Any]]:
-        """GET ``{appUrl}/api/perch-terminal/usage`` with Bearer auth.
-
-        Returns the parsed JSON dict on 2xx, ``None`` on any error.  All
-        exceptions are swallowed at this layer so the caller can treat
-        None as "skip this baseline update".
-        """
         identifier = _get_credential_identifier(credential)
         url = f"{app_url.rstrip('/')}/api/perch-terminal/usage"
         headers = {
@@ -441,24 +274,12 @@ class PerchaiQuotaTracker:
     def _extract_dollar_fields(
         data: Dict[str, Any],
     ) -> Tuple[int, int, Optional[float]]:
-        """Pull monthly ``(used_cents, cap_cents, reset_ts)`` from the usage response.
-
-        The upstream response shape is not yet pinned, so this walks a set
-        of candidate field paths.  If nothing matches, returns ``(0, 0,
-        None)`` so the provider doesn't lose its baseline.
-
-        Args:
-            data: Parsed JSON body from ``/api/perch-terminal/usage``.
-
-        Returns:
-            Tuple of ``(used_cents, cap_cents, reset_ts)``.  All values
-            default to 0/None on parse failure.
-        """
+        # Upstream response shape not yet pinned; walk candidate paths and
+        # fall back to (0, 0, None) so the baseline isn't lost on mismatch.
         used_dollars = 0.0
         cap_dollars = 0.0
         reset_ts: Optional[float] = None
 
-        # Walk candidate paths for "monthly" sub-object.
         monthly_obj: Any = None
         for path in (("monthly",), ("data", "monthly"), ("usage", "monthly")):
             current: Any = data
@@ -503,7 +324,6 @@ class PerchaiQuotaTracker:
                     cap_dollars = float(val)
                     break
 
-        # If we still don't have a reset_ts, use the calendar-month boundary.
         if reset_ts is None:
             reset_ts = float(PerchaiQuotaTracker._seconds_until_next_month_utc() + _now_seconds())
 
@@ -513,7 +333,6 @@ class PerchaiQuotaTracker:
 
 
 def _parse_iso_to_unix(iso_string: str) -> Optional[float]:
-    """Parse an ISO 8601 timestamp to Unix seconds; None on failure."""
     if not iso_string:
         return None
     try:

@@ -1,41 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 # Copyright (c) 2026 Mirrowel
 
-"""
-Perchai Provider
-
-Provider implementation for Perch (Perchai) - an OAuth-authenticated LLM
-gateway that exposes a multi-model catalog under a single Bearer token.
-
-Auth:
-    OAuth session is managed by ``PerchaiAuthBase`` (T1).  The access token
-    is short-lived and refreshed from the local ``~/.perch/cli-auth-session.json``
-    file (or its env-var equivalents).  ``PerchaiAuthBase.get_app_url()`` returns
-    the canonical app URL (env override > saved session > default).
-
-Discovery:
-    Models are listed by the upstream ``GET {appUrl}/api/perchai/account``
-    endpoint.  Response shape is not stable across bundle versions, so this
-    provider walks a set of candidate field paths defensively and returns an
-    empty list if none match.  Cached for ``MODEL_CACHE_TTL_SECONDS`` (default
-    300s) per-token on the singleton instance.
-
-Routing:
-    Perchai has a single bearer token that is shared across all models, so
-    there is no per-model credential scoping.  ``skip_cost_calculation=True``
-    because the upstream reports its own usage and dollar cost, and the proxy
-    should not double-count.  ``default_rotation_mode="sequential"`` because
-    the upstream applies rate limits per session; rotating mid-stream breaks
-    prompt caching.
-
-Environment variables:
-    PERCHAI_API_KEY_<N>           - not used (Perchai uses OAuth, not API keys)
-    PERCH_MODEL_CALL_PROXY_URL    - optional app URL override
-    PERCH_MODEL_CALL_PROXY_TOKEN  - optional access token override
-    PERCH_CLI_APP_URL             - optional app URL override
-    PERCH_APP_URL                 - optional app URL override
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -62,13 +27,6 @@ if not lib_logger.handlers:
     lib_logger.addHandler(logging.NullHandler())
 
 
-# =========================================================================
-# MODULE-LEVEL CONSTANTS
-# =========================================================================
-
-
-# Perchai's account endpoint is rate-limited and the model catalog changes
-# infrequently - 5 minutes is a reasonable freshness window.
 MODEL_CACHE_TTL_SECONDS: int = 300
 
 
@@ -95,19 +53,7 @@ SUPPORTED_PARAMS: set[str] = {
 }
 
 
-# =========================================================================
-# TypedDicts describing the upstream Perchai wire format
-# =========================================================================
-
-
 class PerchaiRequestEnvelope(TypedDict, total=False):
-    """Envelope sent by the upstream CLI to ``/api/perch-terminal/model-call``.
-
-    Only the fields we need to round-trip are declared; extras pass through
-    transparently.  ``total=False`` because every field is optional from the
-    caller's perspective - we never validate the envelope, just shape it.
-    """
-
     request: Dict[str, Any]
     lane: str
     preferredModelId: Optional[str]
@@ -120,13 +66,6 @@ class PerchaiRequestEnvelope(TypedDict, total=False):
 
 
 class PerchaiStreamEvent(TypedDict, total=False):
-    """A single event in the SSE stream from Perch.
-
-    Perch emits a heterogeneous event stream (``text_delta``,
-    ``reasoning_delta``, ``tool_call_delta``, ``tool_use_end``, ``done``,
-    ``error``).  We normalize them in ``_parse_sse_line``.
-    """
-
     type: str
     text: Optional[str]
     delta: Optional[str]
@@ -138,12 +77,6 @@ class PerchaiStreamEvent(TypedDict, total=False):
 
 
 class PerchaiErrorResponse(TypedDict, total=False):
-    """Error body returned by Perch on quota / rate-limit / auth failures.
-
-    Both fields are populated for quota errors; transient errors may only
-    include ``error``.
-    """
-
     error: str
     errorCode: str
 
@@ -162,34 +95,11 @@ DEFAULT_RETRY_AFTER_SECONDS: int = 3600
 
 @final
 class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
-    """First-party Perch (Perchai) provider using its native Bearer-auth API.
-
-    ``PerchaiQuotaTracker`` is mixed in FIRST so its ``__init__`` side
-    effects (``_balance_cache`` / ``_quota_refresh_interval``) are
-    established before the provider's own ``__init__`` runs.  ``ProviderInterface``
-    comes second so its singleton metaclass still applies.
-
-    The provider implements:
-    - ``get_models()`` - defensive account-endpoint walker
-    - ``acompletion()`` - non-stream + stream dispatch via the perchai envelope
-    - ``parse_quota_error()`` - all 10 perchai error code mappings
-    - Background quota refresh via ``PerchaiQuotaTracker.run_background_job``
-    """
-
-    # =========================================================================
-    # CLASS-LEVEL CONFIGURATION (overrides ProviderInterface defaults)
-    # =========================================================================
-
-    # Env-var lookup prefix (QUOTA_GROUPS_PERCHAI_*, ROTATION_MODE_PERCHAI, etc.).
     provider_env_name: str = "perchai"
 
     skip_cost_calculation: bool = True
 
     default_rotation_mode: str = "sequential"
-
-    # =========================================================================
-    # CONSTRUCTOR
-    # =========================================================================
 
     def __init__(self) -> None:
         self._balance_cache: Dict[str, Dict[str, Any]] = {}
@@ -199,10 +109,6 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
 
         self._model_cache: Dict[str, List[str]] = {}
         self._model_cache_timestamps: Dict[str, float] = {}
-
-    # =========================================================================
-    # MODEL DISCOVERY
-    # =========================================================================
 
     @override
     def has_custom_logic(self) -> bool:
@@ -247,10 +153,6 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
             lib_logger.debug(f"Failed to fetch Perchai models: {exc}")
             return []
 
-    # =========================================================================
-    # acompletion() - NON-STREAM + STREAM DISPATCH
-    # =========================================================================
-
     @override
     async def acompletion(
         self, client: httpx.AsyncClient, **kwargs: Any
@@ -258,19 +160,6 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         litellm.ModelResponse,
         AsyncGenerator[litellm.ModelResponseStream, None],
     ]:
-        """Perchai non-stream + stream ``acompletion`` dispatcher.
-
-        Pop ``credential_identifier``, ``transaction_context``, and
-        ``api_base`` (executor / rotator plumbing), validate ``messages``,
-        strip the ``perchai/`` prefix from the model id, build the
-        envelope, then either POST + parse JSON or stream SSE depending on
-        ``payload["stream"]``.
-
-        Reactive 401 handling: on the first 401, refresh the access token
-        via ``PerchaiAuthBase.refresh_on_401`` and retry once.  If the
-        retry still 401s, raise ``AuthenticationError``.
-        """
-        # Lazy import to avoid a circular dependency with perchai_auth_base.
         from .perchai_auth_base import PerchaiAuthBase
         from litellm.exceptions import (
             AuthenticationError as LitellmAuthenticationError,
@@ -342,20 +231,6 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         auth_base_cls: Any,
         auth_error_cls: Any,
     ) -> litellm.ModelResponse:
-        """Non-stream POST + JSON parse + litellm.ModelResponse wrap.
-
-        Reactive 401 handling: refresh the token via
-        ``auth_base_cls.refresh_on_401`` and retry once.  A persistent 401
-        raises ``auth_error_cls`` (typically ``litellm.AuthenticationError``).
-
-        Body validation: a success status with empty body or missing
-        ``choices`` raises ``litellm.exceptions.APIError`` so the rotator
-        can rotate the credential or surface a clean error to the caller.
-
-        UTF-8: the envelope is pre-serialized with ``ensure_ascii=False``
-        and sent as utf-8 bytes so unicode content (emoji, RTL,
-        combining marks) round-trips without escaping.
-        """
         envelope = self._build_envelope(model=model, payload=payload)
         token = credential_identifier or self._resolve_session_token()
 
@@ -437,42 +312,8 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                 request=response.request,
             )
 
-        # Perchai response shape (observed live, not OpenAI-compatible):
-        # {
-        #   "ok": true,
-        #   "text": "..." | null,
-        #   "content": [
-        #     {"type": "text",       "text": "..."},
-        #     {"type": "reasoning",  "text": "..."},
-        #     {"type": "tool_use",   "id": "...", "name": "...", "input": {...}},
-        #   ],
-        #   "reasoning": "..." | null,
-        #   "toolCalls": [
-        #     {
-        #       "id": "call_d474d351-...",
-        #       "name": "get_weather",
-        #       "sealed": true,
-        #       "arguments": {"city": "Paris"},          <-- DICT, must JSON-stringify
-        #       "argumentParseStatus": "parsed_ok",
-        #       "requiredArguments": ["city"],
-        #     },
-        #   ],
-        #   "provider": "meta",
-        #   "model": "muse-spark-1.2",
-        #   "usage": {
-        #     "inputTokens": 12,
-        #     "outputTokens": 549,
-        #     "cacheReadInputTokens": 0,
-        #     "totalTokens": 561,
-        #   },
-        #   ...
-        # }
-        # The canonical tool-call source is ``toolCalls``; the ``content``
-        # array's ``tool_use`` blocks mirror the same data.  When the model
-        # emits tool calls, ``finish_reason`` must be ``"tool_calls"`` (not
-        # ``"stop"``) so litellm and downstream consumers (Anthropic compat,
-        # Responses API translator) dispatch the tool instead of treating the
-        # turn as complete.
+        # toolCalls[] is the canonical tool-call source; content[].tool_use
+        # blocks duplicate the same data and are skipped during text accumulation.
         content_text: str = response_data.get("text") or ""
         reasoning_text: str = (
             response_data.get("reasoning")
@@ -491,9 +332,6 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                 if block_type in ("reasoning", "thinking", "reasoning_content"):
                     parts_reasoning.append(block_text)
                 elif block_type in ("tool_use", "tool_call"):
-                    # tool_use blocks duplicate the toolCalls[] entry.
-                    # Skip them when accumulating text content; the
-                    # canonical tool-call fields live under toolCalls[].
                     continue
                 elif block_type in ("text",) or not block_type:
                     parts_text.append(block_text)
@@ -501,11 +339,8 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
             if not reasoning_text:
                 reasoning_text = "".join(parts_reasoning)
 
-        # Tool calls: perchai returns ``arguments`` as a dict, but litellm's
-        # OpenAI-compatible contract requires it as a JSON-encoded string.
-        # ``argumentParseStatus`` may be ``"parsed_ok"`` or ``"raw"`` (failed
-        # parse upstream) - we honour whatever shape the upstream gave us
-        # and stringify it as-is; downstream consumers re-parse.
+        # Tool calls: perchai may return arguments as dict or string; litellm
+# requires a JSON-encoded string.
         raw_tool_calls = response_data.get("toolCalls")
         tool_calls_list: Optional[List[ChatCompletionMessageToolCall]] = None
         if isinstance(raw_tool_calls, list) and raw_tool_calls:
@@ -522,10 +357,6 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                         f"missing id or name: {tc!r}"
                     )
                     continue
-                # Normalize arguments: dict -> json string; str -> pass through;
-                # anything else -> empty object string.  litellm expects a
-                # stringified JSON object so downstream parsers can ``loads``
-                # it uniformly.
                 if isinstance(tc_arguments, str):
                     arguments_str = tc_arguments
                 elif isinstance(tc_arguments, dict):
@@ -581,9 +412,8 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         model_response = litellm.ModelResponse(
             id=response_data.get("id") or str(uuid.uuid4()),
             choices=choices_list,
-            # Preserve the user-requested model id.  Perchai's own "model"
-            # field is the upstream it routed through (e.g. "meta-muse-spark-1-2")
-            # and would silently overwrite what the caller asked for.
+            # Preserve the caller's model id; perchai's own "model" field
+            # is the upstream it routed through and would silently overwrite it.
             model=model,
             usage=litellm.Usage(**usage_kwargs) if usage_kwargs else None,
         )
@@ -603,13 +433,6 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         auth_base_cls: Any = None,
         auth_error_cls: Any = None,
     ) -> AsyncGenerator[litellm.ModelResponseStream, None]:
-        """SSE streaming path: ``client.stream("POST", ...)`` + ``aiter_lines``.
-
-        Reactive 401 handling: on the first 401, refresh the access token
-        via ``auth_base_cls.refresh_on_401`` and retry the stream once.
-        Mirrors the non-streaming path's 401 handler so the proxy does
-        not exhaust the credential on a single expired-token event.
-        """
         envelope = self._build_envelope(model=model, payload=payload)
 
         body = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
@@ -654,13 +477,8 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                     data_str = line[len("data:"):].strip()
                     if data_str == "[DONE]":
                         saw_done = True
-                        # The terminating chunk's finish_reason depends on
-                        # whether the stream emitted any tool calls (in
-                        # which case ``tool_use_end`` already yielded the
-                        # final ``tool_calls`` chunk, so we skip emitting
-                        # a redundant stop chunk).  Without tool calls we
-                        # yield the conventional stop chunk so downstream
-                        # consumers always see a terminating finish reason.
+                        # tool_use_end already yielded the terminating
+                        # tool_calls chunk; skip emitting a redundant stop.
                         if saw_tool_call:
                             return
                         yield litellm.ModelResponseStream(
@@ -680,12 +498,9 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
 
                     stream_chunk = self._parse_sse_line(line, model)
                     if stream_chunk is not None:
-                        # Inspect the chunk's finish_reason to track
-                        # whether the stream terminated with a tool call.
-                        # ``_parse_sse_line`` emits ``finish_reason=
-                        # "tool_calls"`` from ``tool_use_end`` events; we
-                        # use that signal to skip the redundant stop
-                        # chunk when [DONE] (or post-loop synthesis) fires.
+                        # _parse_sse_line emits finish_reason="tool_calls"
+                        # from tool_use_end events; track it to suppress
+                        # the redundant stop chunk at [DONE].
                         chunk_finish_reason: Optional[str] = None
                         try:
                             chunk_choices = stream_chunk.choices
@@ -714,8 +529,6 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                 "synthesizing final stop chunk"
             )
             if saw_tool_call:
-                # ``tool_use_end`` already yielded the terminating
-                # ``tool_calls`` chunk; do not emit a redundant stop.
                 return
             yield litellm.ModelResponseStream(
                 id=stream_id,
@@ -731,30 +544,11 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                 ],
             )
 
-    # =========================================================================
-    # PARSE_QUOTA_ERROR (T7)
-    # =========================================================================
-
     @staticmethod
     @override
     def parse_quota_error(
         error: Exception, error_body: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
-        """Map a Perchai error to a structured quota-classification dict.
-
-        Returns ``None`` for errors the proxy should classify generically
-        (context overflow, api_error, timeout, aborted, vision_model_error).
-        For known quota/auth errors returns::
-
-            {"retry_after": int | None, "reason": str}
-
-        The mapping table mirrors the upstream ``lKe`` function:
-        - 429 without errorCode -> usage_limit_reached
-        - 403 + "Upgrade to Pro" -> starter_model_blocked
-        - error string containing "usage limit"/"pilot capacity"/"monthly allowance"
-          -> usage_limit_reached
-        - error string containing "abort" -> timeout
-        """
         body = error_body
         if not body:
             if hasattr(error, "response") and hasattr(error.response, "text"):
@@ -792,12 +586,8 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
             except (TypeError, ValueError):
                 status_code = None
         else:
-            # Defensive fallback: ``Exception("429")`` style synthetic
-            # errors (e.g. proxy test fixtures) embed the status code as
-            # the message.  Real litellm exceptions carry ``.status_code``
-            # so this branch is only reached in tests.  Limited to
-            # quota-relevant codes (429/403/402) so we don't accidentally
-            # classify arbitrary 5xx errors as quota failures.
+            # Synthetic test errors may embed the status code as the message
+            # (e.g. Exception("429")); only treat quota-relevant codes as such.
             args = getattr(error, "args", ()) or ()
             if args:
                 try:
@@ -819,24 +609,6 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         error_text: str,
         status_code: Optional[int],
     ) -> Optional[Dict[str, Any]]:
-        """Inner pure mapping for ``parse_quota_error``.  No I/O.
-
-        Mapping (mirrors upstream ``lKe``):
-            usage_limit_reached     -> reason="rate_limit", retry_after=3600 (or parsed)
-            promo_overflow_decision -> reason="rate_limit", retry_after=3600
-            starter_model_blocked   -> reason="forbidden",  retry_after=None
-            byo_feature_blocked     -> reason="forbidden",  retry_after=None
-            not_authenticated       -> reason="authentication", retry_after=None
-            context_overflow        -> None  (terminal: proxy classifies as context_window_exceeded)
-            api_error               -> None  (proxy classifies as server_error)
-            timeout                 -> None  (proxy classifies as api_connection)
-            aborted                 -> None  (terminal)
-            vision_model_error      -> None  (terminal: invalid_request)
-
-        HTTP fallback (no errorCode):
-            429 (no errorCode) -> reason="rate_limit", retry_after=3600
-            403 + "Upgrade to Pro" -> reason="forbidden"
-        """
         text_lower = (error_text or "").lower()
 
         if error_code == "usage_limit_reached":
@@ -883,7 +655,6 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                     "retry_after": None,
                     "reason": "forbidden",
                 }
-            # Free-form text inference (mirrors upstream ``Ome``):
             if any(
                 marker in text_lower
                 for marker in (
@@ -901,22 +672,10 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
 
         return None
 
-    # =========================================================================
-    # ENVELOPE + PAYLOAD HELPERS
-    # =========================================================================
-
     @staticmethod
     def _build_payload(
         model_name: str, kwargs: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Filter ``kwargs`` to Perchai-supported params and shape the inner ``request``.
-
-        Mirrors DeepSeek's ``_build_payload``:
-        - filter to ``SUPPORTED_PARAMS``
-        - convert ``max_completion_tokens`` -> ``max_tokens`` when present
-        - strip ``stream_options`` for non-stream requests
-        - merge ``extra_body`` (if dict) onto the payload
-        """
         payload: Dict[str, Any] = {
             key: value
             for key, value in kwargs.items()
@@ -943,27 +702,6 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
     def _build_envelope(
         model: str, payload: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Wrap the inner ``request`` payload in a Perchai envelope.
-
-        The envelope shape is taken from bundle grep evidence of the CLI's
-        ``cKe`` build function::
-
-            {
-              "request": {...kwargs...},
-              "lane": "chat",
-              "preferredModelId": null,
-              "manualModelOptionId": "<option-id>",
-              "avoidModelIds": [],
-              "attribution": null,
-              "clientSurface": "cli",
-              "promoOverflowAccepted": false
-            }
-
-        ``preferredModelId`` is the legacy auto-router field and is ignored
-        by perchai; per-request routing is controlled by
-        ``manualModelOptionId``, which must be the upstream option ID
-        (``wandb-kimi-k2-6``) - the part after the ``perchai/`` prefix.
-        """
         stripped = model.split("/", 1)[1] if "/" in model else model
         return {
             "request": dict(payload),
@@ -981,34 +719,6 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
     def _parse_sse_line(
         line: str, model: str = "perchai"
     ) -> Optional[litellm.ModelResponseStream]:
-        """Parse a raw SSE ``data:`` line into a ``ModelResponseStream``.
-
-        Accepts the unparsed line (after ``aiter_lines`` yields it) and
-        handles every defensive case before delegating to event dispatch:
-
-        - non-``data:`` prefix -> ``None``
-        - empty payload after stripping -> ``None``
-        - ``[DONE]`` sentinel -> ``None`` (caller decides whether to
-          synthesize a final stop chunk)
-        - malformed JSON -> debug log + ``None``
-        - non-dict JSON payload -> debug log + ``None``
-        - unknown event type -> debug log + ``None``
-
-        Per bundle grep evidence (``cKe`` SSE parser in
-        ``/tmp/opencode/perchai-spike/package/dist/perch.mjs``), the raw
-        wire format from ``/api/perch-terminal/model-call`` uses
-        ``answer_delta`` for text content.  The CLI's higher-level ``bVe``
-        orchestrator normalizes this to ``text_delta`` for its internal
-        consumer callback.  We sit at the raw SSE layer, so we accept
-        ``answer_delta`` as primary and keep ``text_delta`` as a defensive
-        fallback in case a future server variant normalizes upstream.
-
-        ``answer_delta`` / ``text_delta`` -> ``delta.content`` (rstripped)
-        ``reasoning_delta`` -> ``delta.reasoning_content`` (rstripped)
-        ``tool_call_delta`` / ``tool_use_end`` -> ``None`` (v1 strips tool use)
-        events with ``finishReason`` -> yield with the given reason
-        Anything else -> ``None`` (debug-logged)
-        """
         if not isinstance(line, str) or not line.startswith("data:"):
             return None
 
@@ -1034,15 +744,8 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         event_type = parsed_event.get("type") or parsed_event.get("event") or ""
 
         if event_type == "tool_call_delta":
-            # Tool-call streaming event.  Wire shape inferred from OpenAI's
-            # standard and perchai's existing event naming; not yet observed
-            # in the live SSE stream (perchai returns the full
-            # ``toolCalls[]`` array in the non-stream response, so the stream
-            # path may never emit ``tool_call_delta``).  Map defensively:
-            # ``arguments`` may arrive as either a dict (already parsed by
-            # perchai) or a JSON-encoded string (OpenAI-style incremental
-            # delta).  Normalize to a JSON string for litellm parity with
-            # the non-stream path.
+            # Defensive: perchai currently returns toolCalls[] only in the
+            # non-stream response; this handles a hypothetical streaming variant.
             tc_id = parsed_event.get("id")
             tc_name = parsed_event.get("name")
             tc_arguments = parsed_event.get("arguments")
@@ -1080,10 +783,8 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
             )
 
         if event_type == "tool_use_end":
-            # Final chunk for a tool-calling turn.  Per OpenAI streaming
-            # convention the final chunk carries ``finish_reason="tool_calls"``
-            # with an empty delta so downstream consumers know to dispatch
-            # the tool instead of treating the turn as complete.
+            # Final chunk of a tool-calling turn; empty delta + finish_reason
+            # signals tool dispatch to downstream consumers.
             return litellm.ModelResponseStream(
                 id=f"chatcmpl-perchai-stream-{int(time.time())}",
                 created=int(time.time()),
@@ -1156,15 +857,6 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
     async def _raise_for_status(
         self, response: httpx.Response, model: str
     ) -> None:
-        """Translate non-OK responses into litellm exceptions.
-
-        - 429 -> ``litellm.exceptions.RateLimitError``
-        - 401 -> ``litellm.exceptions.AuthenticationError``
-        - 400 -> ``litellm.exceptions.BadRequestError``
-        - other non-OK -> ``httpx.HTTPStatusError``
-        - structured quota info from ``parse_quota_error`` is embedded
-          into the exception message where available.
-        """
         if response.status_code < 400:
             return
 
@@ -1216,10 +908,6 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
             response=response,
         )
 
-    # =========================================================================
-    # INTERNAL HELPERS
-    # =========================================================================
-
     def _cache_key_for(self, api_key: str) -> str:
         if not api_key:
             return ""
@@ -1227,14 +915,6 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
 
     @staticmethod
     def _redact_token(token: Optional[str]) -> str:
-        """Return a safely-redacted form of an auth token for debug logs.
-
-        Format: first 8 chars + ``...`` (e.g. ``abc12345...``).  Use this
-        whenever you would otherwise log a raw Bearer token, refresh
-        token, or session id.  Empty input returns ``<empty>``; very
-        short input returns ``<redacted>`` so we never leak even the
-        first 8 chars of a short secret.
-        """
         if not token:
             return "<empty>"
         if len(token) <= 8:
@@ -1255,13 +935,6 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         return PerchaiAuthBase().get_app_url()
 
     def _resolve_session_token(self) -> str:
-        """Resolve the current access token from the session file.
-
-        Used when the executor passes an empty ``credential_identifier``
-        (e.g. during fallback or background refresh).  Raises
-        ``PerchaiAuthError`` if no session is loaded - the rotator treats
-        that as a credential failure and rotates.
-        """
         from .perchai_auth_base import PerchaiAuthBase
 
         session = PerchaiAuthBase().load_session()

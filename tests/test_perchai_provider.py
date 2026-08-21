@@ -1,26 +1,5 @@
 # SPDX-License-Identifier: MIT
-# Copyright (c) 2026 b3nw
-#
-# E2E tests for the Perchai (Perch) provider.
-#
-# These tests exercise the *real* provider classes against the *real*
-# registration dicts populated by the implementation tasks (T1-T12).
-# They never mock httpx, litellm, or the upstream API.
-#
-# When a real OAuth session exists at ``~/.perch/cli-auth-session.json``
-# the live network paths (get_models, acompletion, background_job) are
-# also exercisable; when the session is missing the file the entire
-# module is skipped at collection time so a dev environment without
-# `perch login` never fails the suite.
-
-"""
-Perchai provider e2e tests - given_when_then style, no mocks.
-
-Skip the entire module at collection time when no OAuth session file
-is present at ``~/.perch/cli-auth-session.json``, so dev environments
-without ``perch login`` never fail the suite.
-"""
-
+# Copyright (c) 2026 Kévin Cojean
 from __future__ import annotations
 
 import json
@@ -28,12 +7,6 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import pytest
-
-# ---------------------------------------------------------------------------
-# Real imports - NO mocks, NO patches. The whole point of this suite is to
-# pin the public surface of the perchai provider and its registration
-# dictionaries against the actual code paths other modules depend on.
-# ---------------------------------------------------------------------------
 
 from rotator_library.providers import PROVIDER_PLUGINS
 from rotator_library.providers.perchai_provider import (
@@ -54,10 +27,6 @@ from rotator_library.provider_config import LITELLM_PROVIDERS
 from proxy_app.provider_urls import PROVIDER_URL_MAP
 
 
-# ---------------------------------------------------------------------------
-# Session gate - skip the entire module when `perch login` has not run.
-# ---------------------------------------------------------------------------
-
 PERCHAI_SESSION: Path = Path.home() / ".perch" / "cli-auth-session.json"
 HAS_SESSION: bool = PERCHAI_SESSION.is_file()
 
@@ -68,16 +37,6 @@ pytestmark = [
     ),
 ]
 
-# Async tests rely on the global asyncio_mode = "auto" setting in
-# pyproject.toml, so we don't need an explicit @pytest.mark.asyncio
-# decorator. The mark is still applied explicitly below for clarity.
-
-
-# ---------------------------------------------------------------------------
-# Parametrized fixture data: all 10 upstream perchai error codes and the
-# expected mapping from ``PerchaiProvider._classify_perchai_error``.
-# Mirrors the ``lKe`` mapping documented in perchai_provider.py.
-# ---------------------------------------------------------------------------
 
 PERCHAI_ERROR_CODE_CASES = [
     pytest.param(

@@ -1459,7 +1459,7 @@ Perchai does **not** publish a public model catalog. **29 models are currently w
 | MiniMax M2 | `perchai/bedrock-mantle-minimax-minimax-m2` | Starter |
 | MiniMax M2.5 | `perchai/wandb-minimax-m2-5` | Pro |
 | MiniMax M3 | `perchai/wandb-minimax-m3` | Pro |
-| Nemotron 3.5 Lightning | `perchai/wandb-nvidia-nvidia-nemotron-3-5-lightning-30b-a3b` | Pro |
+| Nemotron 3.5 Lightning | `perchai/wandb-nvidia-nvidia-nemotron-3-5-lightning-30b-a3b` | Pro (⚠️ currently times out on perchai backend) |
 | Nemotron Super | `perchai/bedrock-mantle-nvidia-nemotron-super-3-120b` | Starter |
 | Nemotron Ultra | `perchai/wandb-nvidia-nvidia-nemotron-3-ultra-550b-a55b` | Pro |
 | Qwen 3.6 | `perchai/wandb-qwen3-6-35b-a3b` | Starter |

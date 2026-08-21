@@ -109,6 +109,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
 
         self._model_cache: Dict[str, List[str]] = {}
         self._model_cache_timestamps: Dict[str, float] = {}
+        self._auth_base_cache: Dict[str, Any] = {}
 
     @override
     def has_custom_logic(self) -> bool:
@@ -250,7 +251,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         response = await _post(token)
 
         if response.status_code == 401:
-            auth = auth_base_cls(credential_path=credential_identifier)
+            auth = self._get_auth_base(credential_identifier)
             new_token = await auth.refresh_on_401(client, token)
             response = await _post(new_token)
 
@@ -463,7 +464,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
             ):
                 await response.aread()
                 await ctx.__aexit__(None, None, None)
-                auth = auth_base_cls(credential_path=credential_identifier)
+                auth = self._get_auth_base(credential_identifier)
                 token = await auth.refresh_on_401(client, token)
                 continue
 
@@ -931,22 +932,27 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
             return False
         return (time.time() - timestamp) < MODEL_CACHE_TTL_SECONDS
 
-    def _resolve_app_url(self, credential_identifier: str = "") -> str:
+    def _get_auth_base(self, credential_identifier: str = "") -> Any:
         from .perchai_auth_base import PerchaiAuthBase
 
-        if credential_identifier:
-            return PerchaiAuthBase(
-                credential_path=credential_identifier
-            ).get_app_url()
+        cached = self._auth_base_cache.get(credential_identifier)
+        if cached is not None:
+            return cached
+        auth_base = PerchaiAuthBase(credential_path=credential_identifier)
+        self._auth_base_cache[credential_identifier] = auth_base
+        return auth_base
+
+    def _resolve_app_url(self, credential_identifier: str = "") -> str:
+        auth_base = self._get_auth_base(credential_identifier)
         try:
-            return PerchaiAuthBase().get_app_url()
+            return auth_base.get_app_url()
         except Exception:
+            from .perchai_auth_base import PerchaiAuthBase
+
             return PerchaiAuthBase.DEFAULT_APP_URL
 
     def _resolve_session_token(self) -> str:
-        from .perchai_auth_base import PerchaiAuthBase
-
-        session = PerchaiAuthBase().load_session()
+        session = self._get_auth_base("").load_session()
         token = session.get("accessToken")
         if not token:
             from .perchai_auth_base import PerchaiAuthError
@@ -961,11 +967,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         if not credential_identifier:
             return self._resolve_session_token()
 
-        from .perchai_auth_base import PerchaiAuthBase
-
-        session = PerchaiAuthBase(
-            credential_path=credential_identifier
-        ).load_session()
+        session = self._get_auth_base(credential_identifier).load_session()
         token = session.get("accessToken")
         if not token:
             from .perchai_auth_base import PerchaiAuthError

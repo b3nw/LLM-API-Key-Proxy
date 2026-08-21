@@ -26,6 +26,11 @@ def main():
             shutil.copy2(env_src, os.path.join(target_dir, env_file))
             print(f"Copied {env_file}")
 
+    req_src = os.path.join(src_dir, "..", "requirements.txt")
+    if os.path.isfile(req_src):
+        shutil.copy2(req_src, os.path.join(target_dir, "requirements.txt"))
+        print("Copied requirements.txt")
+
     print(f"Done. Run with: python {target_dir}/proxy_app/main.py")
 
 

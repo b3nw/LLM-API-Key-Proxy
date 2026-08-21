@@ -366,6 +366,19 @@ class PerchaiAuthBase:
 
         if response.status_code != 200:
             snippet = response.text[:200] if response.text else "<empty>"
+            try:
+                err_payload = response.json()
+                err_code = err_payload.get("error_code", "") if isinstance(err_payload, dict) else ""
+            except Exception:
+                err_code = ""
+            if err_code == "refresh_token_already_used":
+                lib_logger.error(
+                    "Perchai refresh token has been consumed/expired. "
+                    "The session file or env var contains a stale refresh token "
+                    "that was already used in a prior refresh. "
+                    "Run `perch login` to obtain fresh credentials, "
+                    "then restart the proxy or redeploy."
+                )
             raise PerchaiAuthError(
                 f"Perchai token refresh failed with HTTP {response.status_code}: "
                 f"{snippet}. Run `perch login` to re-authenticate."

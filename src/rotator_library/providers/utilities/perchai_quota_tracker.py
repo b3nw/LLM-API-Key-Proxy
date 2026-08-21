@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: LGPL-3.0-only
-# Copyright (c) 2026 Mirrowel
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Kévin Cojean
 
 from __future__ import annotations
 

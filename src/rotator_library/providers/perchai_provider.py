@@ -93,6 +93,23 @@ _PERCHAI_MODEL_FIELD_PATHS: tuple[tuple[str, ...], ...] = (
 DEFAULT_RETRY_AFTER_SECONDS: int = 3600
 
 
+def _extract_tool_names(tools: Optional[List[Dict[str, Any]]]) -> Dict[int, str]:
+    if not isinstance(tools, list):
+        return {}
+    result: Dict[int, str] = {}
+    for idx, tool in enumerate(tools):
+        if not isinstance(tool, dict):
+            continue
+        func = tool.get("function")
+        if isinstance(func, dict):
+            name = func.get("name")
+        else:
+            name = tool.get("name")
+        if isinstance(name, str) and name:
+            result[idx] = name
+    return result
+
+
 @final
 class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
     provider_env_name: str = "perchai"
@@ -346,19 +363,22 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         raw_tool_calls = response_data.get("toolCalls")
         tool_calls_list: Optional[List[ChatCompletionMessageToolCall]] = None
         if isinstance(raw_tool_calls, list) and raw_tool_calls:
+            request_tool_names = _extract_tool_names(payload.get("tools"))
             tool_calls_list = []
-            for tc in raw_tool_calls:
+            for tc_idx, tc in enumerate(raw_tool_calls):
                 if not isinstance(tc, dict):
                     continue
-                tc_id = tc.get("id")
+                tc_id = tc.get("id") or f"call_{tc_idx}"
                 tc_name = tc.get("name")
-                tc_arguments = tc.get("arguments", {})
-                if not tc_id or not tc_name:
+                if not tc_name:
+                    tc_name = request_tool_names.get(tc_idx)
+                if not tc_name:
                     lib_logger.debug(
-                        "Perchai non-stream: skipping malformed toolCall "
-                        f"missing id or name: {tc!r}"
+                        "Perchai non-stream: skipping toolCall "
+                        f"with no resolvable name: {tc!r}"
                     )
                     continue
+                tc_arguments = tc.get("arguments", {})
                 if isinstance(tc_arguments, str):
                     arguments_str = tc_arguments
                 elif isinstance(tc_arguments, dict):
@@ -445,6 +465,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         stream_id = f"chatcmpl-perchai-stream-{int(time.time())}"
         tool_call_id_map: Dict[int, str] = {}
         tool_call_name_map: Dict[int, str] = {}
+        request_tool_names = _extract_tool_names(payload.get("tools"))
 
         for attempt in range(2):
             stream_headers = dict(build_headers(token))
@@ -501,7 +522,10 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                         )
                         return
 
-                    stream_chunk = self._parse_sse_line(line, model, tool_call_id_map, tool_call_name_map)
+                    stream_chunk = self._parse_sse_line(
+                        line, model, tool_call_id_map, tool_call_name_map,
+                        request_tool_names,
+                    )
                     if stream_chunk is not None:
                         # _parse_sse_line emits finish_reason="tool_calls"
                         # from tool_use_end events; track it to suppress
@@ -726,6 +750,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         model: str = "perchai",
         tool_call_id_map: Optional[Dict[int, str]] = None,
         tool_call_name_map: Optional[Dict[int, str]] = None,
+        request_tool_names: Optional[Dict[int, str]] = None,
     ) -> Optional[litellm.ModelResponseStream]:
         if not isinstance(line, str) or not line.startswith("data:"):
             return None
@@ -774,6 +799,9 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                     tool_call_name_map[tc_index] = tc_name
                 elif tc_index in tool_call_name_map:
                     tc_name = tool_call_name_map[tc_index]
+                elif request_tool_names and tc_index in request_tool_names:
+                    tc_name = request_tool_names[tc_index]
+                    tool_call_name_map[tc_index] = tc_name
                 else:
                     tc_name = f"function_{tc_index}"
                     tool_call_name_map[tc_index] = tc_name

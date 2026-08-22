@@ -398,10 +398,10 @@ def test_given_tool_call_delta_without_id_when_parsed_then_synthetic_id_emitted(
 
 
 def test_given_tool_call_delta_without_name_when_parsed_then_synthetic_name_emitted() -> None:
-    """Given a ``tool_call_delta`` SSE event without ``name`` field, when
-    ``_parse_sse_line`` runs with tracking maps, then the emitted chunk
-    must contain a synthetic ``function.name`` so @ai-sdk clients don't
-    crash with "Expected 'function.name' to be a string".
+    """Given a ``tool_call_delta`` SSE event without ``name`` field and no
+    request tool names, when ``_parse_sse_line`` runs with tracking maps,
+    then the emitted chunk must contain a synthetic ``function.name`` so
+    @ai-sdk clients don't crash with "Expected 'function.name' to be a string".
     """
     given_line = 'data: {"type":"tool_call_delta","index":0,"id":"call_abc","arguments":"{\\"x\\": 1}"}'
     given_model = "perchai/test-model"
@@ -423,6 +423,61 @@ def test_given_tool_call_delta_without_name_when_parsed_then_synthetic_name_emit
     assert then_name is not None, f"function missing name, got {then_function!r}"
     assert isinstance(then_name, str), f"function.name must be string, got {type(then_name)}"
     assert then_name == "function_0", f"Expected synthetic name 'function_0', got {then_name!r}"
+
+
+def test_given_tool_call_delta_without_name_when_request_tools_provided_then_real_name_used() -> None:
+    """Given a ``tool_call_delta`` SSE event without ``name`` field, when
+    ``_parse_sse_line`` runs with ``request_tool_names`` from the original
+    request's tools definition, then the emitted chunk must use the real
+    tool name (e.g. ``read``) instead of a synthetic ``function_0`` so
+    downstream clients call the correct tool.
+    """
+    given_line = 'data: {"type":"tool_call_delta","index":0,"id":"call_abc","arguments":"{\\"path\\": \\"/tmp\\"}"}'
+    given_model = "perchai/test-model"
+    given_id_map: dict[int, str] = {}
+    given_name_map: dict[int, str] = {}
+    given_request_tool_names = {0: "read", 1: "write"}
+    when_parsed = PerchaiProvider._parse_sse_line(
+        given_line, given_model, given_id_map, given_name_map,
+        given_request_tool_names,
+    )
+    then_chunk = when_parsed
+    assert then_chunk is not None, "tool_call_delta should produce a chunk"
+    then_choices = then_chunk.choices
+    then_delta = then_choices[0].get("delta") if isinstance(then_choices[0], dict) else then_choices[0].delta
+    then_tool_calls = then_delta.get("tool_calls") if isinstance(then_delta, dict) else then_delta.tool_calls
+    then_first_call = then_tool_calls[0]
+    then_function = then_first_call.get("function") if isinstance(then_first_call, dict) else then_first_call.function
+    then_name = then_function.get("name") if isinstance(then_function, dict) else then_function.name
+    assert then_name == "read", (
+        f"Expected real tool name 'read' from request tools, got {then_name!r}"
+    )
+
+
+def test_given_tool_call_delta_without_name_when_index_mismatch_then_falls_back_to_synthetic() -> None:
+    """Given a ``tool_call_delta`` SSE event with index 2 but only 2 tools
+    in the request (indices 0, 1), when ``_parse_sse_line`` runs, then it
+    must fall back to the synthetic ``function_2`` name since the index
+    is out of range of the request tools.
+    """
+    given_line = 'data: {"type":"tool_call_delta","index":2,"arguments":"{}"}'
+    given_model = "perchai/test-model"
+    given_id_map: dict[int, str] = {}
+    given_name_map: dict[int, str] = {}
+    given_request_tool_names = {0: "read", 1: "write"}
+    when_parsed = PerchaiProvider._parse_sse_line(
+        given_line, given_model, given_id_map, given_name_map,
+        given_request_tool_names,
+    )
+    then_chunk = when_parsed
+    assert then_chunk is not None
+    then_delta = then_chunk.choices[0].get("delta") if isinstance(then_chunk.choices[0], dict) else then_chunk.choices[0].delta
+    then_tool_calls = then_delta.get("tool_calls") if isinstance(then_delta, dict) else then_delta.tool_calls
+    then_function = then_tool_calls[0].get("function") if isinstance(then_tool_calls[0], dict) else then_tool_calls[0].function
+    then_name = then_function.get("name") if isinstance(then_function, dict) else then_function.name
+    assert then_name == "function_2", (
+        f"Expected synthetic 'function_2' for out-of-range index, got {then_name!r}"
+    )
 
 
 def test_given_multiple_tool_call_deltas_when_parsed_then_same_synthetic_id_reused() -> None:

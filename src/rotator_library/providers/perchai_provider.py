@@ -444,6 +444,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         saw_tool_call = False
         stream_id = f"chatcmpl-perchai-stream-{int(time.time())}"
         tool_call_id_map: Dict[int, str] = {}
+        tool_call_name_map: Dict[int, str] = {}
 
         for attempt in range(2):
             stream_headers = dict(build_headers(token))
@@ -500,7 +501,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                         )
                         return
 
-                    stream_chunk = self._parse_sse_line(line, model, tool_call_id_map)
+                    stream_chunk = self._parse_sse_line(line, model, tool_call_id_map, tool_call_name_map)
                     if stream_chunk is not None:
                         # _parse_sse_line emits finish_reason="tool_calls"
                         # from tool_use_end events; track it to suppress
@@ -724,6 +725,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         line: str,
         model: str = "perchai",
         tool_call_id_map: Optional[Dict[int, str]] = None,
+        tool_call_name_map: Optional[Dict[int, str]] = None,
     ) -> Optional[litellm.ModelResponseStream]:
         if not isinstance(line, str) or not line.startswith("data:"):
             return None
@@ -756,9 +758,9 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
             tc_name = parsed_event.get("name")
             tc_arguments = parsed_event.get("arguments")
             tc_index = parsed_event.get("index", 0)
-            # Perchai may not send id in streaming tool_call_delta events.
-            # Generate synthetic id and track per index so subsequent deltas
-            # for the same tool call use the same id (required by @ai-sdk).
+            # Perchai may not send id/name in streaming tool_call_delta events.
+            # Generate synthetic values and track per index so subsequent deltas
+            # for the same tool call use the same id/name (required by @ai-sdk).
             if tool_call_id_map is not None:
                 if tc_id is not None:
                     tool_call_id_map[tc_index] = tc_id
@@ -767,6 +769,14 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                 else:
                     tc_id = f"call_{tc_index}"
                     tool_call_id_map[tc_index] = tc_id
+            if tool_call_name_map is not None:
+                if tc_name is not None:
+                    tool_call_name_map[tc_index] = tc_name
+                elif tc_index in tool_call_name_map:
+                    tc_name = tool_call_name_map[tc_index]
+                else:
+                    tc_name = f"function_{tc_index}"
+                    tool_call_name_map[tc_index] = tc_name
             if isinstance(tc_arguments, dict):
                 arguments_str = json.dumps(tc_arguments, ensure_ascii=False)
             elif isinstance(tc_arguments, str):

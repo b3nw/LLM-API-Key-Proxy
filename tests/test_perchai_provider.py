@@ -261,6 +261,203 @@ def test_given_reasoning_delta_when_parsed_then_reasoning_chunk() -> None:
     )
 
 
+async def test_given_perchai_stream_without_tool_id_when_consumed_then_synthetic_id_present() -> None:
+    """Given a Perchai streaming response that emits ``tool_call_delta`` events
+    without ``id`` or ``name`` fields (the actual wire format Perchai sends),
+    when the full streaming pipeline consumes the stream, then every tool_call
+    chunk must have a string ``id`` and ``function.name`` so @ai-sdk clients
+    don't crash with "Expected 'id' to be a string" or
+    "Expected 'function.name' to be a string".
+
+    This is an integration test that exercises the full streaming path:
+    httpx response -> aiter_lines -> _parse_sse_line -> chunk emission.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    # Simulate Perchai SSE stream: tool_call_delta without id/name
+    given_sse_lines = [
+        'data: {"type":"tool_call_delta","index":0,"arguments":"{\\"x\\": 1}"}',
+        'data: {"type":"tool_call_delta","index":0,"arguments":"{\\"y\\": 2}"}',
+        'data: {"type":"tool_use_end"}',
+        'data: [DONE]',
+    ]
+
+    # Mock httpx streaming response
+    given_response = MagicMock()
+    given_response.status_code = 200
+
+    async def mock_aiter_lines():
+        for line in given_sse_lines:
+            yield line
+
+    given_response.aiter_lines = mock_aiter_lines
+    given_response.aread = AsyncMock()
+
+    # Mock httpx context manager
+    given_context = AsyncMock()
+    given_context.__aenter__ = AsyncMock(return_value=given_response)
+    given_context.__aexit__ = AsyncMock(return_value=None)
+
+    # Mock httpx client
+    given_client = MagicMock()
+    given_client.stream = MagicMock(return_value=given_context)
+
+    # Create provider instance
+    given_provider = PerchaiProvider()
+    given_model = "perchai/test-model"
+    given_url = "https://api.perchai.com/v1/chat"
+    given_headers = {"Authorization": "Bearer fake-token"}
+    given_token = "fake-token"
+    given_payload = {"messages": [{"role": "user", "content": "test"}]}
+
+    # Mock file logger
+    given_logger = MagicMock()
+    given_logger.log_response_chunk = MagicMock()
+
+    # Consume the stream
+    then_chunks = []
+    async for chunk in given_provider._stream_completion(
+        client=given_client,
+        url=given_url,
+        build_headers=lambda t: given_headers,
+        token=given_token,
+        payload=given_payload,
+        model=given_model,
+        file_logger=given_logger,
+        credential_identifier="test-cred",
+    ):
+        then_chunks.append(chunk)
+
+    # Validate: at least one tool_call chunk emitted
+    assert len(then_chunks) > 0, "Stream produced no chunks"
+
+    # Find tool_call chunks (those with tool_calls in delta)
+    then_tool_call_chunks = []
+    for chunk in then_chunks:
+        choices = chunk.choices
+        if choices:
+            delta = choices[0].get("delta") if isinstance(choices[0], dict) else choices[0].delta
+            tool_calls = delta.get("tool_calls") if isinstance(delta, dict) else getattr(delta, "tool_calls", None)
+            if tool_calls:
+                then_tool_call_chunks.append((chunk, tool_calls))
+
+    assert len(then_tool_call_chunks) > 0, "No tool_call chunks found in stream"
+
+    # Validate: every tool_call chunk has string id and function.name
+    for chunk_idx, (chunk, tool_calls) in enumerate(then_tool_call_chunks):
+        for tc_idx, tc in enumerate(tool_calls):
+            then_id = tc.get("id") if isinstance(tc, dict) else tc.id
+            assert then_id is not None, (
+                f"Chunk {chunk_idx} tool_call {tc_idx} missing id: {tc!r}"
+            )
+            assert isinstance(then_id, str), (
+                f"Chunk {chunk_idx} tool_call {tc_idx} id not string: {type(then_id)}"
+            )
+            assert len(then_id) > 0, (
+                f"Chunk {chunk_idx} tool_call {tc_idx} id is empty string"
+            )
+
+            then_function = tc.get("function") if isinstance(tc, dict) else tc.function
+            then_name = then_function.get("name") if isinstance(then_function, dict) else then_function.name
+            assert then_name is not None, (
+                f"Chunk {chunk_idx} tool_call {tc_idx} missing function.name: {tc!r}"
+            )
+            assert isinstance(then_name, str), (
+                f"Chunk {chunk_idx} tool_call {tc_idx} function.name not string: {type(then_name)}"
+            )
+            assert len(then_name) > 0, (
+                f"Chunk {chunk_idx} tool_call {tc_idx} function.name is empty string"
+            )
+
+
+def test_given_tool_call_delta_without_id_when_parsed_then_synthetic_id_emitted() -> None:
+    """Given a ``tool_call_delta`` SSE event without ``id`` field (as Perchai
+    currently sends), when ``_parse_sse_line`` runs with tracking maps, then
+    the emitted chunk must contain a synthetic ``id`` so @ai-sdk clients
+    don't crash with "Expected 'id' to be a string".
+    """
+    given_line = 'data: {"type":"tool_call_delta","index":0,"name":"my_func","arguments":"{\\"x\\": 1}"}'
+    given_model = "perchai/test-model"
+    given_id_map: dict[int, str] = {}
+    given_name_map: dict[int, str] = {}
+    when_parsed = PerchaiProvider._parse_sse_line(
+        given_line, given_model, given_id_map, given_name_map
+    )
+    then_chunk = when_parsed
+    assert then_chunk is not None, "tool_call_delta should produce a chunk"
+    then_choices = then_chunk.choices
+    assert then_choices, "chunk has no choices"
+    then_delta = then_choices[0].get("delta") if isinstance(then_choices[0], dict) else then_choices[0].delta
+    then_tool_calls = then_delta.get("tool_calls") if isinstance(then_delta, dict) else then_delta.tool_calls
+    assert then_tool_calls, "chunk has no tool_calls"
+    then_first_call = then_tool_calls[0]
+    then_id = then_first_call.get("id") if isinstance(then_first_call, dict) else then_first_call.id
+    assert then_id is not None, f"tool_call missing id, got {then_first_call!r}"
+    assert isinstance(then_id, str), f"tool_call.id must be string, got {type(then_id)}"
+    assert then_id == "call_0", f"Expected synthetic id 'call_0', got {then_id!r}"
+
+
+def test_given_tool_call_delta_without_name_when_parsed_then_synthetic_name_emitted() -> None:
+    """Given a ``tool_call_delta`` SSE event without ``name`` field, when
+    ``_parse_sse_line`` runs with tracking maps, then the emitted chunk
+    must contain a synthetic ``function.name`` so @ai-sdk clients don't
+    crash with "Expected 'function.name' to be a string".
+    """
+    given_line = 'data: {"type":"tool_call_delta","index":0,"id":"call_abc","arguments":"{\\"x\\": 1}"}'
+    given_model = "perchai/test-model"
+    given_id_map: dict[int, str] = {}
+    given_name_map: dict[int, str] = {}
+    when_parsed = PerchaiProvider._parse_sse_line(
+        given_line, given_model, given_id_map, given_name_map
+    )
+    then_chunk = when_parsed
+    assert then_chunk is not None, "tool_call_delta should produce a chunk"
+    then_choices = then_chunk.choices
+    assert then_choices, "chunk has no choices"
+    then_delta = then_choices[0].get("delta") if isinstance(then_choices[0], dict) else then_choices[0].delta
+    then_tool_calls = then_delta.get("tool_calls") if isinstance(then_delta, dict) else then_delta.tool_calls
+    assert then_tool_calls, "chunk has no tool_calls"
+    then_first_call = then_tool_calls[0]
+    then_function = then_first_call.get("function") if isinstance(then_first_call, dict) else then_first_call.function
+    then_name = then_function.get("name") if isinstance(then_function, dict) else then_function.name
+    assert then_name is not None, f"function missing name, got {then_function!r}"
+    assert isinstance(then_name, str), f"function.name must be string, got {type(then_name)}"
+    assert then_name == "function_0", f"Expected synthetic name 'function_0', got {then_name!r}"
+
+
+def test_given_multiple_tool_call_deltas_when_parsed_then_same_synthetic_id_reused() -> None:
+    """Given multiple ``tool_call_delta`` events for same index without id/name,
+    when ``_parse_sse_line`` runs with tracking maps, then all chunks must
+    use the same synthetic id/name (not generate new ones per chunk).
+    """
+    given_line1 = 'data: {"type":"tool_call_delta","index":0,"arguments":"{\\"x\\": 1}"}'
+    given_line2 = 'data: {"type":"tool_call_delta","index":0,"arguments":"{\\"y\\": 2}"}'
+    given_model = "perchai/test-model"
+    given_id_map: dict[int, str] = {}
+    given_name_map: dict[int, str] = {}
+    when_parsed1 = PerchaiProvider._parse_sse_line(
+        given_line1, given_model, given_id_map, given_name_map
+    )
+    when_parsed2 = PerchaiProvider._parse_sse_line(
+        given_line2, given_model, given_id_map, given_name_map
+    )
+    then_chunk1 = when_parsed1
+    then_chunk2 = when_parsed2
+    assert then_chunk1 is not None and then_chunk2 is not None
+    then_delta1 = then_chunk1.choices[0].get("delta") if isinstance(then_chunk1.choices[0], dict) else then_chunk1.choices[0].delta
+    then_delta2 = then_chunk2.choices[0].get("delta") if isinstance(then_chunk2.choices[0], dict) else then_chunk2.choices[0].delta
+    then_tc1 = (then_delta1.get("tool_calls") if isinstance(then_delta1, dict) else then_delta1.tool_calls)[0]
+    then_tc2 = (then_delta2.get("tool_calls") if isinstance(then_delta2, dict) else then_delta2.tool_calls)[0]
+    then_id1 = then_tc1.get("id") if isinstance(then_tc1, dict) else then_tc1.id
+    then_id2 = then_tc2.get("id") if isinstance(then_tc2, dict) else then_tc2.id
+    assert then_id1 == then_id2, f"Synthetic id changed between chunks: {then_id1!r} vs {then_id2!r}"
+    then_fn1 = then_tc1.get("function") if isinstance(then_tc1, dict) else then_tc1.function
+    then_fn2 = then_tc2.get("function") if isinstance(then_tc2, dict) else then_tc2.function
+    then_name1 = then_fn1.get("name") if isinstance(then_fn1, dict) else then_fn1.name
+    then_name2 = then_fn2.get("name") if isinstance(then_fn2, dict) else then_fn2.name
+    assert then_name1 == then_name2, f"Synthetic name changed between chunks: {then_name1!r} vs {then_name2!r}"
+
+
 def test_given_registration_when_checked_then_perchai_in_oauth_dirs() -> None:
     """Given the credential manager module is loaded, when DEFAULT_OAUTH_DIRS
     is inspected, then ``perchai`` must be present pointing at

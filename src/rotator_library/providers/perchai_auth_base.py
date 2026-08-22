@@ -399,7 +399,13 @@ class PerchaiAuthBase:
             )
 
         new_access = payload.get("access_token")
-        new_refresh = payload.get("refresh_token", refresh_token)
+        new_refresh = payload.get("refresh_token")
+        if not new_refresh or not isinstance(new_refresh, str):
+            raise PerchaiAuthError(
+                "Perchai token refresh response is missing 'refresh_token'. "
+                "The refresh token is single-use and must be rotated. "
+                "Run `perch login` to re-authenticate."
+            )
         new_expires_at = payload.get("expires_at")
         if new_expires_at is None:
             expires_in = payload.get("expires_in")

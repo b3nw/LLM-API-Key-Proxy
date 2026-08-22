@@ -939,3 +939,145 @@ def test_given_module_constants_when_imported_then_paths_nonempty() -> None:
     assert isinstance(given_usage_path, str) and given_usage_path.startswith("/"), (
         f"USAGE_PATH should be an absolute path str, got {given_usage_path!r}"
     )
+
+
+# =========================================================================
+# Reasoning / thinking normalization tests (RED phase)
+# =========================================================================
+
+
+def test_given_perchai_provider_when_checked_then_has_transform_request_hook() -> None:
+    """Given the PerchaiProvider class, when checked for the transform_request
+    hook, then it must exist so the proxy can apply thinking normalization."""
+    assert hasattr(PerchaiProvider, "transform_request"), (
+        "PerchaiProvider must implement transform_request for thinking normalization"
+    )
+
+
+def test_given_thinking_disabled_when_transform_request_then_thinking_stripped() -> None:
+    """Given a request with extra_body.thinking set to disabled, when
+    transform_request runs, then reasoning_content must be stripped from
+    assistant messages in the conversation (perchai does not require it
+    when thinking is off) and the thinking config must be preserved."""
+    from unittest.mock import MagicMock
+    given_provider = PerchaiProvider()
+    given_kwargs: Dict[str, Any] = {
+        "model": "perchai/bedrock-mantle-google-gemma-4-e2b",
+        "messages": [
+            {"role": "user", "content": "hi"},
+        ],
+        "extra_body": {"thinking": {"type": "disabled"}},
+    }
+    when_result = given_provider.transform_request(given_kwargs, "perchai/bedrock-mantle-google-gemma-4-e2b", "test-cred")
+    then_extra_body = given_kwargs.get("extra_body", {})
+    assert isinstance(when_result, list), f"transform_request must return list of modifications, got {type(when_result)}"
+    assert then_extra_body.get("thinking") == {"type": "disabled"}, (
+        f"thinking config must be preserved, got {then_extra_body!r}"
+    )
+
+
+def test_given_streaming_reasoning_delta_when_thinking_disabled_then_reasoning_stripped() -> None:
+    """Given a perchai stream that emits reasoning_delta events even when
+    thinking is disabled (gemma models do this), when _parse_sse_line
+    processes a reasoning_delta, then it must return None to suppress
+    the reasoning_content chunk - downstream clients like Opencode
+    should not see reasoning_content when thinking is off."""
+    given_line = 'data: {"type":"reasoning_delta","text":"thinking about it"}'
+    given_model = "perchai/bedrock-mantle-google-gemma-4-e2b"
+    given_id_map: dict[int, str] = {}
+    given_name_map: dict[int, str] = {}
+    given_request_tool_names: Dict[int, str] = {}
+    given_thinking_disabled = True
+    when_chunk = PerchaiProvider._parse_sse_line(
+        given_line, given_model, given_id_map, given_name_map,
+        given_request_tool_names, given_thinking_disabled,
+    )
+    assert when_chunk is None, (
+        f"reasoning_delta must be suppressed when thinking disabled, got {when_chunk!r}"
+    )
+
+
+def test_given_streaming_reasoning_delta_when_thinking_enabled_then_reasoning_emitted() -> None:
+    """Given a perchai stream that emits reasoning_delta events when
+    thinking is enabled, when _parse_sse_line processes a reasoning_delta,
+    then it must return a chunk with reasoning_content so downstream
+    clients can display the reasoning."""
+    given_line = 'data: {"type":"reasoning_delta","text":"thinking about it"}'
+    given_model = "perchai/wandb-deepseek-ai-deepseek-v4-flash-0731"
+    given_id_map: dict[int, str] = {}
+    given_name_map: dict[int, str] = {}
+    given_request_tool_names: Dict[int, str] = {}
+    given_thinking_disabled = False
+    when_chunk = PerchaiProvider._parse_sse_line(
+        given_line, given_model, given_id_map, given_name_map,
+        given_request_tool_names, given_thinking_disabled,
+    )
+    assert when_chunk is not None, "reasoning_delta must produce a chunk when thinking enabled"
+    then_delta = when_chunk.choices[0].get("delta") if isinstance(when_chunk.choices[0], dict) else when_chunk.choices[0].delta
+    then_reasoning = then_delta.get("reasoning_content") if isinstance(then_delta, dict) else then_delta.reasoning_content
+    assert then_reasoning == "thinking about it", (
+        f"Expected reasoning_content='thinking about it', got {then_reasoning!r}"
+    )
+
+
+def test_given_non_stream_response_when_thinking_disabled_then_reasoning_stripped() -> None:
+    """Given a non-streaming perchai response that includes reasoning text
+    when thinking was disabled in the request, when the response is parsed,
+    then reasoning_content must NOT be included in the message - clients
+    should not see reasoning when thinking is off."""
+    given_provider = PerchaiProvider()
+    given_response_data = {
+        "text": "Hello!",
+        "reasoning": "I should say hello",
+        "content": [],
+        "toolCalls": [],
+        "usage": {},
+    }
+    given_payload = {
+        "model": "perchai/bedrock-mantle-google-gemma-4-e2b",
+        "messages": [{"role": "user", "content": "hi"}],
+        "extra_body": {"thinking": {"type": "disabled"}},
+        "tools": [],
+    }
+    when_response = given_provider._build_model_response(
+        given_response_data, "perchai/bedrock-mantle-google-gemma-4-e2b", given_payload
+    )
+    then_message = when_response.choices[0].message
+    then_reasoning = getattr(then_message, "reasoning_content", None)
+    assert then_reasoning is None, (
+        f"reasoning_content must be stripped when thinking disabled, got {then_reasoning!r}"
+    )
+    assert then_message.content == "Hello!", (
+        f"content must be preserved, got {then_message.content!r}"
+    )
+
+
+def test_given_non_stream_response_when_thinking_enabled_then_reasoning_preserved() -> None:
+    """Given a non-streaming perchai response that includes reasoning text
+    when thinking was enabled in the request, when the response is parsed,
+    then reasoning_content must be included in the message."""
+    given_provider = PerchaiProvider()
+    given_response_data = {
+        "text": "Hello!",
+        "reasoning": "I should say hello",
+        "content": [],
+        "toolCalls": [],
+        "usage": {},
+    }
+    given_payload = {
+        "model": "perchai/wandb-deepseek-ai-deepseek-v4-flash-0731",
+        "messages": [{"role": "user", "content": "hi"}],
+        "extra_body": {"thinking": {"type": "enabled"}},
+        "tools": [],
+    }
+    when_response = given_provider._build_model_response(
+        given_response_data, "perchai/wandb-deepseek-ai-deepseek-v4-flash-0731", given_payload
+    )
+    then_message = when_response.choices[0].message
+    then_reasoning = getattr(then_message, "reasoning_content", None)
+    assert then_reasoning == "I should say hello", (
+        f"reasoning_content must be preserved when thinking enabled, got {then_reasoning!r}"
+    )
+    assert then_message.content == "Hello!", (
+        f"content must be preserved, got {then_message.content!r}"
+    )

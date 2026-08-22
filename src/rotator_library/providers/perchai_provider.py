@@ -110,6 +110,16 @@ def _extract_tool_names(tools: Optional[List[Dict[str, Any]]]) -> Dict[int, str]
     return result
 
 
+def _is_thinking_disabled(payload: Dict[str, Any]) -> bool:
+    extra_body = payload.get("extra_body")
+    if not isinstance(extra_body, dict):
+        return False
+    thinking = extra_body.get("thinking")
+    if isinstance(thinking, dict) and thinking.get("type") == "disabled":
+        return True
+    return False
+
+
 @final
 class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
     provider_env_name: str = "perchai"
@@ -131,6 +141,25 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
     @override
     def has_custom_logic(self) -> bool:
         return True
+
+    def transform_request(
+        self, kwargs: Dict[str, Any], model: str, credential: str
+    ) -> List[str]:
+        modifications: List[str] = []
+
+        extra_body = kwargs.get("extra_body")
+        if not isinstance(extra_body, dict):
+            extra_body = {}
+        thinking = extra_body.get("thinking")
+        if isinstance(thinking, dict) and thinking.get("type") == "disabled":
+            messages = kwargs.get("messages", [])
+            for msg in messages:
+                if msg.get("role") == "assistant" and "reasoning_content" in msg:
+                    del msg["reasoning_content"]
+                    if not modifications.count("stripped reasoning_content from assistant messages"):
+                        modifications.append("stripped reasoning_content from assistant messages")
+
+        return modifications
 
     @override
     async def get_models(
@@ -418,7 +447,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
             "role": "assistant",
             "content": content_text,
         }
-        if reasoning_text:
+        if reasoning_text and not _is_thinking_disabled(payload):
             message_kwargs["reasoning_content"] = reasoning_text
         if tool_calls_list:
             message_kwargs["tool_calls"] = tool_calls_list
@@ -443,6 +472,55 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         file_logger.log_final_response(response_data)
         return model_response
 
+    def _build_model_response(
+        self,
+        response_data: Dict[str, Any],
+        model: str,
+        payload: Dict[str, Any],
+    ) -> litellm.ModelResponse:
+        content_text: str = response_data.get("text") or ""
+        reasoning_text: str = (
+            response_data.get("reasoning")
+            or response_data.get("thinking")
+            or ""
+        )
+        content_blocks = response_data.get("content")
+        if not content_text and isinstance(content_blocks, list):
+            parts_text: List[str] = []
+            parts_reasoning: List[str] = []
+            for block in content_blocks:
+                if not isinstance(block, dict):
+                    continue
+                block_text = block.get("text", "")
+                block_type = block.get("type", "")
+                if block_type in ("reasoning", "thinking", "reasoning_content"):
+                    parts_reasoning.append(block_text)
+                elif block_type in ("text",) or not block_type:
+                    parts_text.append(block_text)
+            content_text = "".join(parts_text)
+            if not reasoning_text:
+                reasoning_text = "".join(parts_reasoning)
+
+        message_kwargs: Dict[str, Any] = {
+            "role": "assistant",
+            "content": content_text,
+        }
+        if reasoning_text and not _is_thinking_disabled(payload):
+            message_kwargs["reasoning_content"] = reasoning_text
+
+        choices_list = [
+            litellm.Choices(
+                finish_reason="stop",
+                index=0,
+                message=litellm.Message(**message_kwargs),
+            )
+        ]
+        return litellm.ModelResponse(
+            id=response_data.get("id") or str(uuid.uuid4()),
+            choices=choices_list,
+            model=model,
+        )
+
     async def _stream_completion(
         self,
         client: httpx.AsyncClient,
@@ -466,6 +544,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         tool_call_id_map: Dict[int, str] = {}
         tool_call_name_map: Dict[int, str] = {}
         request_tool_names = _extract_tool_names(payload.get("tools"))
+        thinking_disabled = _is_thinking_disabled(payload)
 
         for attempt in range(2):
             stream_headers = dict(build_headers(token))
@@ -524,7 +603,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
 
                     stream_chunk = self._parse_sse_line(
                         line, model, tool_call_id_map, tool_call_name_map,
-                        request_tool_names,
+                        request_tool_names, thinking_disabled,
                     )
                     if stream_chunk is not None:
                         # _parse_sse_line emits finish_reason="tool_calls"
@@ -751,6 +830,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         tool_call_id_map: Optional[Dict[int, str]] = None,
         tool_call_name_map: Optional[Dict[int, str]] = None,
         request_tool_names: Optional[Dict[int, str]] = None,
+        thinking_disabled: bool = False,
     ) -> Optional[litellm.ModelResponseStream]:
         if not isinstance(line, str) or not line.startswith("data:"):
             return None
@@ -871,6 +951,8 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
             )
 
         if event_type == "reasoning_delta":
+            if thinking_disabled:
+                return None
             text = (parsed_event.get("text") or "").rstrip()
             return litellm.ModelResponseStream(
                 id=f"chatcmpl-perchai-stream-{int(time.time())}",

@@ -78,9 +78,6 @@ PERCHAI_ERROR_CODE_CASES = [
 
 
 def test_perchai_in_plugins() -> None:
-    """Given the providers package is imported, when the plugin auto-discovery
-    runs, then the ``perchai`` plugin must be registered in PROVIDER_PLUGINS.
-    """
     given_plugins = PROVIDER_PLUGINS
     when_checked = "perchai"
     then_asserted = when_checked in given_plugins
@@ -91,10 +88,6 @@ def test_perchai_in_plugins() -> None:
 
 
 def test_has_custom_logic_true() -> None:
-    """Given the PerchaiProvider class, when instantiated (singleton), then
-    ``has_custom_logic()`` must return ``True`` so the rotator knows to
-    route through our custom acompletion() implementation.
-    """
     given_provider = PerchaiProvider()
     when_called = given_provider.has_custom_logic()
     then_returned = when_called is True
@@ -176,10 +169,6 @@ def test_malformed_body_returns_none() -> None:
 
 @pytest.mark.asyncio
 async def test_empty_messages_raises_valueerror() -> None:
-    """Given acompletion() is called with empty messages, when the provider
-    validates input, then it must raise ``ValueError`` BEFORE attempting
-    any HTTP I/O.
-    """
     given_client = None
     given_kwargs: Dict[str, Any] = {
         "model": "perchai/test-model",
@@ -514,10 +503,6 @@ def test_multiple_tool_call_deltas_reuse_same_synthetic_id() -> None:
 
 
 def test_perchai_in_oauth_dirs() -> None:
-    """Given the credential manager module is loaded, when DEFAULT_OAUTH_DIRS
-    is inspected, then ``perchai`` must be present pointing at
-    ``~/.perch`` (the actual CLI directory, not ``~/.perchai``).
-    """
     given_dirs = DEFAULT_OAUTH_DIRS
     when_checked = "perchai"
     then_present = when_checked in given_dirs
@@ -531,10 +516,6 @@ def test_perchai_in_oauth_dirs() -> None:
 
 
 def test_perchai_in_env_oauth() -> None:
-    """Given ENV_OAUTH_PROVIDERS is populated, when checked, then
-    ``perchai`` must map to the ``PERCHAI`` env-var prefix for stateless
-    deployments (PERCHAI_ACCESS_TOKEN / PERCHAI_N_ACCESS_TOKEN).
-    """
     given_env_map = ENV_OAUTH_PROVIDERS
     when_checked = "perchai"
     then_present = when_checked in given_env_map
@@ -548,10 +529,6 @@ def test_perchai_in_env_oauth() -> None:
 
 
 def test_perchai_in_provider_factory() -> None:
-    """Given the provider factory module is loaded, when PROVIDER_MAP is
-    inspected, then ``perchai`` must be present and resolve to a real
-    auth class (PerchaiAuthBase) - not ``None`` or a placeholder.
-    """
     given_map = PROVIDER_MAP
     when_checked = "perchai"
     then_present = when_checked in given_map
@@ -568,10 +545,6 @@ def test_perchai_in_provider_factory() -> None:
 
 
 def test_perchai_in_provider_config() -> None:
-    """Given the provider_config module is loaded, when LITELLM_PROVIDERS
-    is inspected, then ``perchai`` must be present with a real category
-    dict (not missing, not ``None``).
-    """
     given_config = LITELLM_PROVIDERS
     when_checked = "perchai"
     then_present = when_checked in given_config
@@ -585,10 +558,6 @@ def test_perchai_in_provider_config() -> None:
 
 
 def test_perchai_in_provider_url_map() -> None:
-    """Given the proxy_app provider_urls module is loaded, when
-    PROVIDER_URL_MAP is inspected, then ``perchai`` must be present
-    pointing at the upstream app URL.
-    """
     given_url_map = PROVIDER_URL_MAP
     when_checked = "perchai"
     then_present = when_checked in given_url_map
@@ -1285,10 +1254,6 @@ def test_build_payload_strips_effort_when_thinking_disabled() -> None:
 
 
 def test_singleton_same_instance() -> None:
-    """Given the PerchaiProvider class uses SingletonABCMeta, when
-    instantiated twice, then both calls must return the same instance
-    so caches and state are shared (matching the singleton pattern
-    tested in test_provider_plugins.py)."""
     given_first = PerchaiProvider()
     given_second = PerchaiProvider()
     then_same = given_first is given_second
@@ -1299,10 +1264,6 @@ def test_singleton_same_instance() -> None:
 
 
 def test_get_model_tier_requirement_returns_none() -> None:
-    """Given the PerchaiProvider, when get_model_tier_requirement is
-    called for any model, then it must return None (no tier restrictions)
-    matching the ProviderInterface default tested in
-    test_provider_plugins.py."""
     given_provider = PerchaiProvider()
     when_result = given_provider.get_model_tier_requirement("bedrock-mantle-google-gemma-4-31b")
     assert when_result is None, (
@@ -1311,9 +1272,6 @@ def test_get_model_tier_requirement_returns_none() -> None:
 
 
 def test_get_credential_priority_returns_none() -> None:
-    """Given the PerchaiProvider, when get_credential_priority is
-    called, then it must return None (not yet discovered) matching the
-    ProviderInterface default tested in test_provider_plugins.py."""
     given_provider = PerchaiProvider()
     when_result = given_provider.get_credential_priority("any-key")
     assert when_result is None, (
@@ -1322,9 +1280,6 @@ def test_get_credential_priority_returns_none() -> None:
 
 
 def test_skip_cost_calculation_is_true() -> None:
-    """Given the PerchaiProvider class, when skip_cost_calculation is
-    checked, then it must be True so the proxy doesn't attempt
-    litellm cost calculation for this provider."""
     given_provider = PerchaiProvider()
     assert given_provider.skip_cost_calculation is True, (
         f"skip_cost_calculation should be True, got {given_provider.skip_cost_calculation!r}"
@@ -1332,9 +1287,6 @@ def test_skip_cost_calculation_is_true() -> None:
 
 
 def test_default_rotation_mode_is_sequential() -> None:
-    """Given the PerchaiProvider class, when default_rotation_mode is
-    checked, then it must be 'sequential' so the rotator uses one
-    credential until it errors (preserving perchai cache locality)."""
     given_provider = PerchaiProvider()
     assert given_provider.default_rotation_mode == "sequential", (
         f"rotation mode should be 'sequential', got {given_provider.default_rotation_mode!r}"
@@ -1347,11 +1299,6 @@ def test_default_rotation_mode_is_sequential() -> None:
 
 
 def test_plain_request_does_not_auto_enable_thinking() -> None:
-    """Given a perchai request with no thinking config in extra_body,
-    when _build_payload runs, then the payload must NOT contain a
-    'thinking' key - perchai should not auto-enable thinking (matching
-    the vertex provider pattern where plain requests don't inject
-    thinking config)."""
     given_kwargs: Dict[str, Any] = {
         "model": "perchai/bedrock-mantle-google-gemma-4-31b",
         "messages": [{"role": "user", "content": "hi"}],
@@ -1371,11 +1318,6 @@ def test_plain_request_does_not_auto_enable_thinking() -> None:
 
 
 def test_reasoning_effort_passes_through_without_thinking_config() -> None:
-    """Given a perchai request with reasoning_effort but no thinking
-    config (e.g. a client sets reasoning_effort directly), when
-    _build_payload runs, then reasoning_effort must pass through to
-    the payload (matching the vertex pattern where reasoning_effort
-    passes through without thinking config)."""
     given_kwargs: Dict[str, Any] = {
         "model": "perchai/bedrock-mantle-google-gemma-4-31b",
         "messages": [{"role": "user", "content": "hi"}],

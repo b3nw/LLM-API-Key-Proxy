@@ -1,6 +1,16 @@
-# core — Infrastructure Improvements
+# core - Infrastructure Improvements
 
-## 2026-06-22 — Extend reasoning tag handling for `<think>`/`</think>`
+## 2026-08-23: wrap_stream drops finish_reason when no usage tokens
+
+Perchai (and any provider that doesn't send usage tokens) lost `finish_reason: "tool_calls"` because `wrap_stream` only forwards it on the chunk that has usage. Without a finish_reason the client thinks the response ended normally and re-sends the request - loop.
+
+Fix in `streaming.py`: track `finish_reason_emitted`. If the stream completes and we never sent one, synthesize a final chunk with the accumulated `finish_reason` before `[DONE]`.
+
+Related: `transforms.py` Perchai exemption from `_guard_thinking_tool_calls` and the `extra_body` merge fix, plus `model_definitions.py` looking up by `id` field.
+
+See `.fork/features/perchai.md` for the full tool-call loop fix.
+
+## 2026-06-22 - Extend reasoning tag handling for `<think>`/`</think>`
 
 Target: `feat(core): infrastructure improvements - latest aliases, error standardization, and utilities`
 Files:

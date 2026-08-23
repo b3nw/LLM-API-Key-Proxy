@@ -573,6 +573,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
 
         saw_done = False
         saw_tool_call = False
+        tool_call_finish_emitted = False
         stream_id = f"chatcmpl-perchai-stream-{int(time.time())}"
         tool_call_id_map: Dict[int, str] = {}
         tool_call_name_map: Dict[int, str] = {}
@@ -615,8 +616,21 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                     data_str = line[len("data:"):].strip()
                     if data_str == "[DONE]":
                         saw_done = True
-                        # tool_use_end already yielded the terminating
-                        # tool_calls chunk; skip emitting a redundant stop.
+                        if saw_tool_call and not tool_call_finish_emitted:
+                            yield litellm.ModelResponseStream(
+                                id=stream_id,
+                                created=int(time.time()),
+                                model=model,
+                                object="chat.completion.chunk",
+                                choices=[
+                                    {
+                                        "index": 0,
+                                        "delta": {},
+                                        "finish_reason": "tool_calls",
+                                    }
+                                ],
+                            )
+                            return
                         if saw_tool_call:
                             return
                         yield litellm.ModelResponseStream(
@@ -658,7 +672,19 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                         except Exception:
                             chunk_finish_reason = None
                         if chunk_finish_reason == "tool_calls":
+                            if tool_call_finish_emitted:
+                                continue
                             saw_tool_call = True
+                            tool_call_finish_emitted = True
+                        elif chunk_finish_reason is None:
+                            try:
+                                chunk_delta = first_choice.get("delta") if isinstance(first_choice, dict) else getattr(first_choice, "delta", None)
+                                if chunk_delta:
+                                    tc_list = chunk_delta.get("tool_calls") if isinstance(chunk_delta, dict) else getattr(chunk_delta, "tool_calls", None)
+                                    if tc_list:
+                                        saw_tool_call = True
+                            except Exception:
+                                pass
                         yield stream_chunk
             finally:
                 await ctx.__aexit__(None, None, None)
@@ -894,65 +920,14 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         event_type = parsed_event.get("type") or parsed_event.get("event") or ""
 
         if event_type == "tool_call_delta":
-            # Defensive: perchai currently returns toolCalls[] only in the
-            # non-stream response; this handles a hypothetical streaming variant.
-            tc_id = parsed_event.get("id")
-            tc_name = parsed_event.get("name")
-            tc_arguments = parsed_event.get("arguments")
-            tc_index = parsed_event.get("index", 0)
-            # Perchai may not send id/name in streaming tool_call_delta events.
-            # Generate synthetic values and track per index so subsequent deltas
-            # for the same tool call use the same id/name (required by @ai-sdk).
-            if tool_call_id_map is not None:
-                if tc_id is not None:
-                    tool_call_id_map[tc_index] = tc_id
-                elif tc_index in tool_call_id_map:
-                    tc_id = tool_call_id_map[tc_index]
-                else:
-                    tc_id = f"call_{tc_index}"
-                    tool_call_id_map[tc_index] = tc_id
-            if tool_call_name_map is not None:
-                if tc_name is not None:
-                    tool_call_name_map[tc_index] = tc_name
-                elif tc_index in tool_call_name_map:
-                    tc_name = tool_call_name_map[tc_index]
-                elif request_tool_names and tc_index in request_tool_names:
-                    tc_name = request_tool_names[tc_index]
-                    tool_call_name_map[tc_index] = tc_name
-                else:
-                    tc_name = f"function_{tc_index}"
-                    tool_call_name_map[tc_index] = tc_name
-            if isinstance(tc_arguments, dict):
-                arguments_str = json.dumps(tc_arguments, ensure_ascii=False)
-            elif isinstance(tc_arguments, str):
-                arguments_str = tc_arguments
-            else:
-                arguments_str = ""
-            function_delta: Dict[str, Any] = {}
-            if tc_name is not None:
-                function_delta["name"] = tc_name
-            if tc_arguments is not None:
-                function_delta["arguments"] = arguments_str
-            tool_call_delta: Dict[str, Any] = {
-                "index": tc_index,
-                "type": "function",
-            }
-            if tc_id is not None:
-                tool_call_delta["id"] = tc_id
-            tool_call_delta["function"] = function_delta
-            return litellm.ModelResponseStream(
-                id=f"chatcmpl-perchai-stream-{int(time.time())}",
-                created=int(time.time()),
-                model=model,
-                object="chat.completion.chunk",
-                choices=[
-                    {
-                        "index": 0,
-                        "delta": {"tool_calls": [tool_call_delta]},
-                        "finish_reason": None,
-                    }
-                ],
-            )
+            # Perchai sends tool_call_delta events as intermediate probes
+            # with incorrect tool names and empty arguments. The actual
+            # tool call (correct name + complete arguments) arrives in
+            # the done event's toolCalls field. Emitting both confuses
+            # clients: they pick up the probe name (e.g. ast_grep_replace)
+            # and ignore the real call from done (e.g. bash).
+            # Skip these probes entirely; done.toolCalls has the real data.
+            return None
 
         if event_type == "tool_use_end":
             # Final chunk of a tool-calling turn; empty delta + finish_reason
@@ -1027,8 +1002,22 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                 for tc_idx, tc in enumerate(raw_tool_calls):
                     if not isinstance(tc, dict):
                         continue
-                    tc_id = tc.get("id") or f"call_{tc_idx}"
+                    # If tool_call_delta events already emitted a synthetic
+                    # ID for this index, reuse THAT id - not the real UUID
+                    # from the done event.  Using two different IDs for the
+                    # same index confuses clients: they send the tool result
+                    # with the wrong tool_call_id and the model loops.
+                    if tool_call_id_map and tc_idx in tool_call_id_map:
+                        tc_id = tool_call_id_map[tc_idx]
+                    else:
+                        tc_id = tc.get("id") or f"call_{tc_idx}"
                     tc_name = tc.get("name")
+                    if (
+                        not tc_name
+                        and tool_call_name_map
+                        and tc_idx in tool_call_name_map
+                    ):
+                        tc_name = tool_call_name_map[tc_idx]
                     tc_arguments = tc.get("arguments", "")
                     if isinstance(tc_arguments, dict):
                         arguments_str = json.dumps(tc_arguments, ensure_ascii=False)
@@ -1055,7 +1044,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                         {
                             "index": 0,
                             "delta": {"tool_calls": tool_call_deltas},
-                            "finish_reason": "tool_calls",
+                            "finish_reason": None,
                         }
                     ],
                 )

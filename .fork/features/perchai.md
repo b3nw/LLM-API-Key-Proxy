@@ -1,5 +1,30 @@
 # Perchai Provider Feature History
 
+## 2026-08-23: Fix tool-call loop
+
+Perchai was firing `tool_call_delta` SSE events as probes - wrong tool names (e.g. `ast_grep_replace`), empty args. The real call only shows up later in `done.toolCalls`. Proxy emitted both, client picked up the probe name from the first delta, executed the wrong tool, got an error, fed the error back, model tried the same wrong tool again. Loop.
+
+Pulled from the transaction logs: requests showed `ast_grep_replace` firing over and over with `{"entity":"user"}` args and `invalid value 'undefined' for '--lang'` errors. Model actually wanted `bash`.
+
+Two bugs working together:
+
+1. `tool_call_delta` events got through to the client. They shouldn't - they're probes.
+2. `wrap_stream` strips `finish_reason` from any chunk that doesn't carry usage tokens. Perchai never sends usage. So `finish_reason: "tool_calls"` was silently dropped, client never saw it.
+
+What I changed:
+
+- `perchai_provider.py` - `_parse_sse_line` returns `None` for `tool_call_delta`. Only `done.toolCalls` emits tool calls. Added `tool_call_finish_emitted` flag so we don't double-emit `finish_reason: "tool_calls"` and added a terminal chunk when `done` lands after tool deltas.
+- `streaming.py` - track `finish_reason_emitted`. If the stream ends and nothing reached the client, synthesize a final chunk with the accumulated `finish_reason` before `[DONE]`.
+- `transforms.py` - Perchai is exempt from `_guard_thinking_tool_calls`, and fixed how `extra_body` merges with model options.
+- `model_definitions.py` - `get_model_definition` now also looks at the `id` field, supports multi-segment keys.
+- `tests/test_perchai_provider.py` - updated the 6 delta tests to assert `None`, added tests for done-event real UUID, wrap_stream finish_reason, and the thinking guard exemption. 82 pass.
+
+Confirmed with a curl test: only `done.toolCalls` shows up, `finish_reason: "tool_calls"` is there.
+
+**Rebuild gotcha**: PyInstaller `--onefile` caches bytecode in `build/` and `__pycache__/`. Wipe both before rebuilding or stale code ends up in the binary. Check the PYZ archive for `finish_reason_emitted` in `rotator_library.client.streaming` co_varnames to confirm the new code is actually shipped.
+
+**Debug tip**: `--enable-request-logging` writes per-request dirs to `/usr/local/bin/logs/transactions/`. The `request.json` `data` key has the full payload going to Perchai.
+
 ## 2026-08-23: Align tests with other provider patterns
 
 **Branch**: `feat/provider-app.perchai`

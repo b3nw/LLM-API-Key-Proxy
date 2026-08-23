@@ -214,11 +214,11 @@ def test_reasoning_delta_produces_reasoning_chunk() -> None:
 async def test_stream_without_tool_id_has_synthetic_id() -> None:
     from unittest.mock import AsyncMock, MagicMock
 
-    # Simulate Perchai SSE stream: tool_call_delta without id/name
     given_sse_lines = [
         'data: {"type":"tool_call_delta","index":0,"arguments":"{\\"x\\": 1}"}',
         'data: {"type":"tool_call_delta","index":0,"arguments":"{\\"y\\": 2}"}',
         'data: {"type":"tool_use_end"}',
+        'data: {"type":"done","ok":true,"toolCalls":[{"id":"call_0","name":"my_func","arguments":"{\\"x\\": 1, \\"y\\": 2}"}]}',
         'data: [DONE]',
     ]
 
@@ -310,7 +310,7 @@ async def test_stream_without_tool_id_has_synthetic_id() -> None:
             )
 
 
-def test_tool_call_delta_without_id_emits_synthetic_id() -> None:
+def test_tool_call_delta_events_are_skipped_as_probes() -> None:
     given_line = 'data: {"type":"tool_call_delta","index":0,"name":"my_func","arguments":"{\\"x\\": 1}"}'
     given_model = "perchai/test-model"
     given_id_map: dict[int, str] = {}
@@ -318,21 +318,12 @@ def test_tool_call_delta_without_id_emits_synthetic_id() -> None:
     when_parsed = PerchaiProvider._parse_sse_line(
         given_line, given_model, given_id_map, given_name_map
     )
-    then_chunk = when_parsed
-    assert then_chunk is not None, "tool_call_delta should produce a chunk"
-    then_choices = then_chunk.choices
-    assert then_choices, "chunk has no choices"
-    then_delta = then_choices[0].get("delta") if isinstance(then_choices[0], dict) else then_choices[0].delta
-    then_tool_calls = then_delta.get("tool_calls") if isinstance(then_delta, dict) else then_delta.tool_calls
-    assert then_tool_calls, "chunk has no tool_calls"
-    then_first_call = then_tool_calls[0]
-    then_id = then_first_call.get("id") if isinstance(then_first_call, dict) else then_first_call.id
-    assert then_id is not None, f"tool_call missing id, got {then_first_call!r}"
-    assert isinstance(then_id, str), f"tool_call.id must be string, got {type(then_id)}"
-    assert then_id == "call_0", f"Expected synthetic id 'call_0', got {then_id!r}"
+    assert when_parsed is None
+    assert len(given_id_map) == 0
+    assert len(given_name_map) == 0
 
 
-def test_tool_call_delta_without_name_emits_synthetic_name() -> None:
+def test_tool_call_delta_without_name_skipped() -> None:
     given_line = 'data: {"type":"tool_call_delta","index":0,"id":"call_abc","arguments":"{\\"x\\": 1}"}'
     given_model = "perchai/test-model"
     given_id_map: dict[int, str] = {}
@@ -340,22 +331,10 @@ def test_tool_call_delta_without_name_emits_synthetic_name() -> None:
     when_parsed = PerchaiProvider._parse_sse_line(
         given_line, given_model, given_id_map, given_name_map
     )
-    then_chunk = when_parsed
-    assert then_chunk is not None, "tool_call_delta should produce a chunk"
-    then_choices = then_chunk.choices
-    assert then_choices, "chunk has no choices"
-    then_delta = then_choices[0].get("delta") if isinstance(then_choices[0], dict) else then_choices[0].delta
-    then_tool_calls = then_delta.get("tool_calls") if isinstance(then_delta, dict) else then_delta.tool_calls
-    assert then_tool_calls, "chunk has no tool_calls"
-    then_first_call = then_tool_calls[0]
-    then_function = then_first_call.get("function") if isinstance(then_first_call, dict) else then_first_call.function
-    then_name = then_function.get("name") if isinstance(then_function, dict) else then_function.name
-    assert then_name is not None, f"function missing name, got {then_function!r}"
-    assert isinstance(then_name, str), f"function.name must be string, got {type(then_name)}"
-    assert then_name == "function_0", f"Expected synthetic name 'function_0', got {then_name!r}"
+    assert when_parsed is None
 
 
-def test_tool_call_delta_without_name_uses_real_name_from_request() -> None:
+def test_tool_call_delta_with_request_tool_names_skipped() -> None:
     given_line = 'data: {"type":"tool_call_delta","index":0,"id":"call_abc","arguments":"{\\"path\\": \\"/tmp\\"}"}'
     given_model = "perchai/test-model"
     given_id_map: dict[int, str] = {}
@@ -365,20 +344,10 @@ def test_tool_call_delta_without_name_uses_real_name_from_request() -> None:
         given_line, given_model, given_id_map, given_name_map,
         given_request_tool_names,
     )
-    then_chunk = when_parsed
-    assert then_chunk is not None, "tool_call_delta should produce a chunk"
-    then_choices = then_chunk.choices
-    then_delta = then_choices[0].get("delta") if isinstance(then_choices[0], dict) else then_choices[0].delta
-    then_tool_calls = then_delta.get("tool_calls") if isinstance(then_delta, dict) else then_delta.tool_calls
-    then_first_call = then_tool_calls[0]
-    then_function = then_first_call.get("function") if isinstance(then_first_call, dict) else then_first_call.function
-    then_name = then_function.get("name") if isinstance(then_function, dict) else then_function.name
-    assert then_name == "read", (
-        f"Expected real tool name 'read' from request tools, got {then_name!r}"
-    )
+    assert when_parsed is None
 
 
-def test_tool_call_delta_index_mismatch_falls_back_to_synthetic() -> None:
+def test_tool_call_delta_index_mismatch_skipped() -> None:
     given_line = 'data: {"type":"tool_call_delta","index":2,"arguments":"{}"}'
     given_model = "perchai/test-model"
     given_id_map: dict[int, str] = {}
@@ -388,18 +357,10 @@ def test_tool_call_delta_index_mismatch_falls_back_to_synthetic() -> None:
         given_line, given_model, given_id_map, given_name_map,
         given_request_tool_names,
     )
-    then_chunk = when_parsed
-    assert then_chunk is not None
-    then_delta = then_chunk.choices[0].get("delta") if isinstance(then_chunk.choices[0], dict) else then_chunk.choices[0].delta
-    then_tool_calls = then_delta.get("tool_calls") if isinstance(then_delta, dict) else then_delta.tool_calls
-    then_function = then_tool_calls[0].get("function") if isinstance(then_tool_calls[0], dict) else then_tool_calls[0].function
-    then_name = then_function.get("name") if isinstance(then_function, dict) else then_function.name
-    assert then_name == "function_2", (
-        f"Expected synthetic 'function_2' for out-of-range index, got {then_name!r}"
-    )
+    assert when_parsed is None
 
 
-def test_multiple_tool_call_deltas_reuse_same_synthetic_id() -> None:
+def test_multiple_tool_call_deltas_all_skipped() -> None:
     given_line1 = 'data: {"type":"tool_call_delta","index":0,"arguments":"{\\"x\\": 1}"}'
     given_line2 = 'data: {"type":"tool_call_delta","index":0,"arguments":"{\\"y\\": 2}"}'
     given_model = "perchai/test-model"
@@ -411,21 +372,8 @@ def test_multiple_tool_call_deltas_reuse_same_synthetic_id() -> None:
     when_parsed2 = PerchaiProvider._parse_sse_line(
         given_line2, given_model, given_id_map, given_name_map
     )
-    then_chunk1 = when_parsed1
-    then_chunk2 = when_parsed2
-    assert then_chunk1 is not None and then_chunk2 is not None
-    then_delta1 = then_chunk1.choices[0].get("delta") if isinstance(then_chunk1.choices[0], dict) else then_chunk1.choices[0].delta
-    then_delta2 = then_chunk2.choices[0].get("delta") if isinstance(then_chunk2.choices[0], dict) else then_chunk2.choices[0].delta
-    then_tc1 = (then_delta1.get("tool_calls") if isinstance(then_delta1, dict) else then_delta1.tool_calls)[0]
-    then_tc2 = (then_delta2.get("tool_calls") if isinstance(then_delta2, dict) else then_delta2.tool_calls)[0]
-    then_id1 = then_tc1.get("id") if isinstance(then_tc1, dict) else then_tc1.id
-    then_id2 = then_tc2.get("id") if isinstance(then_tc2, dict) else then_tc2.id
-    assert then_id1 == then_id2, f"Synthetic id changed between chunks: {then_id1!r} vs {then_id2!r}"
-    then_fn1 = then_tc1.get("function") if isinstance(then_tc1, dict) else then_tc1.function
-    then_fn2 = then_tc2.get("function") if isinstance(then_tc2, dict) else then_tc2.function
-    then_name1 = then_fn1.get("name") if isinstance(then_fn1, dict) else then_fn1.name
-    then_name2 = then_fn2.get("name") if isinstance(then_fn2, dict) else then_fn2.name
-    assert then_name1 == then_name2, f"Synthetic name changed between chunks: {then_name1!r} vs {then_name2!r}"
+    assert when_parsed1 is None
+    assert when_parsed2 is None
 
 
 def test_perchai_in_oauth_dirs() -> None:
@@ -1302,7 +1250,7 @@ def test_extract_dollar_fields_account_no_entitlements_cap_zero() -> None:
     )
 
 
-def test_guard_thinking_tool_calls_handles_perchai() -> None:
+def test_guard_thinking_tool_calls_exempts_perchai() -> None:
     from rotator_library.client.transforms import ProviderTransforms
 
     given_transforms = ProviderTransforms(provider_plugins={})
@@ -1336,16 +1284,18 @@ def test_guard_thinking_tool_calls_handles_perchai() -> None:
         given_kwargs, "perchai/bedrock-mantle-google-gemma-4-e2b", "perchai"
     )
 
-    then_disabled = when_result is not None
-    assert then_disabled, (
-        f"_guard_thinking_tool_calls should inject thinking:disabled "
-        f"for perchai provider when reasoning_content is missing, got: {when_result!r}"
+    then_exempt = when_result is None
+    assert then_exempt, (
+        f"_guard_thinking_tool_calls must NOT disable thinking for perchai. "
+        f"The Perch CLI never sends reasoning_content and never disables thinking. "
+        f"Disabling thinking makes deepseek unable to reason about tool results. "
+        f"Got: {when_result!r}"
     )
-    then_thinking_disabled = (
-        given_kwargs.get("extra_body", {}).get("thinking", {}).get("type") == "disabled"
+    then_no_thinking = "thinking" not in (
+        given_kwargs.get("extra_body") or {}
     )
-    assert then_thinking_disabled, (
-        f"extra_body should contain thinking:disabled for perchai, "
+    assert then_no_thinking, (
+        f"extra_body must not contain thinking key for perchai, "
         f"got: {given_kwargs.get('extra_body')!r}"
     )
 
@@ -1556,9 +1506,17 @@ def test_parse_sse_done_event_with_tool_calls() -> None:
     assert when_chunk is not None, (
         "done event with toolCalls should produce a chunk, got None"
     )
-    then_finish = when_chunk.choices[0].finish_reason == "tool_calls"
-    assert then_finish, (
-        f"done event with toolCalls should have finish_reason=tool_calls, "
+    delta = when_chunk.choices[0].delta
+    tool_calls = delta.get("tool_calls") if isinstance(delta, dict) else getattr(delta, "tool_calls", None)
+    then_has_tool_calls = tool_calls is not None and len(tool_calls) > 0
+    assert then_has_tool_calls, (
+        f"done event with toolCalls should have tool_call deltas, "
+        f"got delta: {delta!r}"
+    )
+    then_finish_is_none = when_chunk.choices[0].finish_reason is None
+    assert then_finish_is_none, (
+        f"done event must NOT emit finish_reason=tool_calls. "
+        f"finish_reason should be None to avoid duplicate tool dispatch. "
         f"got: {when_chunk.choices[0].finish_reason!r}"
     )
 
@@ -1635,10 +1593,12 @@ def test_red_parse_sse_done_event_with_tool_calls() -> None:
         "done event with toolCalls must produce a chunk. "
         "OLD CODE silently dropped done events - tool calls were lost."
     )
-    then_finish = when_chunk.choices[0].finish_reason == "tool_calls"
-    assert then_finish, (
-        f"done event with toolCalls must set finish_reason=tool_calls. "
-        f"Got: {when_chunk.choices[0].finish_reason!r}"
+    delta = when_chunk.choices[0].delta
+    tool_calls = delta.get("tool_calls") if isinstance(delta, dict) else getattr(delta, "tool_calls", None)
+    then_has_tool_calls = tool_calls is not None and len(tool_calls) > 0
+    assert then_has_tool_calls, (
+        f"done event with toolCalls must have tool_call deltas. "
+        f"Got delta: {delta!r}"
     )
 
 
@@ -1662,3 +1622,205 @@ def test_red_envelope_does_not_send_promo_overflow_false() -> None:
         f"envelope must include strictManual field. "
         f"Got: {when_envelope!r}"
     )
+
+
+def test_given_tool_use_end_then_done_with_toolcalls_then_done_must_not_emit_duplicate_tool_calls() -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    given_sse_lines = [
+        'data: {"type":"tool_call_delta","index":0,"toolCalls":[{"id":"call_0","name":"ast_grep_replace","arguments":"{\\"pattern\\":\\"test\\"}"}]}',
+        'data: {"type":"tool_use_end"}',
+        'data: {"type":"done","ok":true,"text":"","toolCalls":[{"id":"call_0","name":"ast_grep_replace","arguments":"{\\"pattern\\":\\"test\\"}"}]}',
+        'data: [DONE]',
+    ]
+
+    given_response = MagicMock()
+    given_response.status_code = 200
+
+    async def mock_aiter_lines():
+        for line in given_sse_lines:
+            yield line
+
+    given_response.aiter_lines = mock_aiter_lines
+    given_response.aread = AsyncMock()
+
+    given_context = AsyncMock()
+    given_context.__aenter__ = AsyncMock(return_value=given_response)
+    given_context.__aexit__ = AsyncMock(return_value=None)
+
+    given_client = MagicMock()
+    given_client.stream = MagicMock(return_value=given_context)
+
+    given_provider = PerchaiProvider()
+    given_logger = MagicMock()
+    given_logger.log_response_chunk = MagicMock()
+
+    import asyncio
+    chunks = []
+    async def collect():
+        async for chunk in given_provider._stream_completion(
+            client=given_client,
+            url="https://api.perchai.com/v1/chat",
+            build_headers=lambda t: {"Authorization": "Bearer fake"},
+            token="fake",
+            payload={
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "test"}],
+                "stream": True,
+                "tools": [{"type": "function", "function": {"name": "ast_grep_replace"}}],
+            },
+            model="perchai/test-model",
+            file_logger=given_logger,
+            credential_identifier="test-cred",
+        ):
+            chunks.append(chunk)
+
+    asyncio.run(collect())
+
+    tool_call_finish_chunks = [
+        c for c in chunks
+        if c.choices and c.choices[0].finish_reason == "tool_calls"
+    ]
+    then_one = len(tool_call_finish_chunks) == 1
+    assert then_one, (
+        f"exactly 1 tool_calls finish chunk expected, got {len(tool_call_finish_chunks)}. "
+        f"Multiple causes the model to call the same tool in a loop. "
+        f"Chunks: {[(c.choices[0].finish_reason, c.choices[0].delta) for c in chunks]}"
+    )
+
+
+def test_given_done_event_only_with_toolcalls_then_finish_reason_is_tool_calls() -> None:
+    given_done_chunk = PerchaiProvider._parse_sse_line(
+        'data: {"type":"done","ok":true,"text":"","toolCalls":[{"id":"call_0","name":"bash","arguments":"{}"}]}'
+    )
+
+    then_has_tool_call_deltas = (
+        given_done_chunk is not None
+        and given_done_chunk.choices[0].delta is not None
+    )
+    assert then_has_tool_call_deltas, "done event with toolCalls must emit tool_call deltas"
+
+    delta = given_done_chunk.choices[0].delta
+    tool_calls = delta.get("tool_calls") if isinstance(delta, dict) else getattr(delta, "tool_calls", None)
+    then_tool_calls_present = tool_calls is not None and len(tool_calls) > 0
+    assert then_tool_calls_present, (
+        f"done event must include tool_call deltas in delta. "
+        f"Got: {delta!r}"
+    )
+
+
+def test_wrap_stream_emits_finish_reason_tool_calls_when_provider_has_no_usage() -> None:
+    """Given a provider stream with tool_calls but no usage tokens,
+    wrap_stream must synthesize a final chunk with finish_reason=tool_calls
+    before yielding [DONE].
+
+    Providers like Perchai never include usage in stream chunks.
+    Without this fix, the streaming wrapper strips finish_reason from all
+    chunks (because is_final_chunk is never true without usage), and the
+    client never sees finish_reason=tool_calls. The client then treats the
+    response as a normal stop, causing it to re-request in a loop.
+    """
+    import asyncio
+    from rotator_library.client.streaming import StreamingHandler
+
+    given_chunks = [
+        {
+            "id": "chatcmpl-test",
+            "created": 1234567890,
+            "model": "perchai/test-model",
+            "object": "chat.completion.chunk",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_0",
+                                "type": "function",
+                                "function": {
+                                    "name": "bash",
+                                    "arguments": "{}",
+                                },
+                            }
+                        ]
+                    },
+                    "finish_reason": None,
+                }
+            ],
+        },
+        {
+            "id": "chatcmpl-test",
+            "created": 1234567890,
+            "model": "perchai/test-model",
+            "object": "chat.completion.chunk",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "tool_calls",
+                }
+            ],
+        },
+    ]
+
+    async def mock_stream():
+        for chunk in given_chunks:
+            yield chunk
+
+    given_handler = StreamingHandler()
+    given_model = "perchai/test-model"
+
+    collected_sse = []
+    async def collect():
+        async for sse in given_handler.wrap_stream(
+            stream=mock_stream(),
+            credential="fake-cred",
+            model=given_model,
+        ):
+            collected_sse.append(sse)
+
+    asyncio.run(collect())
+
+    then_has_tool_calls_finish = any(
+        '"finish_reason": "tool_calls"' in sse for sse in collected_sse
+    )
+    assert then_has_tool_calls_finish, (
+        f"wrap_stream must emit finish_reason=tool_calls when provider "
+        f"stream contains tool_calls but no usage tokens. "
+        f"Collected SSE: {collected_sse}"
+    )
+
+    then_has_done = any("[DONE]" in sse for sse in collected_sse)
+    assert then_has_done, "wrap_stream must emit "
+
+
+def test_done_event_uses_real_uuid_when_no_deltas() -> None:
+    """Given a done event with toolCalls and no prior tool_call_delta events,
+    the done event must use the real UUID from the done event payload.
+
+    tool_call_delta events are now skipped as probes, so tool_call_id_map
+    is never populated. The done event's real IDs are the only IDs the
+    client sees.
+    """
+    from rotator_library.providers.perchai_provider import PerchaiProvider
+
+    given_id_map: Dict[int, str] = {}
+    given_name_map: Dict[int, str] = {}
+    given_tool_names: Dict[int, str] = {0: "bash"}
+
+    when_done_chunk = PerchaiProvider._parse_sse_line(
+        line='data: {"type":"done","ok":true,"toolCalls":[{"id":"real-uuid-123","name":"bash","arguments":"echo hi"}]}',
+        model="perchai/test",
+        tool_call_id_map=given_id_map,
+        tool_call_name_map=given_name_map,
+        request_tool_names=given_tool_names,
+    )
+
+    assert when_done_chunk is not None
+    done_delta = when_done_chunk.choices[0].delta
+    done_tool_calls = done_delta.get("tool_calls")
+    assert done_tool_calls is not None
+    assert done_tool_calls[0].get("id") == "real-uuid-123"
+    assert done_tool_calls[0].get("function", {}).get("name") == "bash"
+    assert done_tool_calls[0].get("function", {}).get("arguments") == "echo hi"

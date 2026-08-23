@@ -17,6 +17,7 @@ import codecs
 import json
 import logging
 import re
+import time
 from typing import Any, AsyncGenerator, AsyncIterator, Callable, Dict, List, Optional, TYPE_CHECKING
 
 import litellm
@@ -182,6 +183,7 @@ class StreamingHandler:
         error_buffer = StreamBuffer()  # Use StreamBuffer for JSON reassembly
         accumulated_finish_reason: Optional[str] = None
         has_tool_calls = False
+        finish_reason_emitted = False
         in_thought_block = False
         prompt_tokens = 0
         prompt_tokens_cached = 0
@@ -271,6 +273,8 @@ class StreamingHandler:
                     if processed.finish_reason and not has_tool_calls:
                         # Only update if not already tool_calls (highest priority)
                         accumulated_finish_reason = processed.finish_reason
+                    if processed.finish_reason:
+                        finish_reason_emitted = True
                     if processed.usage and isinstance(processed.usage, dict):
                         # Extract token counts from final chunk
                         prompt_tokens = processed.usage.get("prompt_tokens", 0)
@@ -439,6 +443,35 @@ class StreamingHandler:
                             ]
                         }
                     )
+
+                # Providers like Perchai never include usage tokens in stream
+                # chunks, so _process_chunk never sets is_final_chunk=True.
+                # This means finish_reason is stripped from every chunk
+                # (set to None for "intermediate" chunks). The accumulated
+                # finish_reason is tracked but never emitted to the client.
+                # Without this synthetic chunk, the client sees no
+                # finish_reason=tool_calls and treats the response as a
+                # normal stop, causing it to re-request in a loop.
+                if stream_completed and not finish_reason_emitted:
+                    final_finish = (
+                        "tool_calls"
+                        if has_tool_calls
+                        else accumulated_finish_reason or "stop"
+                    )
+                    synthetic_chunk = {
+                        "id": f"chatcmpl-stream-{int(time.time())}",
+                        "created": int(time.time()),
+                        "model": model,
+                        "object": "chat.completion.chunk",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {},
+                                "finish_reason": final_finish,
+                            }
+                        ],
+                    }
+                    yield f"data: {json.dumps(synthetic_chunk)}\n\n"
 
                 # Yield [DONE] for completed streams
                 yield "data: [DONE]\n\n"

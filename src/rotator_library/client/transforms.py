@@ -149,6 +149,12 @@ class ProviderTransforms:
                 for key, value in model_options.items():
                     if key == "reasoning_effort":
                         kwargs["reasoning_effort"] = value
+                    elif key == "extra_body":
+                        existing = kwargs.get("extra_body", {})
+                        if isinstance(existing, dict) and isinstance(value, dict):
+                            kwargs["extra_body"] = {**value, **existing}
+                        elif key not in kwargs:
+                            kwargs[key] = value
                     elif key not in kwargs:
                         kwargs[key] = value
                 modifications.append(f"applied model options for {model}")
@@ -240,7 +246,7 @@ class ProviderTransforms:
         ``reasoning_content`` on replay and think by default — disabling
         thinking would suppress useful output with no benefit.
         """
-        if provider in ("vertex", "gemini", "google"):
+        if provider in ("vertex", "gemini", "google", "perchai"):
             return None
 
         messages = kwargs.get("messages")

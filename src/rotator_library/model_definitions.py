@@ -100,18 +100,23 @@ class ModelDefinitions:
     def get_model_definition(
         self, provider_name: str, model_name: str
     ) -> Optional[Dict[str, Any]]:
-        """Get a specific model definition.
-
-        Supports multi-segment keys (e.g. "moonshot/kimi-k2") for aggregation
-        providers.  Falls back to last-segment lookup for backward compat with
-        single-segment configs.
-        """
         provider_models = self.get_provider_models(provider_name)
         result = provider_models.get(model_name)
         if result is not None:
             return result
         if "/" in model_name:
-            return provider_models.get(model_name.rsplit("/", 1)[-1])
+            last_segment = model_name.rsplit("/", 1)[-1]
+            result = provider_models.get(last_segment)
+            if result is not None:
+                return result
+        for model_def in provider_models.values():
+            if not isinstance(model_def, dict):
+                continue
+            model_id = model_def.get("id")
+            if model_id and model_id == model_name:
+                return model_def
+            if model_id and "/" in model_name and model_id == model_name.rsplit("/", 1)[-1]:
+                return model_def
         return None
 
     def get_model_options(self, provider_name: str, model_name: str) -> Dict[str, Any]:

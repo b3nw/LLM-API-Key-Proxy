@@ -50,6 +50,8 @@ SUPPORTED_PARAMS: set[str] = {
     "stop",
     "tools",
     "tool_choice",
+    "thinking",
+    "reasoning_effort",
 }
 
 
@@ -111,12 +113,14 @@ def _extract_tool_names(tools: Optional[List[Dict[str, Any]]]) -> Dict[int, str]
 
 
 def _is_thinking_disabled(payload: Dict[str, Any]) -> bool:
-    extra_body = payload.get("extra_body")
-    if not isinstance(extra_body, dict):
-        return False
-    thinking = extra_body.get("thinking")
+    thinking = payload.get("thinking")
     if isinstance(thinking, dict) and thinking.get("type") == "disabled":
         return True
+    extra_body = payload.get("extra_body")
+    if isinstance(extra_body, dict):
+        thinking = extra_body.get("thinking")
+        if isinstance(thinking, dict) and thinking.get("type") == "disabled":
+            return True
     return False
 
 
@@ -803,6 +807,9 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         extra_body = kwargs.get("extra_body")
         if isinstance(extra_body, dict):
             payload.update(extra_body)
+
+        if _is_thinking_disabled(payload):
+            payload.pop("reasoning_effort", None)
 
         return payload
 

@@ -1081,3 +1081,200 @@ def test_given_non_stream_response_when_thinking_enabled_then_reasoning_preserve
     assert then_message.content == "Hello!", (
         f"content must be preserved, got {then_message.content!r}"
     )
+
+
+# =========================================================================
+# Thinking config in payload tests (RED phase)
+# =========================================================================
+
+
+def test_given_thinking_enabled_when_build_payload_then_thinking_in_payload() -> None:
+    """Given a perchai request with extra_body.thinking set to enabled and
+    reasoning_effort=low (as sent by the proxy model options), when
+    _build_payload runs, then the payload must include thinking and
+    reasoning_effort at the top level - not nested inside extra_body -
+    so the perchai upstream API receives them in the request body."""
+    given_kwargs: Dict[str, Any] = {
+        "model": "perchai/bedrock-mantle-google-gemma-4-31b",
+        "messages": [{"role": "user", "content": "hi"}],
+        "extra_body": {"thinking": {"type": "enabled"}, "reasoning_effort": "low"},
+    }
+    when_payload = PerchaiProvider._build_payload(
+        model_name="bedrock-mantle-google-gemma-4-31b",
+        kwargs=given_kwargs,
+    )
+    then_thinking = when_payload.get("thinking")
+    assert then_thinking == {"type": "enabled"}, (
+        f"thinking config must be at top level in payload, got {then_thinking!r}"
+    )
+    then_effort = when_payload.get("reasoning_effort")
+    assert then_effort == "low", (
+        f"reasoning_effort must be at top level in payload, got {then_effort!r}"
+    )
+    then_no_extra_body = "extra_body" not in when_payload
+    assert then_no_extra_body, (
+        f"extra_body must be flattened into payload, not kept as nested key: {when_payload!r}"
+    )
+
+
+def test_given_thinking_disabled_when_build_payload_then_thinking_disabled_in_payload() -> None:
+    """Given a perchai request with extra_body.thinking set to disabled,
+    when _build_payload runs, then the payload must include
+    thinking: {type: disabled} at the top level and must NOT include
+    reasoning_effort (it's meaningless when thinking is off)."""
+    given_kwargs: Dict[str, Any] = {
+        "model": "perchai/bedrock-mantle-google-gemma-4-e2b",
+        "messages": [{"role": "user", "content": "hi"}],
+        "extra_body": {"thinking": {"type": "disabled"}},
+    }
+    when_payload = PerchaiProvider._build_payload(
+        model_name="bedrock-mantle-google-gemma-4-e2b",
+        kwargs=given_kwargs,
+    )
+    then_thinking = when_payload.get("thinking")
+    assert then_thinking == {"type": "disabled"}, (
+        f"thinking disabled must be at top level, got {then_thinking!r}"
+    )
+    then_no_effort = "reasoning_effort" not in when_payload
+    assert then_no_effort, (
+        f"reasoning_effort should not be in payload when thinking disabled: {when_payload!r}"
+    )
+
+
+def test_given_reasoning_effort_in_kwargs_when_build_payload_then_in_payload() -> None:
+    """Given a perchai request where reasoning_effort is passed directly in
+    kwargs (from the transforms apply step 3 model_options), when
+    _build_payload runs, then reasoning_effort must be included in the
+    payload so the upstream perchai API receives it."""
+    given_kwargs: Dict[str, Any] = {
+        "model": "perchai/bedrock-mantle-google-gemma-4-31b",
+        "messages": [{"role": "user", "content": "hi"}],
+        "reasoning_effort": "low",
+        "extra_body": {"thinking": {"type": "enabled"}},
+    }
+    when_payload = PerchaiProvider._build_payload(
+        model_name="bedrock-mantle-google-gemma-4-31b",
+        kwargs=given_kwargs,
+    )
+    then_effort = when_payload.get("reasoning_effort")
+    assert then_effort == "low", (
+        f"reasoning_effort from kwargs must be in payload, got {then_effort!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_given_stream_only_reasoning_when_consumed_then_stop_chunk_emitted() -> None:
+    """Given a perchai stream that emits only reasoning_delta events (no
+    answer_delta) followed by a finishReason, when the stream is consumed,
+    then at least one chunk with finish_reason='stop' must be emitted so
+    downstream clients like Opencode see the turn as complete - not as a
+    hung stream with no terminal event."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    given_sse_lines = [
+        'data: {"type":"reasoning_delta","text":"thinking step 1"}',
+        'data: {"type":"reasoning_delta","text":"thinking step 2"}',
+        'data: {"type":"finishReason","finishReason":"stop"}',
+    ]
+
+    given_response = MagicMock()
+    given_response.status_code = 200
+
+    async def mock_aiter_lines():
+        for line in given_sse_lines:
+            yield line
+
+    given_response.aiter_lines = mock_aiter_lines
+    given_response.aread = AsyncMock()
+
+    given_context = AsyncMock()
+    given_context.__aenter__ = AsyncMock(return_value=given_response)
+    given_context.__aexit__ = AsyncMock(return_value=None)
+
+    given_client = MagicMock()
+    given_client.stream = MagicMock(return_value=given_context)
+
+    given_provider = PerchaiProvider()
+    given_payload = {
+        "messages": [{"role": "user", "content": "test"}],
+        "extra_body": {"thinking": {"type": "enabled"}},
+    }
+    given_logger = MagicMock()
+
+    then_chunks = []
+    async for chunk in given_provider._stream_completion(
+        client=given_client,
+        url="https://api.perchai.com/v1/chat",
+        build_headers=lambda t: {"Authorization": "Bearer fake"},
+        token="fake-token",
+        payload=given_payload,
+        model="perchai/test-model",
+        file_logger=given_logger,
+        credential_identifier="test-cred",
+    ):
+        then_chunks.append(chunk)
+
+    then_has_stop = any(
+        (
+            c.choices[0].get("finish_reason") if isinstance(c.choices[0], dict)
+            else getattr(c.choices[0], "finish_reason", None)
+        ) == "stop"
+        for c in then_chunks if c.choices
+    )
+    assert then_has_stop, (
+        f"Stream with only reasoning_delta must still emit a stop chunk, "
+        f"got {len(then_chunks)} chunks"
+    )
+
+
+def test_given_envelope_when_built_then_thinking_in_request() -> None:
+    """Given a payload with thinking config at top level, when
+    _build_envelope wraps it, then the envelope's request field must
+    contain the thinking config so the perchai upstream API receives it."""
+    given_payload = {
+        "model": "bedrock-mantle-google-gemma-4-31b",
+        "messages": [{"role": "user", "content": "hi"}],
+        "thinking": {"type": "enabled"},
+        "reasoning_effort": "low",
+    }
+    when_envelope = PerchaiProvider._build_envelope(
+        model="perchai/bedrock-mantle-google-gemma-4-31b",
+        payload=given_payload,
+    )
+    then_request = when_envelope.get("request", {})
+    then_thinking = then_request.get("thinking")
+    assert then_thinking == {"type": "enabled"}, (
+        f"envelope.request must contain thinking config, got {then_thinking!r}"
+    )
+    then_effort = then_request.get("reasoning_effort")
+    assert then_effort == "low", (
+        f"envelope.request must contain reasoning_effort, got {then_effort!r}"
+    )
+
+
+def test_given_thinking_disabled_with_effort_when_build_payload_then_effort_stripped() -> None:
+    """Given a perchai request with extra_body.thinking set to disabled AND
+    reasoning_effort present (which can happen when model options set both),
+    when _build_payload runs, then reasoning_effort must be stripped from
+    the payload - sending reasoning_effort with thinking disabled is
+    contradictory and may confuse the upstream API."""
+    given_kwargs: Dict[str, Any] = {
+        "model": "perchai/bedrock-mantle-google-gemma-4-e2b",
+        "messages": [{"role": "user", "content": "hi"}],
+        "extra_body": {
+            "thinking": {"type": "disabled"},
+            "reasoning_effort": "low",
+        },
+    }
+    when_payload = PerchaiProvider._build_payload(
+        model_name="bedrock-mantle-google-gemma-4-e2b",
+        kwargs=given_kwargs,
+    )
+    then_thinking = when_payload.get("thinking")
+    assert then_thinking == {"type": "disabled"}, (
+        f"thinking disabled must be preserved, got {then_thinking!r}"
+    )
+    then_no_effort = "reasoning_effort" not in when_payload
+    assert then_no_effort, (
+        f"reasoning_effort must be stripped when thinking disabled: {when_payload!r}"
+    )

@@ -959,7 +959,6 @@ def test_given_thinking_disabled_when_transform_request_then_thinking_stripped()
     transform_request runs, then reasoning_content must be stripped from
     assistant messages in the conversation (perchai does not require it
     when thinking is off) and the thinking config must be preserved."""
-    from unittest.mock import MagicMock
     given_provider = PerchaiProvider()
     given_kwargs: Dict[str, Any] = {
         "model": "perchai/bedrock-mantle-google-gemma-4-e2b",
@@ -1277,4 +1276,116 @@ def test_given_thinking_disabled_with_effort_when_build_payload_then_effort_stri
     then_no_effort = "reasoning_effort" not in when_payload
     assert then_no_effort, (
         f"reasoning_effort must be stripped when thinking disabled: {when_payload!r}"
+    )
+
+
+# =========================================================================
+# Provider contract tests (aligned with test_provider_plugins.py patterns)
+# =========================================================================
+
+
+def test_given_perchai_when_instantiated_twice_then_same_singleton() -> None:
+    """Given the PerchaiProvider class uses SingletonABCMeta, when
+    instantiated twice, then both calls must return the same instance
+    so caches and state are shared (matching the singleton pattern
+    tested in test_provider_plugins.py)."""
+    given_first = PerchaiProvider()
+    given_second = PerchaiProvider()
+    then_same = given_first is given_second
+    assert then_same, (
+        f"PerchaiProvider must be singleton, got different instances: "
+        f"{id(given_first)} vs {id(given_second)}"
+    )
+
+
+def test_given_perchai_when_check_tier_requirement_then_none() -> None:
+    """Given the PerchaiProvider, when get_model_tier_requirement is
+    called for any model, then it must return None (no tier restrictions)
+    matching the ProviderInterface default tested in
+    test_provider_plugins.py."""
+    given_provider = PerchaiProvider()
+    when_result = given_provider.get_model_tier_requirement("bedrock-mantle-google-gemma-4-31b")
+    assert when_result is None, (
+        f"Perchai has no tier restrictions, got {when_result!r}"
+    )
+
+
+def test_given_perchai_when_check_credential_priority_then_none() -> None:
+    """Given the PerchaiProvider, when get_credential_priority is
+    called, then it must return None (not yet discovered) matching the
+    ProviderInterface default tested in test_provider_plugins.py."""
+    given_provider = PerchaiProvider()
+    when_result = given_provider.get_credential_priority("any-key")
+    assert when_result is None, (
+        f"Perchai credential priority should be None by default, got {when_result!r}"
+    )
+
+
+def test_given_perchai_when_check_skip_cost_calculation_then_true() -> None:
+    """Given the PerchaiProvider class, when skip_cost_calculation is
+    checked, then it must be True so the proxy doesn't attempt
+    litellm cost calculation for this provider."""
+    given_provider = PerchaiProvider()
+    assert given_provider.skip_cost_calculation is True, (
+        f"skip_cost_calculation should be True, got {given_provider.skip_cost_calculation!r}"
+    )
+
+
+def test_given_perchai_when_check_rotation_mode_then_sequential() -> None:
+    """Given the PerchaiProvider class, when default_rotation_mode is
+    checked, then it must be 'sequential' so the rotator uses one
+    credential until it errors (preserving perchai cache locality)."""
+    given_provider = PerchaiProvider()
+    assert given_provider.default_rotation_mode == "sequential", (
+        f"rotation mode should be 'sequential', got {given_provider.default_rotation_mode!r}"
+    )
+
+
+# =========================================================================
+# Thinking policy tests (aligned with test_vertex_provider.py patterns)
+# =========================================================================
+
+
+def test_given_perchai_when_plain_request_then_no_auto_thinking_in_payload() -> None:
+    """Given a perchai request with no thinking config in extra_body,
+    when _build_payload runs, then the payload must NOT contain a
+    'thinking' key - perchai should not auto-enable thinking (matching
+    the vertex provider pattern where plain requests don't inject
+    thinking config)."""
+    given_kwargs: Dict[str, Any] = {
+        "model": "perchai/bedrock-mantle-google-gemma-4-31b",
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    when_payload = PerchaiProvider._build_payload(
+        model_name="bedrock-mantle-google-gemma-4-31b",
+        kwargs=given_kwargs,
+    )
+    then_no_thinking = "thinking" not in when_payload
+    assert then_no_thinking, (
+        f"plain request should not auto-enable thinking, got {when_payload!r}"
+    )
+    then_no_effort = "reasoning_effort" not in when_payload
+    assert then_no_effort, (
+        f"plain request should not have reasoning_effort, got {when_payload!r}"
+    )
+
+
+def test_given_perchai_when_reasoning_effort_only_then_passes_through() -> None:
+    """Given a perchai request with reasoning_effort but no thinking
+    config (e.g. a client sets reasoning_effort directly), when
+    _build_payload runs, then reasoning_effort must pass through to
+    the payload (matching the vertex pattern where reasoning_effort
+    passes through without thinking config)."""
+    given_kwargs: Dict[str, Any] = {
+        "model": "perchai/bedrock-mantle-google-gemma-4-31b",
+        "messages": [{"role": "user", "content": "hi"}],
+        "reasoning_effort": "medium",
+    }
+    when_payload = PerchaiProvider._build_payload(
+        model_name="bedrock-mantle-google-gemma-4-31b",
+        kwargs=given_kwargs,
+    )
+    then_effort = when_payload.get("reasoning_effort")
+    assert then_effort == "medium", (
+        f"reasoning_effort should pass through without thinking config, got {then_effort!r}"
     )

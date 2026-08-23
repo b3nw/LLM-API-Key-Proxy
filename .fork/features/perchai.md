@@ -1,5 +1,35 @@
 # Perchai Provider Feature History
 
+## 2026-08-23: Align tests with other provider patterns
+
+**Branch**: `feat/provider-app.perchai`
+**Files changed**:
+- `tests/test_perchai_provider.py` - Added 7 tests aligned with test_provider_plugins.py and test_vertex_provider.py patterns, removed unused import
+
+**Tests added**:
+1. Singleton pattern - two instantiations return same instance
+2. get_model_tier_requirement returns None (no tier restrictions)
+3. get_credential_priority returns None (not yet discovered)
+4. skip_cost_calculation is True
+5. default_rotation_mode is 'sequential'
+6. Plain request doesn't auto-enable thinking in payload
+7. reasoning_effort passes through without thinking config
+
+**Test categories now covered** (aligned with other providers):
+- Plugin registration: PROVIDER_PLUGINS, PROVIDER_MAP, LITELLM_PROVIDERS, PROVIDER_URL_MAP, DEFAULT_OAUTH_DIRS, ENV_OAUTH_PROVIDERS
+- Provider contract: has_custom_logic, skip_cost_calculation, default_rotation_mode, singleton, tier_requirement, credential_priority
+- Error handling: 10 error codes, 429 status, malformed body
+- SSE/streaming: answer_delta, reasoning_delta, tool_call_delta, tool_use_end, unknown events, finish_reason
+- Tool calls: synthetic IDs/names, real name resolution, index mismatch, multi-delta consistency, full stream integration
+- Thinking config: transform_request hook, thinking disabled suppression (stream + non-stream), thinking in payload, reasoning_effort pass-through, effort stripped when disabled, plain request no auto-thinking, thinking policy patterns
+- Credential resolution: file path, env virtual path, empty identifier fallback
+- 401 refresh: streaming + non-streaming
+- Quota tracking: background job config, model quota groups, run_background_job with invalid token
+- E2E routing: option IDs route to real upstream
+- Envelope structure: thinking config in request field
+
+56 unit tests pass. 5 live API tests deselected (expired token).
+
 ## 2026-08-23: Fix thinking config and reasoning_effort mapping
 
 **Branch**: `feat/provider-app.perchai` (worktree: `feat-provider-app.perchai`)

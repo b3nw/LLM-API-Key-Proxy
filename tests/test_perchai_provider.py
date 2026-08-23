@@ -77,7 +77,7 @@ PERCHAI_ERROR_CODE_CASES = [
 # =========================================================================
 
 
-def test_given_perchai_provider_when_loaded_then_perchai_in_plugins() -> None:
+def test_perchai_in_plugins() -> None:
     """Given the providers package is imported, when the plugin auto-discovery
     runs, then the ``perchai`` plugin must be registered in PROVIDER_PLUGINS.
     """
@@ -90,7 +90,7 @@ def test_given_perchai_provider_when_loaded_then_perchai_in_plugins() -> None:
     )
 
 
-def test_given_provider_class_when_instantiated_then_has_custom_logic_true() -> None:
+def test_has_custom_logic_true() -> None:
     """Given the PerchaiProvider class, when instantiated (singleton), then
     ``has_custom_logic()`` must return ``True`` so the rotator knows to
     route through our custom acompletion() implementation.
@@ -104,7 +104,7 @@ def test_given_provider_class_when_instantiated_then_has_custom_logic_true() -> 
     )
 
 
-def test_given_class_when_inspected_then_mro_includes_quota_tracker() -> None:
+def test_mro_includes_quota_tracker() -> None:
     """Given the PerchaiProvider class, when its MRO is inspected, then
     PerchaiQuotaTracker must appear before ProviderInterface so the
     mixin's __init__ side effects run first.
@@ -127,7 +127,7 @@ def test_given_class_when_inspected_then_mro_includes_quota_tracker() -> None:
 
 
 @pytest.mark.parametrize("error_code,expected", PERCHAI_ERROR_CODE_CASES)
-def test_given_all_error_codes_when_parsed_then_correct_category(
+def test_all_error_codes_parsed_correctly(
     error_code: str,
     expected: Optional[Dict[str, Any]],
 ) -> None:
@@ -145,7 +145,7 @@ def test_given_all_error_codes_when_parsed_then_correct_category(
     )
 
 
-def test_given_429_status_when_parsed_then_rate_limit() -> None:
+def test_429_status_parsed_as_rate_limit() -> None:
     """Given an Exception whose ``args[0]`` is the string ``"429"`` (no
     upstream body), when ``parse_quota_error`` is called, then the
     HTTP-status fallback must yield ``{"reason": "rate_limit",
@@ -160,7 +160,7 @@ def test_given_429_status_when_parsed_then_rate_limit() -> None:
     )
 
 
-def test_given_malformed_body_when_parsed_then_returns_none() -> None:
+def test_malformed_body_returns_none() -> None:
     """Given a syntactically-broken JSON body, when ``parse_quota_error``
     is called, then the defensive parser must return ``None`` rather
     than raise.
@@ -175,7 +175,7 @@ def test_given_malformed_body_when_parsed_then_returns_none() -> None:
 
 
 @pytest.mark.asyncio
-async def test_given_empty_messages_when_acompletion_then_raises_valueerror() -> None:
+async def test_empty_messages_raises_valueerror() -> None:
     """Given acompletion() is called with empty messages, when the provider
     validates input, then it must raise ``ValueError`` BEFORE attempting
     any HTTP I/O.
@@ -194,7 +194,7 @@ async def test_given_empty_messages_when_acompletion_then_raises_valueerror() ->
     )
 
 
-def test_given_malformed_sse_line_when_parsed_then_returns_none() -> None:
+def test_malformed_sse_line_returns_none() -> None:
     """Given a malformed JSON SSE ``data:`` line, when ``_parse_sse_line``
     runs, then the defensive parser must return ``None`` (not raise).
     """
@@ -207,7 +207,7 @@ def test_given_malformed_sse_line_when_parsed_then_returns_none() -> None:
     )
 
 
-def test_given_unknown_event_type_when_parsed_then_skipped() -> None:
+def test_unknown_event_type_skipped() -> None:
     """Given an SSE line whose ``type`` field is not in the recognized set,
     when ``_parse_sse_line`` runs, then it must return ``None`` so the
     stream loop continues.
@@ -221,7 +221,7 @@ def test_given_unknown_event_type_when_parsed_then_skipped() -> None:
     )
 
 
-def test_given_text_delta_when_parsed_then_content_chunk() -> None:
+def test_text_delta_produces_content_chunk() -> None:
     """Given an ``answer_delta`` SSE event (the raw wire format from
     ``/api/perch-terminal/model-call``), when ``_parse_sse_line`` runs,
     then the returned ``ModelResponseStream`` must carry the text in
@@ -241,7 +241,7 @@ def test_given_text_delta_when_parsed_then_content_chunk() -> None:
     )
 
 
-def test_given_reasoning_delta_when_parsed_then_reasoning_chunk() -> None:
+def test_reasoning_delta_produces_reasoning_chunk() -> None:
     """Given a ``reasoning_delta`` SSE event, when ``_parse_sse_line``
     runs, then the returned ``ModelResponseStream`` must carry the text
     in ``choices[0].delta.reasoning_content``.
@@ -261,7 +261,7 @@ def test_given_reasoning_delta_when_parsed_then_reasoning_chunk() -> None:
     )
 
 
-async def test_given_perchai_stream_without_tool_id_when_consumed_then_synthetic_id_present() -> None:
+async def test_stream_without_tool_id_has_synthetic_id() -> None:
     """Given a Perchai streaming response that emits ``tool_call_delta`` events
     without ``id`` or ``name`` fields (the actual wire format Perchai sends),
     when the full streaming pipeline consumes the stream, then every tool_call
@@ -370,7 +370,7 @@ async def test_given_perchai_stream_without_tool_id_when_consumed_then_synthetic
             )
 
 
-def test_given_tool_call_delta_without_id_when_parsed_then_synthetic_id_emitted() -> None:
+def test_tool_call_delta_without_id_emits_synthetic_id() -> None:
     """Given a ``tool_call_delta`` SSE event without ``id`` field (as Perchai
     currently sends), when ``_parse_sse_line`` runs with tracking maps, then
     the emitted chunk must contain a synthetic ``id`` so @ai-sdk clients
@@ -397,7 +397,7 @@ def test_given_tool_call_delta_without_id_when_parsed_then_synthetic_id_emitted(
     assert then_id == "call_0", f"Expected synthetic id 'call_0', got {then_id!r}"
 
 
-def test_given_tool_call_delta_without_name_when_parsed_then_synthetic_name_emitted() -> None:
+def test_tool_call_delta_without_name_emits_synthetic_name() -> None:
     """Given a ``tool_call_delta`` SSE event without ``name`` field and no
     request tool names, when ``_parse_sse_line`` runs with tracking maps,
     then the emitted chunk must contain a synthetic ``function.name`` so
@@ -425,7 +425,7 @@ def test_given_tool_call_delta_without_name_when_parsed_then_synthetic_name_emit
     assert then_name == "function_0", f"Expected synthetic name 'function_0', got {then_name!r}"
 
 
-def test_given_tool_call_delta_without_name_when_request_tools_provided_then_real_name_used() -> None:
+def test_tool_call_delta_without_name_uses_real_name_from_request() -> None:
     """Given a ``tool_call_delta`` SSE event without ``name`` field, when
     ``_parse_sse_line`` runs with ``request_tool_names`` from the original
     request's tools definition, then the emitted chunk must use the real
@@ -454,7 +454,7 @@ def test_given_tool_call_delta_without_name_when_request_tools_provided_then_rea
     )
 
 
-def test_given_tool_call_delta_without_name_when_index_mismatch_then_falls_back_to_synthetic() -> None:
+def test_tool_call_delta_index_mismatch_falls_back_to_synthetic() -> None:
     """Given a ``tool_call_delta`` SSE event with index 2 but only 2 tools
     in the request (indices 0, 1), when ``_parse_sse_line`` runs, then it
     must fall back to the synthetic ``function_2`` name since the index
@@ -480,7 +480,7 @@ def test_given_tool_call_delta_without_name_when_index_mismatch_then_falls_back_
     )
 
 
-def test_given_multiple_tool_call_deltas_when_parsed_then_same_synthetic_id_reused() -> None:
+def test_multiple_tool_call_deltas_reuse_same_synthetic_id() -> None:
     """Given multiple ``tool_call_delta`` events for same index without id/name,
     when ``_parse_sse_line`` runs with tracking maps, then all chunks must
     use the same synthetic id/name (not generate new ones per chunk).
@@ -513,7 +513,7 @@ def test_given_multiple_tool_call_deltas_when_parsed_then_same_synthetic_id_reus
     assert then_name1 == then_name2, f"Synthetic name changed between chunks: {then_name1!r} vs {then_name2!r}"
 
 
-def test_given_registration_when_checked_then_perchai_in_oauth_dirs() -> None:
+def test_perchai_in_oauth_dirs() -> None:
     """Given the credential manager module is loaded, when DEFAULT_OAUTH_DIRS
     is inspected, then ``perchai`` must be present pointing at
     ``~/.perch`` (the actual CLI directory, not ``~/.perchai``).
@@ -530,7 +530,7 @@ def test_given_registration_when_checked_then_perchai_in_oauth_dirs() -> None:
     )
 
 
-def test_given_registration_when_checked_then_perchai_in_env_oauth() -> None:
+def test_perchai_in_env_oauth() -> None:
     """Given ENV_OAUTH_PROVIDERS is populated, when checked, then
     ``perchai`` must map to the ``PERCHAI`` env-var prefix for stateless
     deployments (PERCHAI_ACCESS_TOKEN / PERCHAI_N_ACCESS_TOKEN).
@@ -547,7 +547,7 @@ def test_given_registration_when_checked_then_perchai_in_env_oauth() -> None:
     )
 
 
-def test_given_registration_when_checked_then_perchai_in_provider_factory() -> None:
+def test_perchai_in_provider_factory() -> None:
     """Given the provider factory module is loaded, when PROVIDER_MAP is
     inspected, then ``perchai`` must be present and resolve to a real
     auth class (PerchaiAuthBase) - not ``None`` or a placeholder.
@@ -567,7 +567,7 @@ def test_given_registration_when_checked_then_perchai_in_provider_factory() -> N
     )
 
 
-def test_given_provider_config_when_checked_then_perchai_listed() -> None:
+def test_perchai_in_provider_config() -> None:
     """Given the provider_config module is loaded, when LITELLM_PROVIDERS
     is inspected, then ``perchai`` must be present with a real category
     dict (not missing, not ``None``).
@@ -584,7 +584,7 @@ def test_given_provider_config_when_checked_then_perchai_listed() -> None:
     )
 
 
-def test_given_provider_urls_when_checked_then_perchai_url() -> None:
+def test_perchai_in_provider_url_map() -> None:
     """Given the proxy_app provider_urls module is loaded, when
     PROVIDER_URL_MAP is inspected, then ``perchai`` must be present
     pointing at the upstream app URL.
@@ -601,7 +601,7 @@ def test_given_provider_urls_when_checked_then_perchai_url() -> None:
     )
 
 
-def test_given_get_background_job_config_when_called_then_returns_valid_dict() -> None:
+def test_background_job_config_returns_valid_dict() -> None:
     """Given the background-job config static method is called, when
     invoked on either PerchaiProvider or PerchaiQuotaTracker, then the
     returned dict must contain ``interval`` and ``name`` keys (the
@@ -622,7 +622,7 @@ def test_given_get_background_job_config_when_called_then_returns_valid_dict() -
     )
 
 
-def test_given_model_quota_groups_when_checked_then_monthly_group() -> None:
+def test_model_quota_groups_has_monthly_group() -> None:
     """Given PerchaiQuotaTracker.model_quota_groups, when inspected, then
     the ``monthly($)`` quota group must be present (TUI surfaces this
     under the dollar-balance view).
@@ -636,7 +636,7 @@ def test_given_model_quota_groups_when_checked_then_monthly_group() -> None:
 
 
 @pytest.mark.asyncio
-async def test_given_run_background_job_with_invalid_token_when_called_then_no_crash() -> None:
+async def test_run_background_job_invalid_token_no_crash() -> None:
     """Given ``run_background_job`` is called with an invalid credential
     path and no usable session token, when it executes, then it must
     swallow the resolution failure and return without raising.
@@ -666,7 +666,7 @@ async def test_given_run_background_job_with_invalid_token_when_called_then_no_c
 
 
 @pytest.mark.asyncio
-async def test_given_expired_token_when_non_stream_chat_then_refreshes_and_retries(
+async def test_expired_token_non_stream_refreshes_and_retries(
     tmp_path: Path,
 ) -> None:
     """Given a credential file containing an expired access token, when
@@ -701,7 +701,7 @@ async def test_given_expired_token_when_non_stream_chat_then_refreshes_and_retri
 
 
 @pytest.mark.asyncio
-async def test_given_expired_token_when_stream_chat_then_refreshes_and_retries(
+async def test_expired_token_stream_refreshes_and_retries(
     tmp_path: Path,
 ) -> None:
     """Given a credential file containing an expired access token, when
@@ -754,7 +754,7 @@ async def test_given_expired_token_when_stream_chat_then_refreshes_and_retries(
 # ---------------------------------------------------------------------------
 
 
-def test_given_credential_file_path_when_resolved_then_returns_access_token() -> None:
+def test_credential_file_path_resolves_to_access_token() -> None:
     """Given a credential_identifier that is a file path to a valid session
     JSON, when ``_resolve_credential_token`` is called, then it must read the
     file and return the ``accessToken`` value, NOT the file path itself.
@@ -791,7 +791,7 @@ def test_given_credential_file_path_when_resolved_then_returns_access_token() ->
     )
 
 
-def test_given_env_virtual_path_when_resolved_then_returns_env_access_token(
+def test_env_virtual_path_resolves_to_access_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Given a credential_identifier that is an ``env://perchai/1`` virtual
@@ -812,7 +812,7 @@ def test_given_env_virtual_path_when_resolved_then_returns_env_access_token(
     )
 
 
-def test_given_empty_credential_identifier_when_resolved_then_falls_back_to_default() -> None:
+def test_empty_credential_identifier_falls_back_to_default() -> None:
     """Given an empty credential_identifier, when ``_resolve_credential_token``
     is called, then it must fall back to the default session resolution
     (``_resolve_session_token``), NOT use an empty string as the token.
@@ -853,7 +853,7 @@ PROBE_OPTION_IDS = [
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("option_id", PROBE_OPTION_IDS)
-async def test_given_option_id_when_probed_then_routes_to_real_upstream(
+async def test_option_id_routes_to_real_upstream(
     option_id: str,
 ) -> None:
     """Given a perchai option ID from the docs, when probed against the real
@@ -922,7 +922,7 @@ async def test_given_option_id_when_probed_then_routes_to_real_upstream(
 # =========================================================================
 
 
-def test_given_module_constants_when_imported_then_paths_nonempty() -> None:
+def test_module_constants_nonempty() -> None:
     """Given the module-level constants are imported, when their values
     are checked, then the path constants must be non-empty strings so
     callers can build URLs without needing to re-discover them.
@@ -946,7 +946,7 @@ def test_given_module_constants_when_imported_then_paths_nonempty() -> None:
 # =========================================================================
 
 
-def test_given_perchai_provider_when_checked_then_has_transform_request_hook() -> None:
+def test_has_transform_request_hook() -> None:
     """Given the PerchaiProvider class, when checked for the transform_request
     hook, then it must exist so the proxy can apply thinking normalization."""
     assert hasattr(PerchaiProvider, "transform_request"), (
@@ -954,7 +954,7 @@ def test_given_perchai_provider_when_checked_then_has_transform_request_hook() -
     )
 
 
-def test_given_thinking_disabled_when_transform_request_then_thinking_stripped() -> None:
+def test_thinking_disabled_strips_reasoning_from_messages() -> None:
     """Given a request with extra_body.thinking set to disabled, when
     transform_request runs, then reasoning_content must be stripped from
     assistant messages in the conversation (perchai does not require it
@@ -975,7 +975,7 @@ def test_given_thinking_disabled_when_transform_request_then_thinking_stripped()
     )
 
 
-def test_given_streaming_reasoning_delta_when_thinking_disabled_then_reasoning_stripped() -> None:
+def test_streaming_reasoning_delta_suppressed_when_thinking_disabled() -> None:
     """Given a perchai stream that emits reasoning_delta events even when
     thinking is disabled (gemma models do this), when _parse_sse_line
     processes a reasoning_delta, then it must return None to suppress
@@ -996,7 +996,7 @@ def test_given_streaming_reasoning_delta_when_thinking_disabled_then_reasoning_s
     )
 
 
-def test_given_streaming_reasoning_delta_when_thinking_enabled_then_reasoning_emitted() -> None:
+def test_streaming_reasoning_delta_emitted_when_thinking_enabled() -> None:
     """Given a perchai stream that emits reasoning_delta events when
     thinking is enabled, when _parse_sse_line processes a reasoning_delta,
     then it must return a chunk with reasoning_content so downstream
@@ -1019,7 +1019,7 @@ def test_given_streaming_reasoning_delta_when_thinking_enabled_then_reasoning_em
     )
 
 
-def test_given_non_stream_response_when_thinking_disabled_then_reasoning_stripped() -> None:
+def test_non_stream_response_strips_reasoning_when_thinking_disabled() -> None:
     """Given a non-streaming perchai response that includes reasoning text
     when thinking was disabled in the request, when the response is parsed,
     then reasoning_content must NOT be included in the message - clients
@@ -1051,7 +1051,7 @@ def test_given_non_stream_response_when_thinking_disabled_then_reasoning_strippe
     )
 
 
-def test_given_non_stream_response_when_thinking_enabled_then_reasoning_preserved() -> None:
+def test_non_stream_response_preserves_reasoning_when_thinking_enabled() -> None:
     """Given a non-streaming perchai response that includes reasoning text
     when thinking was enabled in the request, when the response is parsed,
     then reasoning_content must be included in the message."""
@@ -1087,7 +1087,7 @@ def test_given_non_stream_response_when_thinking_enabled_then_reasoning_preserve
 # =========================================================================
 
 
-def test_given_thinking_enabled_when_build_payload_then_thinking_in_payload() -> None:
+def test_build_payload_includes_thinking_when_enabled() -> None:
     """Given a perchai request with extra_body.thinking set to enabled and
     reasoning_effort=low (as sent by the proxy model options), when
     _build_payload runs, then the payload must include thinking and
@@ -1116,7 +1116,7 @@ def test_given_thinking_enabled_when_build_payload_then_thinking_in_payload() ->
     )
 
 
-def test_given_thinking_disabled_when_build_payload_then_thinking_disabled_in_payload() -> None:
+def test_build_payload_includes_thinking_disabled() -> None:
     """Given a perchai request with extra_body.thinking set to disabled,
     when _build_payload runs, then the payload must include
     thinking: {type: disabled} at the top level and must NOT include
@@ -1140,7 +1140,7 @@ def test_given_thinking_disabled_when_build_payload_then_thinking_disabled_in_pa
     )
 
 
-def test_given_reasoning_effort_in_kwargs_when_build_payload_then_in_payload() -> None:
+def test_build_payload_includes_reasoning_effort_from_kwargs() -> None:
     """Given a perchai request where reasoning_effort is passed directly in
     kwargs (from the transforms apply step 3 model_options), when
     _build_payload runs, then reasoning_effort must be included in the
@@ -1162,7 +1162,7 @@ def test_given_reasoning_effort_in_kwargs_when_build_payload_then_in_payload() -
 
 
 @pytest.mark.asyncio
-async def test_given_stream_only_reasoning_when_consumed_then_stop_chunk_emitted() -> None:
+async def test_stream_only_reasoning_emits_stop_chunk() -> None:
     """Given a perchai stream that emits only reasoning_delta events (no
     answer_delta) followed by a finishReason, when the stream is consumed,
     then at least one chunk with finish_reason='stop' must be emitted so
@@ -1226,7 +1226,7 @@ async def test_given_stream_only_reasoning_when_consumed_then_stop_chunk_emitted
     )
 
 
-def test_given_envelope_when_built_then_thinking_in_request() -> None:
+def test_build_envelope_includes_thinking_in_request() -> None:
     """Given a payload with thinking config at top level, when
     _build_envelope wraps it, then the envelope's request field must
     contain the thinking config so the perchai upstream API receives it."""
@@ -1251,7 +1251,7 @@ def test_given_envelope_when_built_then_thinking_in_request() -> None:
     )
 
 
-def test_given_thinking_disabled_with_effort_when_build_payload_then_effort_stripped() -> None:
+def test_build_payload_strips_effort_when_thinking_disabled() -> None:
     """Given a perchai request with extra_body.thinking set to disabled AND
     reasoning_effort present (which can happen when model options set both),
     when _build_payload runs, then reasoning_effort must be stripped from
@@ -1284,7 +1284,7 @@ def test_given_thinking_disabled_with_effort_when_build_payload_then_effort_stri
 # =========================================================================
 
 
-def test_given_perchai_when_instantiated_twice_then_same_singleton() -> None:
+def test_singleton_same_instance() -> None:
     """Given the PerchaiProvider class uses SingletonABCMeta, when
     instantiated twice, then both calls must return the same instance
     so caches and state are shared (matching the singleton pattern
@@ -1298,7 +1298,7 @@ def test_given_perchai_when_instantiated_twice_then_same_singleton() -> None:
     )
 
 
-def test_given_perchai_when_check_tier_requirement_then_none() -> None:
+def test_get_model_tier_requirement_returns_none() -> None:
     """Given the PerchaiProvider, when get_model_tier_requirement is
     called for any model, then it must return None (no tier restrictions)
     matching the ProviderInterface default tested in
@@ -1310,7 +1310,7 @@ def test_given_perchai_when_check_tier_requirement_then_none() -> None:
     )
 
 
-def test_given_perchai_when_check_credential_priority_then_none() -> None:
+def test_get_credential_priority_returns_none() -> None:
     """Given the PerchaiProvider, when get_credential_priority is
     called, then it must return None (not yet discovered) matching the
     ProviderInterface default tested in test_provider_plugins.py."""
@@ -1321,7 +1321,7 @@ def test_given_perchai_when_check_credential_priority_then_none() -> None:
     )
 
 
-def test_given_perchai_when_check_skip_cost_calculation_then_true() -> None:
+def test_skip_cost_calculation_is_true() -> None:
     """Given the PerchaiProvider class, when skip_cost_calculation is
     checked, then it must be True so the proxy doesn't attempt
     litellm cost calculation for this provider."""
@@ -1331,7 +1331,7 @@ def test_given_perchai_when_check_skip_cost_calculation_then_true() -> None:
     )
 
 
-def test_given_perchai_when_check_rotation_mode_then_sequential() -> None:
+def test_default_rotation_mode_is_sequential() -> None:
     """Given the PerchaiProvider class, when default_rotation_mode is
     checked, then it must be 'sequential' so the rotator uses one
     credential until it errors (preserving perchai cache locality)."""
@@ -1346,7 +1346,7 @@ def test_given_perchai_when_check_rotation_mode_then_sequential() -> None:
 # =========================================================================
 
 
-def test_given_perchai_when_plain_request_then_no_auto_thinking_in_payload() -> None:
+def test_plain_request_does_not_auto_enable_thinking() -> None:
     """Given a perchai request with no thinking config in extra_body,
     when _build_payload runs, then the payload must NOT contain a
     'thinking' key - perchai should not auto-enable thinking (matching
@@ -1370,7 +1370,7 @@ def test_given_perchai_when_plain_request_then_no_auto_thinking_in_payload() -> 
     )
 
 
-def test_given_perchai_when_reasoning_effort_only_then_passes_through() -> None:
+def test_reasoning_effort_passes_through_without_thinking_config() -> None:
     """Given a perchai request with reasoning_effort but no thinking
     config (e.g. a client sets reasoning_effort directly), when
     _build_payload runs, then reasoning_effort must pass through to

@@ -247,7 +247,7 @@ class PerchaiQuotaTracker:
         self, credential: str, token: str, app_url: str
     ) -> Optional[Dict[str, Any]]:
         identifier = _get_credential_identifier(credential)
-        url = f"{app_url.rstrip('/')}/api/perch-terminal/usage"
+        url = f"{app_url.rstrip('/')}/api/perchai/account"
         headers = {
             "Authorization": f"Bearer {token}",
             "Accept": "application/json",
@@ -274,55 +274,37 @@ class PerchaiQuotaTracker:
     def _extract_dollar_fields(
         data: Dict[str, Any],
     ) -> Tuple[int, int, Optional[float]]:
-        # Upstream response shape not yet pinned; walk candidate paths and
-        # fall back to (0, 0, None) so the baseline isn't lost on mismatch.
         used_dollars = 0.0
         cap_dollars = 0.0
         reset_ts: Optional[float] = None
 
-        monthly_obj: Any = None
-        for path in (("monthly",), ("data", "monthly"), ("usage", "monthly")):
-            current: Any = data
-            for key in path:
-                if not isinstance(current, dict):
-                    current = None
-                    break
-                current = current.get(key)
-                if current is None:
-                    break
-            if current is not None:
-                monthly_obj = current
-                break
-
-        if isinstance(monthly_obj, dict):
-            for key in ("usageUsd", "usd", "usage", "used", "spend"):
-                val = monthly_obj.get(key)
+        usage_meter = data.get("usageMeter")
+        if isinstance(usage_meter, dict):
+            for key in ("monthly_usd", "monthlyUsd", "monthly"):
+                val = usage_meter.get(key)
                 if isinstance(val, (int, float)):
                     used_dollars = float(val)
                     break
-            for key in ("limitUsd", "capUsd", "cap", "limit", "allowanceUsd"):
-                val = monthly_obj.get(key)
-                if isinstance(val, (int, float)):
-                    cap_dollars = float(val)
-                    break
-            for key in ("resetAt", "reset_at", "resets_at", "nextResetAt"):
-                val = monthly_obj.get(key)
-                if isinstance(val, str):
-                    reset_ts = _parse_iso_to_unix(val)
-                    if reset_ts is not None:
+
+        session = data.get("session")
+        if isinstance(session, dict):
+            entitlements = session.get("entitlements")
+            if isinstance(entitlements, list):
+                for ent in entitlements:
+                    if not isinstance(ent, dict):
+                        continue
+                    if ent.get("key") != "usage.monthly":
+                        continue
+                    value_json = ent.get("value_json")
+                    if not isinstance(value_json, dict):
+                        continue
+                    for cap_key in ("limitUsd", "limit", "capUsd", "cap"):
+                        val = value_json.get(cap_key)
+                        if isinstance(val, (int, float)):
+                            cap_dollars = float(val)
+                            break
+                    if cap_dollars > 0:
                         break
-
-        if used_dollars == 0.0 and cap_dollars == 0.0:
-            for key in ("usedUsd", "used", "usage", "balance"):
-                val = data.get(key)
-                if isinstance(val, (int, float)):
-                    used_dollars = float(val)
-                    break
-            for key in ("capUsd", "limit", "cap", "allowance"):
-                val = data.get(key)
-                if isinstance(val, (int, float)):
-                    cap_dollars = float(val)
-                    break
 
         if reset_ts is None:
             reset_ts = float(PerchaiQuotaTracker._seconds_until_next_month_utc() + _now_seconds())

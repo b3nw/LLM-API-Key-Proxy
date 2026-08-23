@@ -72,11 +72,6 @@ PERCHAI_ERROR_CODE_CASES = [
 ]
 
 
-# =========================================================================
-# TEST CASES
-# =========================================================================
-
-
 def test_perchai_in_plugins() -> None:
     given_plugins = PROVIDER_PLUGINS
     when_checked = "perchai"
@@ -98,10 +93,6 @@ def test_has_custom_logic_true() -> None:
 
 
 def test_mro_includes_quota_tracker() -> None:
-    """Given the PerchaiProvider class, when its MRO is inspected, then
-    PerchaiQuotaTracker must appear before ProviderInterface so the
-    mixin's __init__ side effects run first.
-    """
     from rotator_library.providers.provider_interface import ProviderInterface
 
     given_mro = PerchaiProvider.__mro__
@@ -124,11 +115,6 @@ def test_all_error_codes_parsed_correctly(
     error_code: str,
     expected: Optional[Dict[str, Any]],
 ) -> None:
-    """Given any of the 10 upstream perchai error codes, when
-    ``parse_quota_error`` is called with a body containing that
-    ``errorCode``, then the returned dict (or ``None``) must match the
-    documented classification.
-    """
     given_body = json.dumps({"errorCode": error_code, "error": "synthetic test body"})
     given_error = Exception("synthetic")
     when_parsed = PerchaiProvider.parse_quota_error(given_error, given_body)
@@ -139,11 +125,6 @@ def test_all_error_codes_parsed_correctly(
 
 
 def test_429_status_parsed_as_rate_limit() -> None:
-    """Given an Exception whose ``args[0]`` is the string ``"429"`` (no
-    upstream body), when ``parse_quota_error`` is called, then the
-    HTTP-status fallback must yield ``{"reason": "rate_limit",
-    "retry_after": 3600}``.
-    """
     given_error = Exception("429")
     given_body = ""
     when_parsed = PerchaiProvider.parse_quota_error(given_error, given_body)
@@ -154,10 +135,6 @@ def test_429_status_parsed_as_rate_limit() -> None:
 
 
 def test_malformed_body_returns_none() -> None:
-    """Given a syntactically-broken JSON body, when ``parse_quota_error``
-    is called, then the defensive parser must return ``None`` rather
-    than raise.
-    """
     given_error = Exception("synthetic")
     given_body = "{this is not valid json"
     when_parsed = PerchaiProvider.parse_quota_error(given_error, given_body)
@@ -184,9 +161,6 @@ async def test_empty_messages_raises_valueerror() -> None:
 
 
 def test_malformed_sse_line_returns_none() -> None:
-    """Given a malformed JSON SSE ``data:`` line, when ``_parse_sse_line``
-    runs, then the defensive parser must return ``None`` (not raise).
-    """
     given_line = "data: {not valid json"
     given_model = "perchai/test-model"
     when_parsed = PerchaiProvider._parse_sse_line(given_line, given_model)
@@ -197,10 +171,6 @@ def test_malformed_sse_line_returns_none() -> None:
 
 
 def test_unknown_event_type_skipped() -> None:
-    """Given an SSE line whose ``type`` field is not in the recognized set,
-    when ``_parse_sse_line`` runs, then it must return ``None`` so the
-    stream loop continues.
-    """
     given_line = 'data: {"type":"future_event_type","payload":"ignored"}'
     given_model = "perchai/test-model"
     when_parsed = PerchaiProvider._parse_sse_line(given_line, given_model)
@@ -211,11 +181,6 @@ def test_unknown_event_type_skipped() -> None:
 
 
 def test_text_delta_produces_content_chunk() -> None:
-    """Given an ``answer_delta`` SSE event (the raw wire format from
-    ``/api/perch-terminal/model-call``), when ``_parse_sse_line`` runs,
-    then the returned ``ModelResponseStream`` must carry the text in
-    ``choices[0].delta.content``.
-    """
     given_line = 'data: {"type":"answer_delta","text":"hello world"}'
     given_model = "perchai/test-model"
     when_parsed = PerchaiProvider._parse_sse_line(given_line, given_model)
@@ -231,10 +196,6 @@ def test_text_delta_produces_content_chunk() -> None:
 
 
 def test_reasoning_delta_produces_reasoning_chunk() -> None:
-    """Given a ``reasoning_delta`` SSE event, when ``_parse_sse_line``
-    runs, then the returned ``ModelResponseStream`` must carry the text
-    in ``choices[0].delta.reasoning_content``.
-    """
     given_line = 'data: {"type":"reasoning_delta","text":"thinking step"}'
     given_model = "perchai/test-model"
     when_parsed = PerchaiProvider._parse_sse_line(given_line, given_model)
@@ -251,16 +212,6 @@ def test_reasoning_delta_produces_reasoning_chunk() -> None:
 
 
 async def test_stream_without_tool_id_has_synthetic_id() -> None:
-    """Given a Perchai streaming response that emits ``tool_call_delta`` events
-    without ``id`` or ``name`` fields (the actual wire format Perchai sends),
-    when the full streaming pipeline consumes the stream, then every tool_call
-    chunk must have a string ``id`` and ``function.name`` so @ai-sdk clients
-    don't crash with "Expected 'id' to be a string" or
-    "Expected 'function.name' to be a string".
-
-    This is an integration test that exercises the full streaming path:
-    httpx response -> aiter_lines -> _parse_sse_line -> chunk emission.
-    """
     from unittest.mock import AsyncMock, MagicMock
 
     # Simulate Perchai SSE stream: tool_call_delta without id/name
@@ -360,11 +311,6 @@ async def test_stream_without_tool_id_has_synthetic_id() -> None:
 
 
 def test_tool_call_delta_without_id_emits_synthetic_id() -> None:
-    """Given a ``tool_call_delta`` SSE event without ``id`` field (as Perchai
-    currently sends), when ``_parse_sse_line`` runs with tracking maps, then
-    the emitted chunk must contain a synthetic ``id`` so @ai-sdk clients
-    don't crash with "Expected 'id' to be a string".
-    """
     given_line = 'data: {"type":"tool_call_delta","index":0,"name":"my_func","arguments":"{\\"x\\": 1}"}'
     given_model = "perchai/test-model"
     given_id_map: dict[int, str] = {}
@@ -387,11 +333,6 @@ def test_tool_call_delta_without_id_emits_synthetic_id() -> None:
 
 
 def test_tool_call_delta_without_name_emits_synthetic_name() -> None:
-    """Given a ``tool_call_delta`` SSE event without ``name`` field and no
-    request tool names, when ``_parse_sse_line`` runs with tracking maps,
-    then the emitted chunk must contain a synthetic ``function.name`` so
-    @ai-sdk clients don't crash with "Expected 'function.name' to be a string".
-    """
     given_line = 'data: {"type":"tool_call_delta","index":0,"id":"call_abc","arguments":"{\\"x\\": 1}"}'
     given_model = "perchai/test-model"
     given_id_map: dict[int, str] = {}
@@ -415,12 +356,6 @@ def test_tool_call_delta_without_name_emits_synthetic_name() -> None:
 
 
 def test_tool_call_delta_without_name_uses_real_name_from_request() -> None:
-    """Given a ``tool_call_delta`` SSE event without ``name`` field, when
-    ``_parse_sse_line`` runs with ``request_tool_names`` from the original
-    request's tools definition, then the emitted chunk must use the real
-    tool name (e.g. ``read``) instead of a synthetic ``function_0`` so
-    downstream clients call the correct tool.
-    """
     given_line = 'data: {"type":"tool_call_delta","index":0,"id":"call_abc","arguments":"{\\"path\\": \\"/tmp\\"}"}'
     given_model = "perchai/test-model"
     given_id_map: dict[int, str] = {}
@@ -444,11 +379,6 @@ def test_tool_call_delta_without_name_uses_real_name_from_request() -> None:
 
 
 def test_tool_call_delta_index_mismatch_falls_back_to_synthetic() -> None:
-    """Given a ``tool_call_delta`` SSE event with index 2 but only 2 tools
-    in the request (indices 0, 1), when ``_parse_sse_line`` runs, then it
-    must fall back to the synthetic ``function_2`` name since the index
-    is out of range of the request tools.
-    """
     given_line = 'data: {"type":"tool_call_delta","index":2,"arguments":"{}"}'
     given_model = "perchai/test-model"
     given_id_map: dict[int, str] = {}
@@ -470,10 +400,6 @@ def test_tool_call_delta_index_mismatch_falls_back_to_synthetic() -> None:
 
 
 def test_multiple_tool_call_deltas_reuse_same_synthetic_id() -> None:
-    """Given multiple ``tool_call_delta`` events for same index without id/name,
-    when ``_parse_sse_line`` runs with tracking maps, then all chunks must
-    use the same synthetic id/name (not generate new ones per chunk).
-    """
     given_line1 = 'data: {"type":"tool_call_delta","index":0,"arguments":"{\\"x\\": 1}"}'
     given_line2 = 'data: {"type":"tool_call_delta","index":0,"arguments":"{\\"y\\": 2}"}'
     given_model = "perchai/test-model"
@@ -571,11 +497,6 @@ def test_perchai_in_provider_url_map() -> None:
 
 
 def test_background_job_config_returns_valid_dict() -> None:
-    """Given the background-job config static method is called, when
-    invoked on either PerchaiProvider or PerchaiQuotaTracker, then the
-    returned dict must contain ``interval`` and ``name`` keys (the
-    fields the executor scheduler reads).
-    """
     when_called = PerchaiQuotaTracker.get_background_job_config()
     then_returned = when_called
     assert then_returned is not None, (
@@ -592,10 +513,6 @@ def test_background_job_config_returns_valid_dict() -> None:
 
 
 def test_model_quota_groups_has_monthly_group() -> None:
-    """Given PerchaiQuotaTracker.model_quota_groups, when inspected, then
-    the ``monthly($)`` quota group must be present (TUI surfaces this
-    under the dollar-balance view).
-    """
     given_groups = PerchaiQuotaTracker.model_quota_groups
     when_checked = "monthly($)"
     then_present = when_checked in given_groups
@@ -606,10 +523,6 @@ def test_model_quota_groups_has_monthly_group() -> None:
 
 @pytest.mark.asyncio
 async def test_run_background_job_invalid_token_no_crash() -> None:
-    """Given ``run_background_job`` is called with an invalid credential
-    path and no usable session token, when it executes, then it must
-    swallow the resolution failure and return without raising.
-    """
     given_provider = PerchaiProvider()
     given_invalid_credential = "/tmp/does-not-exist-perchai-session.json"
     given_credentials = [given_invalid_credential]
@@ -638,13 +551,6 @@ async def test_run_background_job_invalid_token_no_crash() -> None:
 async def test_expired_token_non_stream_refreshes_and_retries(
     tmp_path: Path,
 ) -> None:
-    """Given a credential file containing an expired access token, when
-    non-streaming ``acompletion`` is called with that file path as
-    ``credential_identifier``, then the provider must resolve the file to
-    the token, receive a 401, refresh the token via
-    ``PerchaiAuthBase.refresh_on_401`` and retry, returning a
-    ``ModelResponse`` with non-empty content.
-    """
     import httpx
 
     given_session = json.loads(PERCHAI_SESSION.read_text(encoding="utf-8"))
@@ -673,14 +579,6 @@ async def test_expired_token_non_stream_refreshes_and_retries(
 async def test_expired_token_stream_refreshes_and_retries(
     tmp_path: Path,
 ) -> None:
-    """Given a credential file containing an expired access token, when
-    streaming ``acompletion`` is called with that file path as
-    ``credential_identifier``, then the provider must resolve the file to
-    the token, receive a 401, refresh the token via
-    ``PerchaiAuthBase.refresh_on_401`` and retry the stream, yielding at
-    least one content chunk and a final chunk with
-    ``finish_reason="stop"``.
-    """
     import httpx
 
     given_session = json.loads(PERCHAI_SESSION.read_text(encoding="utf-8"))
@@ -724,10 +622,6 @@ async def test_expired_token_stream_refreshes_and_retries(
 
 
 def test_credential_file_path_resolves_to_access_token() -> None:
-    """Given a credential_identifier that is a file path to a valid session
-    JSON, when ``_resolve_credential_token`` is called, then it must read the
-    file and return the ``accessToken`` value, NOT the file path itself.
-    """
     import tempfile
 
     from rotator_library.providers.perchai_auth_base import PerchaiAuthBase
@@ -763,10 +657,6 @@ def test_credential_file_path_resolves_to_access_token() -> None:
 def test_env_virtual_path_resolves_to_access_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Given a credential_identifier that is an ``env://perchai/1`` virtual
-    path, when ``load_session`` is called, then it must read the
-    ``PERCHAI_1_ACCESS_TOKEN`` env var and return it as the accessToken.
-    """
     from rotator_library.providers.perchai_auth_base import PerchaiAuthBase
 
     monkeypatch.setenv("PERCHAI_1_ACCESS_TOKEN", "test-env-access-token")
@@ -782,10 +672,6 @@ def test_env_virtual_path_resolves_to_access_token(
 
 
 def test_empty_credential_identifier_falls_back_to_default() -> None:
-    """Given an empty credential_identifier, when ``_resolve_credential_token``
-    is called, then it must fall back to the default session resolution
-    (``_resolve_session_token``), NOT use an empty string as the token.
-    """
     given_provider = PerchaiProvider()
 
     try:
@@ -825,12 +711,6 @@ PROBE_OPTION_IDS = [
 async def test_option_id_routes_to_real_upstream(
     option_id: str,
 ) -> None:
-    """Given a perchai option ID from the docs, when probed against the real
-    API with ``manualModelOptionId``, then the response's ``model``/``provider``
-    must NOT be the default-fallback pair (``moonshotai.kimi-k2.5`` /
-    ``bedrock_mantle``) - otherwise the proxy would silently serve the
-    default model while the caller thinks they got the requested one.
-    """
     import httpx
 
     from rotator_library.providers.perchai_auth_base import PerchaiAuthBase
@@ -886,16 +766,7 @@ async def test_option_id_routes_to_real_upstream(
     )
 
 
-# =========================================================================
-# MODULE-LEVEL SANITY CHECKS (cheap, always run when module is collected)
-# =========================================================================
-
-
 def test_module_constants_nonempty() -> None:
-    """Given the module-level constants are imported, when their values
-    are checked, then the path constants must be non-empty strings so
-    callers can build URLs without needing to re-discover them.
-    """
     given_cache_ttl = MODEL_CACHE_TTL_SECONDS
     given_model_call_path = MODEL_CALL_PATH
     given_usage_path = USAGE_PATH
@@ -910,24 +781,13 @@ def test_module_constants_nonempty() -> None:
     )
 
 
-# =========================================================================
-# Reasoning / thinking normalization tests (RED phase)
-# =========================================================================
-
-
 def test_has_transform_request_hook() -> None:
-    """Given the PerchaiProvider class, when checked for the transform_request
-    hook, then it must exist so the proxy can apply thinking normalization."""
     assert hasattr(PerchaiProvider, "transform_request"), (
         "PerchaiProvider must implement transform_request for thinking normalization"
     )
 
 
 def test_thinking_disabled_strips_reasoning_from_messages() -> None:
-    """Given a request with extra_body.thinking set to disabled, when
-    transform_request runs, then reasoning_content must be stripped from
-    assistant messages in the conversation (perchai does not require it
-    when thinking is off) and the thinking config must be preserved."""
     given_provider = PerchaiProvider()
     given_kwargs: Dict[str, Any] = {
         "model": "perchai/bedrock-mantle-google-gemma-4-e2b",
@@ -945,11 +805,6 @@ def test_thinking_disabled_strips_reasoning_from_messages() -> None:
 
 
 def test_streaming_reasoning_delta_suppressed_when_thinking_disabled() -> None:
-    """Given a perchai stream that emits reasoning_delta events even when
-    thinking is disabled (gemma models do this), when _parse_sse_line
-    processes a reasoning_delta, then it must return None to suppress
-    the reasoning_content chunk - downstream clients like Opencode
-    should not see reasoning_content when thinking is off."""
     given_line = 'data: {"type":"reasoning_delta","text":"thinking about it"}'
     given_model = "perchai/bedrock-mantle-google-gemma-4-e2b"
     given_id_map: dict[int, str] = {}
@@ -966,10 +821,6 @@ def test_streaming_reasoning_delta_suppressed_when_thinking_disabled() -> None:
 
 
 def test_streaming_reasoning_delta_emitted_when_thinking_enabled() -> None:
-    """Given a perchai stream that emits reasoning_delta events when
-    thinking is enabled, when _parse_sse_line processes a reasoning_delta,
-    then it must return a chunk with reasoning_content so downstream
-    clients can display the reasoning."""
     given_line = 'data: {"type":"reasoning_delta","text":"thinking about it"}'
     given_model = "perchai/wandb-deepseek-ai-deepseek-v4-flash-0731"
     given_id_map: dict[int, str] = {}
@@ -989,10 +840,6 @@ def test_streaming_reasoning_delta_emitted_when_thinking_enabled() -> None:
 
 
 def test_non_stream_response_strips_reasoning_when_thinking_disabled() -> None:
-    """Given a non-streaming perchai response that includes reasoning text
-    when thinking was disabled in the request, when the response is parsed,
-    then reasoning_content must NOT be included in the message - clients
-    should not see reasoning when thinking is off."""
     given_provider = PerchaiProvider()
     given_response_data = {
         "text": "Hello!",
@@ -1021,9 +868,6 @@ def test_non_stream_response_strips_reasoning_when_thinking_disabled() -> None:
 
 
 def test_non_stream_response_preserves_reasoning_when_thinking_enabled() -> None:
-    """Given a non-streaming perchai response that includes reasoning text
-    when thinking was enabled in the request, when the response is parsed,
-    then reasoning_content must be included in the message."""
     given_provider = PerchaiProvider()
     given_response_data = {
         "text": "Hello!",
@@ -1051,17 +895,7 @@ def test_non_stream_response_preserves_reasoning_when_thinking_enabled() -> None
     )
 
 
-# =========================================================================
-# Thinking config in payload tests (RED phase)
-# =========================================================================
-
-
 def test_build_payload_includes_thinking_when_enabled() -> None:
-    """Given a perchai request with extra_body.thinking set to enabled and
-    reasoning_effort=low (as sent by the proxy model options), when
-    _build_payload runs, then the payload must include thinking and
-    reasoning_effort at the top level - not nested inside extra_body -
-    so the perchai upstream API receives them in the request body."""
     given_kwargs: Dict[str, Any] = {
         "model": "perchai/bedrock-mantle-google-gemma-4-31b",
         "messages": [{"role": "user", "content": "hi"}],
@@ -1086,10 +920,6 @@ def test_build_payload_includes_thinking_when_enabled() -> None:
 
 
 def test_build_payload_includes_thinking_disabled() -> None:
-    """Given a perchai request with extra_body.thinking set to disabled,
-    when _build_payload runs, then the payload must include
-    thinking: {type: disabled} at the top level and must NOT include
-    reasoning_effort (it's meaningless when thinking is off)."""
     given_kwargs: Dict[str, Any] = {
         "model": "perchai/bedrock-mantle-google-gemma-4-e2b",
         "messages": [{"role": "user", "content": "hi"}],
@@ -1110,10 +940,6 @@ def test_build_payload_includes_thinking_disabled() -> None:
 
 
 def test_build_payload_includes_reasoning_effort_from_kwargs() -> None:
-    """Given a perchai request where reasoning_effort is passed directly in
-    kwargs (from the transforms apply step 3 model_options), when
-    _build_payload runs, then reasoning_effort must be included in the
-    payload so the upstream perchai API receives it."""
     given_kwargs: Dict[str, Any] = {
         "model": "perchai/bedrock-mantle-google-gemma-4-31b",
         "messages": [{"role": "user", "content": "hi"}],
@@ -1132,11 +958,6 @@ def test_build_payload_includes_reasoning_effort_from_kwargs() -> None:
 
 @pytest.mark.asyncio
 async def test_stream_only_reasoning_emits_stop_chunk() -> None:
-    """Given a perchai stream that emits only reasoning_delta events (no
-    answer_delta) followed by a finishReason, when the stream is consumed,
-    then at least one chunk with finish_reason='stop' must be emitted so
-    downstream clients like Opencode see the turn as complete - not as a
-    hung stream with no terminal event."""
     from unittest.mock import AsyncMock, MagicMock
 
     given_sse_lines = [
@@ -1196,9 +1017,6 @@ async def test_stream_only_reasoning_emits_stop_chunk() -> None:
 
 
 def test_build_envelope_includes_thinking_in_request() -> None:
-    """Given a payload with thinking config at top level, when
-    _build_envelope wraps it, then the envelope's request field must
-    contain the thinking config so the perchai upstream API receives it."""
     given_payload = {
         "model": "bedrock-mantle-google-gemma-4-31b",
         "messages": [{"role": "user", "content": "hi"}],
@@ -1221,11 +1039,6 @@ def test_build_envelope_includes_thinking_in_request() -> None:
 
 
 def test_build_payload_strips_effort_when_thinking_disabled() -> None:
-    """Given a perchai request with extra_body.thinking set to disabled AND
-    reasoning_effort present (which can happen when model options set both),
-    when _build_payload runs, then reasoning_effort must be stripped from
-    the payload - sending reasoning_effort with thinking disabled is
-    contradictory and may confuse the upstream API."""
     given_kwargs: Dict[str, Any] = {
         "model": "perchai/bedrock-mantle-google-gemma-4-e2b",
         "messages": [{"role": "user", "content": "hi"}],
@@ -1246,11 +1059,6 @@ def test_build_payload_strips_effort_when_thinking_disabled() -> None:
     assert then_no_effort, (
         f"reasoning_effort must be stripped when thinking disabled: {when_payload!r}"
     )
-
-
-# =========================================================================
-# Provider contract tests (aligned with test_provider_plugins.py patterns)
-# =========================================================================
 
 
 def test_singleton_same_instance() -> None:
@@ -1293,11 +1101,6 @@ def test_default_rotation_mode_is_sequential() -> None:
     )
 
 
-# =========================================================================
-# Thinking policy tests (aligned with test_vertex_provider.py patterns)
-# =========================================================================
-
-
 def test_plain_request_does_not_auto_enable_thinking() -> None:
     given_kwargs: Dict[str, Any] = {
         "model": "perchai/bedrock-mantle-google-gemma-4-31b",
@@ -1330,4 +1133,170 @@ def test_reasoning_effort_passes_through_without_thinking_config() -> None:
     then_effort = when_payload.get("reasoning_effort")
     assert then_effort == "medium", (
         f"reasoning_effort should pass through without thinking config, got {then_effort!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_fetch_usage_data_uses_account_endpoint_not_usage_endpoint() -> None:
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    given_tracker = PerchaiQuotaTracker()
+    given_tracker._balance_cache = {}
+    given_token = "test-token"
+    given_app_url = "https://app.perchai.app"
+    given_credential = "perchai_oauth_1.json"
+
+    given_response = MagicMock()
+    given_response.status_code = 200
+    given_response.raise_for_status = MagicMock()
+    given_response.json = MagicMock(return_value={
+        "ok": True,
+        "session": {
+            "planCode": "starter",
+            "planName": "Starter",
+        },
+        "usageMeter": {
+            "monthly_usd": 5.0,
+            "daily_usd": 1.0,
+            "weekly_usd": 3.0,
+        },
+        "creditBalancePt": 0,
+    })
+
+    given_client = MagicMock()
+    given_client.get = AsyncMock(return_value=given_response)
+    given_client.__aenter__ = AsyncMock(return_value=given_client)
+    given_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("httpx.AsyncClient", return_value=given_client):
+        when_result = await given_tracker._fetch_usage_data(
+            given_credential, given_token, given_app_url
+        )
+
+    then_called_url = given_client.get.call_args[0][0] if given_client.get.call_args else None
+    assert then_called_url is not None, (
+        "_fetch_usage_data did not make any HTTP request"
+    )
+    then_is_account = "/api/perchai/account" in then_called_url
+    assert then_is_account, (
+        f"_fetch_usage_data must call /api/perchai/account, "
+        f"got {then_called_url!r}"
+    )
+    then_not_usage = "/api/perch-terminal/usage" not in then_called_url
+    assert then_not_usage, (
+        f"_fetch_usage_data must NOT call /api/perch-terminal/usage "
+        f"(that endpoint returns 405 on GET), got {then_called_url!r}"
+    )
+    assert when_result is not None, (
+        "_fetch_usage_data should return parsed JSON, got None"
+    )
+
+
+@pytest.mark.asyncio
+async def test_fetch_usage_data_uses_get_method() -> None:
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    given_tracker = PerchaiQuotaTracker()
+    given_tracker._balance_cache = {}
+    given_token = "test-token"
+    given_app_url = "https://app.perchai.app"
+    given_credential = "perchai_oauth_1.json"
+
+    given_response = MagicMock()
+    given_response.status_code = 200
+    given_response.raise_for_status = MagicMock()
+    given_response.json = MagicMock(return_value={"ok": True, "session": {}})
+
+    given_client = MagicMock()
+    given_client.get = AsyncMock(return_value=given_response)
+    given_client.__aenter__ = AsyncMock(return_value=given_client)
+    given_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("httpx.AsyncClient", return_value=given_client):
+        await given_tracker._fetch_usage_data(
+            given_credential, given_token, given_app_url
+        )
+
+    then_get_called = given_client.get.called
+    assert then_get_called, (
+        "_fetch_usage_data must use client.get (GET method), "
+        "not client.post"
+    )
+
+
+def test_extract_dollar_fields_from_account_response_monthly_usd() -> None:
+    given_data = {
+        "ok": True,
+        "session": {
+            "planCode": "starter",
+            "planName": "Starter",
+            "entitlements": [],
+        },
+        "usageMeter": {
+            "monthly_usd": 5.0,
+            "daily_usd": 1.0,
+            "weekly_usd": 3.0,
+        },
+        "creditBalancePt": 0,
+    }
+
+    when_used, when_cap, when_reset = PerchaiQuotaTracker._extract_dollar_fields(
+        given_data
+    )
+
+    then_used = when_used
+    assert then_used == 500, (
+        f"monthly_usd=5.0 should produce used_cents=500, got {then_used!r}"
+    )
+
+
+def test_extract_dollar_fields_from_account_response_monthly_cap() -> None:
+    given_data = {
+        "ok": True,
+        "session": {
+            "planCode": "starter",
+            "planName": "Starter",
+            "entitlements": [
+                {"key": "usage.monthly", "value_json": {"limitUsd": 10.0}},
+            ],
+        },
+        "usageMeter": {
+            "monthly_usd": 5.0,
+            "daily_usd": 1.0,
+            "weekly_usd": 3.0,
+        },
+        "creditBalancePt": 0,
+    }
+
+    when_used, when_cap, when_reset = PerchaiQuotaTracker._extract_dollar_fields(
+        given_data
+    )
+
+    then_cap = when_cap
+    assert then_cap == 1000, (
+        f"limitUsd=10.0 should produce cap_cents=1000, got {then_cap!r}"
+    )
+
+
+def test_extract_dollar_fields_account_no_entitlements_cap_zero() -> None:
+    given_data = {
+        "ok": True,
+        "session": {
+            "planCode": "internal",
+            "planName": "Internal",
+            "entitlements": [],
+        },
+        "usageMeter": {
+            "monthly_usd": 100.0,
+        },
+        "creditBalancePt": 5000,
+    }
+
+    when_used, when_cap, when_reset = PerchaiQuotaTracker._extract_dollar_fields(
+        given_data
+    )
+
+    then_cap = when_cap
+    assert then_cap == 0, (
+        f"unlimited plan should have cap_cents=0, got {then_cap!r}"
     )

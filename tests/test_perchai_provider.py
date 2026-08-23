@@ -1300,3 +1300,239 @@ def test_extract_dollar_fields_account_no_entitlements_cap_zero() -> None:
     assert then_cap == 0, (
         f"unlimited plan should have cap_cents=0, got {then_cap!r}"
     )
+
+
+# =========================================================================
+# Guard thinking tool calls: Perchai must be exempt
+#
+# _guard_thinking_tool_calls injects thinking:{type:disabled} when an
+# assistant message has tool_calls but no reasoning_content. This was
+# designed for DeepSeek/Kimi which require reasoning_content replay.
+# Perchai's API does NOT require this - the guard degrades context by
+# forcing thinking off on every tool-call turn, causing the model to
+# loop on the same tool call instead of progressing.
+# =========================================================================
+
+
+def test_guard_thinking_tool_calls_exempts_perchai() -> None:
+    from rotator_library.client.transforms import ProviderTransforms
+
+    given_transforms = ProviderTransforms(provider_plugins={})
+    given_kwargs: Dict[str, Any] = {
+        "model": "perchai/bedrock-mantle-google-gemma-4-e2b",
+        "messages": [
+            {"role": "user", "content": "call a tool then say hi"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_0",
+                        "type": "function",
+                        "function": {
+                            "name": "ast_grep_replace",
+                            "arguments": '{"pattern": "test"}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "content": "tool result",
+                "tool_call_id": "call_0",
+            },
+        ],
+    }
+
+    when_result = given_transforms._guard_thinking_tool_calls(
+        given_kwargs, "perchai/bedrock-mantle-google-gemma-4-e2b", "perchai"
+    )
+
+    then_not_disabled = when_result is None
+    assert then_not_disabled, (
+        f"_guard_thinking_tool_calls must NOT inject thinking:disabled "
+        f"for perchai provider (causes tool-call loop), got: {when_result!r}"
+    )
+    then_no_thinking = "thinking" not in (
+        given_kwargs.get("extra_body") or {}
+    )
+    assert then_no_thinking, (
+        f"extra_body must not contain thinking key for perchai, "
+        f"got: {given_kwargs.get('extra_body')!r}"
+    )
+
+
+def test_get_model_options_returns_empty_without_perchai_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rotator_library.model_definitions import ModelDefinitions
+
+    monkeypatch.delenv("PERCHAI_MODELS", raising=False)
+    defs = ModelDefinitions()
+    defs.reload_definitions()
+
+    given_provider = PerchaiProvider()
+    when_options = given_provider.get_model_options("perchai/some-model")
+
+    then_empty = when_options == {}
+    assert then_empty, (
+        f"get_model_options should return empty dict when no PERCHAI_MODELS "
+        f"is set, got: {when_options!r}"
+    )
+
+
+def test_get_model_options_returns_options_from_perchai_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rotator_library.model_definitions import ModelDefinitions
+
+    given_models_json = json.dumps(
+        {
+            "gpt-5": {"options": {"reasoning_effort": "high"}},
+            "claude-4": {"options": {"temperature": 0.7}},
+        }
+    )
+    monkeypatch.setenv("PERCHAI_MODELS", given_models_json)
+    defs = ModelDefinitions()
+    defs.reload_definitions()
+
+    given_provider = PerchaiProvider()
+
+    when_gpt5_options = given_provider.get_model_options("perchai/gpt-5")
+    then_gpt5_reasoning = when_gpt5_options.get("reasoning_effort") == "high"
+    assert then_gpt5_reasoning, (
+        f"get_model_options for gpt-5 should return reasoning_effort=high, "
+        f"got: {when_gpt5_options!r}"
+    )
+
+    when_claude4_options = given_provider.get_model_options("perchai/claude-4")
+    then_claude4_temp = when_claude4_options.get("temperature") == 0.7
+    assert then_claude4_temp, (
+        f"get_model_options for claude-4 should return temperature=0.7, "
+        f"got: {when_claude4_options!r}"
+    )
+
+    monkeypatch.delenv("PERCHAI_MODELS", raising=False)
+    defs.reload_definitions()
+
+
+def test_get_model_options_strips_provider_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rotator_library.model_definitions import ModelDefinitions
+
+    given_models_json = json.dumps(
+        {"my-model": {"options": {"max_tokens": 4096}}}
+    )
+    monkeypatch.setenv("PERCHAI_MODELS", given_models_json)
+    defs = ModelDefinitions()
+    defs.reload_definitions()
+
+    given_provider = PerchaiProvider()
+    when_options = given_provider.get_model_options("perchai/my-model")
+
+    then_max_tokens = when_options.get("max_tokens") == 4096
+    assert then_max_tokens, (
+        f"get_model_options should strip 'perchai/' prefix and find options, "
+        f"got: {when_options!r}"
+    )
+
+    monkeypatch.delenv("PERCHAI_MODELS", raising=False)
+    defs.reload_definitions()
+
+
+@pytest.mark.asyncio
+async def test_get_models_merges_static_and_dynamic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rotator_library.model_definitions import ModelDefinitions
+    import httpx
+    from unittest.mock import AsyncMock, MagicMock
+
+    given_models_json = json.dumps(
+        {"static-model-1": {}, "static-model-2": {"id": "upstream-id-2"}}
+    )
+    monkeypatch.setenv("PERCHAI_MODELS", given_models_json)
+    defs = ModelDefinitions()
+    defs.reload_definitions()
+
+    given_provider = PerchaiProvider()
+    given_provider._model_cache.clear()
+    given_provider._model_cache_timestamps.clear()
+
+    given_response = MagicMock()
+    given_response.raise_for_status = MagicMock()
+    given_response.json = MagicMock(
+        return_value={
+            "models": ["static-model-1", "upstream-id-2", "dynamic-model-3"]
+        }
+    )
+    given_client = MagicMock(spec=httpx.AsyncClient)
+    given_client.get = AsyncMock(return_value=given_response)
+
+    when_models = await given_provider.get_models("test-key", given_client)
+
+    then_has_static_1 = "perchai/static-model-1" in when_models
+    assert then_has_static_1, (
+        f"get_models should include static model 'perchai/static-model-1', "
+        f"got: {when_models!r}"
+    )
+
+    then_has_static_2 = "perchai/static-model-2" in when_models
+    assert then_has_static_2, (
+        f"get_models should include static model 'perchai/static-model-2' "
+        f"(display name, not upstream id), got: {when_models!r}"
+    )
+
+    then_no_upstream_id = "perchai/upstream-id-2" not in when_models
+    assert then_no_upstream_id, (
+        f"get_models should not duplicate 'perchai/upstream-id-2' "
+        f"(covered by static-model-2), got: {when_models!r}"
+    )
+
+    then_has_dynamic = "perchai/dynamic-model-3" in when_models
+    assert then_has_dynamic, (
+        f"get_models should include dynamic model 'perchai/dynamic-model-3', "
+        f"got: {when_models!r}"
+    )
+
+    monkeypatch.delenv("PERCHAI_MODELS", raising=False)
+    defs.reload_definitions()
+
+
+@pytest.mark.asyncio
+async def test_get_models_returns_static_only_when_no_dynamic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rotator_library.model_definitions import ModelDefinitions
+    import httpx
+    from unittest.mock import AsyncMock, MagicMock
+
+    given_models_json = json.dumps(["fallback-model-1", "fallback-model-2"])
+    monkeypatch.setenv("PERCHAI_MODELS", given_models_json)
+    defs = ModelDefinitions()
+    defs.reload_definitions()
+
+    given_provider = PerchaiProvider()
+    given_provider._model_cache.clear()
+    given_provider._model_cache_timestamps.clear()
+
+    given_client = MagicMock(spec=httpx.AsyncClient)
+    given_client.get = AsyncMock(side_effect=httpx.RequestError("fail"))
+
+    when_models = await given_provider.get_models("test-key", given_client)
+
+    then_has_fallback_1 = "perchai/fallback-model-1" in when_models
+    assert then_has_fallback_1, (
+        f"get_models should return static models when dynamic fails, "
+        f"got: {when_models!r}"
+    )
+
+    then_has_fallback_2 = "perchai/fallback-model-2" in when_models
+    assert then_has_fallback_2, (
+        f"get_models should return static models when dynamic fails, "
+        f"got: {when_models!r}"
+    )
+
+    monkeypatch.delenv("PERCHAI_MODELS", raising=False)
+    defs.reload_definitions()

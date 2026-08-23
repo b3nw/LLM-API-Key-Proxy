@@ -18,6 +18,7 @@ from litellm.types.utils import ChatCompletionMessageToolCall, Function
 
 from ..timeout_config import TimeoutConfig
 from ..transaction_logger import ProviderLogger
+from ..model_definitions import ModelDefinitions
 from .provider_interface import ProviderInterface
 from .utilities.perchai_quota_tracker import PerchaiQuotaTracker
 
@@ -141,6 +142,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         self._model_cache: Dict[str, List[str]] = {}
         self._model_cache_timestamps: Dict[str, float] = {}
         self._auth_base_cache: Dict[str, Any] = {}
+        self.model_definitions = ModelDefinitions()
 
     @override
     def has_custom_logic(self) -> bool:
@@ -165,6 +167,11 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
 
         return modifications
 
+    def get_model_options(self, model_name: str) -> Dict[str, Any]:
+        if model_name.startswith("perchai/"):
+            model_name = model_name[len("perchai/"):]
+        return self.model_definitions.get_model_options("perchai", model_name)
+
     @override
     async def get_models(
         self, api_key: str, client: httpx.AsyncClient
@@ -172,6 +179,20 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         cache_key = self._cache_key_for(api_key)
         if self._model_cache_is_valid(cache_key):
             return list(self._model_cache[cache_key])
+
+        models: List[str] = []
+
+        static_models = self.model_definitions.get_all_provider_models("perchai")
+        if static_models:
+            models.extend(static_models)
+
+        static_ids: set = set()
+        for m in static_models:
+            suffix = m.split("/", 1)[1] if "/" in m else m
+            static_ids.add(suffix)
+            upstream_id = self.model_definitions.get_model_id("perchai", suffix)
+            if upstream_id and upstream_id != suffix:
+                static_ids.add(upstream_id)
 
         try:
             app_url = self._resolve_app_url(api_key)
@@ -188,21 +209,30 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
             data = response.json()
 
             model_ids = self._extract_model_ids(data)
-            if not model_ids:
+            dynamic_models = [
+                f"perchai/{mid}" for mid in model_ids if mid not in static_ids
+            ]
+            if dynamic_models:
+                models.extend(dynamic_models)
+
+            if not models:
                 lib_logger.debug(
                     "Perchai account endpoint returned no models "
                     f"(tried {len(_PERCHAI_MODEL_FIELD_PATHS)} field paths)"
                 )
                 return []
 
-            prefixed = [f"perchai/{model_id}" for model_id in model_ids]
-            self._model_cache[cache_key] = prefixed
+            self._model_cache[cache_key] = models
             self._model_cache_timestamps[cache_key] = time.time()
-            return prefixed
+            return models
 
         except Exception as exc:
+            if models:
+                self._model_cache[cache_key] = models
+                self._model_cache_timestamps[cache_key] = time.time()
+                return models
             lib_logger.debug(f"Failed to fetch Perchai models: {exc}")
-            return []
+            return models if models else []
 
     @override
     async def acompletion(

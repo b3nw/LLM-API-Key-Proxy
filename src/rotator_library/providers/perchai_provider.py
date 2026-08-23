@@ -39,7 +39,6 @@ USAGE_PATH: str = "/api/perch-terminal/usage"
 
 DEFAULT_LANE: str = "chat"
 
-
 SUPPORTED_PARAMS: set[str] = {
     "model",
     "messages",
@@ -848,17 +847,18 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         model: str, payload: Dict[str, Any]
     ) -> Dict[str, Any]:
         stripped = model.split("/", 1)[1] if "/" in model else model
-        return {
+        envelope: Dict[str, Any] = {
             "request": dict(payload),
             "runId": None,
             "lane": DEFAULT_LANE,
+            "strictManual": False,
             "preferredModelId": None,
             "manualModelOptionId": stripped,
             "avoidModelIds": [],
             "attribution": None,
             "clientSurface": "cli",
-            "promoOverflowAccepted": False,
         }
+        return envelope
 
     @staticmethod
     def _parse_sse_line(
@@ -1008,6 +1008,71 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         finish_reason = parsed_event.get("finishReason") or parsed_event.get(
             "finish_reason"
         )
+        if event_type == "done":
+            ok = parsed_event.get("ok")
+            if ok is False:
+                error_text = str(parsed_event.get("error") or "Model call failed")
+                lib_logger.debug(
+                    f"Perchai stream: done event with error: {error_text}"
+                )
+                return None
+            finish_reason_done = (
+                parsed_event.get("finishReason")
+                or parsed_event.get("finish_reason")
+                or "stop"
+            )
+            raw_tool_calls = parsed_event.get("toolCalls")
+            if isinstance(raw_tool_calls, list) and raw_tool_calls:
+                tool_call_deltas: List[Dict[str, Any]] = []
+                for tc_idx, tc in enumerate(raw_tool_calls):
+                    if not isinstance(tc, dict):
+                        continue
+                    tc_id = tc.get("id") or f"call_{tc_idx}"
+                    tc_name = tc.get("name")
+                    tc_arguments = tc.get("arguments", "")
+                    if isinstance(tc_arguments, dict):
+                        arguments_str = json.dumps(tc_arguments, ensure_ascii=False)
+                    elif isinstance(tc_arguments, str):
+                        arguments_str = tc_arguments
+                    else:
+                        arguments_str = ""
+                    function_delta_done: Dict[str, Any] = {}
+                    if tc_name is not None:
+                        function_delta_done["name"] = tc_name
+                    function_delta_done["arguments"] = arguments_str
+                    tool_call_deltas.append({
+                        "index": tc_idx,
+                        "type": "function",
+                        "id": tc_id,
+                        "function": function_delta_done,
+                    })
+                return litellm.ModelResponseStream(
+                    id=f"chatcmpl-perchai-stream-{int(time.time())}",
+                    created=int(time.time()),
+                    model=model,
+                    object="chat.completion.chunk",
+                    choices=[
+                        {
+                            "index": 0,
+                            "delta": {"tool_calls": tool_call_deltas},
+                            "finish_reason": "tool_calls",
+                        }
+                    ],
+                )
+            return litellm.ModelResponseStream(
+                id=f"chatcmpl-perchai-stream-{int(time.time())}",
+                created=int(time.time()),
+                model=model,
+                object="chat.completion.chunk",
+                choices=[
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": finish_reason_done,
+                    }
+                ],
+            )
+
         if finish_reason:
             return litellm.ModelResponseStream(
                 id=f"chatcmpl-perchai-stream-{int(time.time())}",

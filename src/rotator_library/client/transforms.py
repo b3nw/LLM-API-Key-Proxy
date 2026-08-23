@@ -240,7 +240,7 @@ class ProviderTransforms:
         ``reasoning_content`` on replay and think by default — disabling
         thinking would suppress useful output with no benefit.
         """
-        if provider in ("vertex", "gemini", "google", "perchai"):
+        if provider in ("vertex", "gemini", "google"):
             return None
 
         messages = kwargs.get("messages")

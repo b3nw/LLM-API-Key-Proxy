@@ -1302,19 +1302,7 @@ def test_extract_dollar_fields_account_no_entitlements_cap_zero() -> None:
     )
 
 
-# =========================================================================
-# Guard thinking tool calls: Perchai must be exempt
-#
-# _guard_thinking_tool_calls injects thinking:{type:disabled} when an
-# assistant message has tool_calls but no reasoning_content. This was
-# designed for DeepSeek/Kimi which require reasoning_content replay.
-# Perchai's API does NOT require this - the guard degrades context by
-# forcing thinking off on every tool-call turn, causing the model to
-# loop on the same tool call instead of progressing.
-# =========================================================================
-
-
-def test_guard_thinking_tool_calls_exempts_perchai() -> None:
+def test_guard_thinking_tool_calls_handles_perchai() -> None:
     from rotator_library.client.transforms import ProviderTransforms
 
     given_transforms = ProviderTransforms(provider_plugins={})
@@ -1348,16 +1336,16 @@ def test_guard_thinking_tool_calls_exempts_perchai() -> None:
         given_kwargs, "perchai/bedrock-mantle-google-gemma-4-e2b", "perchai"
     )
 
-    then_not_disabled = when_result is None
-    assert then_not_disabled, (
-        f"_guard_thinking_tool_calls must NOT inject thinking:disabled "
-        f"for perchai provider (causes tool-call loop), got: {when_result!r}"
+    then_disabled = when_result is not None
+    assert then_disabled, (
+        f"_guard_thinking_tool_calls should inject thinking:disabled "
+        f"for perchai provider when reasoning_content is missing, got: {when_result!r}"
     )
-    then_no_thinking = "thinking" not in (
-        given_kwargs.get("extra_body") or {}
+    then_thinking_disabled = (
+        given_kwargs.get("extra_body", {}).get("thinking", {}).get("type") == "disabled"
     )
-    assert then_no_thinking, (
-        f"extra_body must not contain thinking key for perchai, "
+    assert then_thinking_disabled, (
+        f"extra_body should contain thinking:disabled for perchai, "
         f"got: {given_kwargs.get('extra_body')!r}"
     )
 
@@ -1536,3 +1524,141 @@ async def test_get_models_returns_static_only_when_no_dynamic(
 
     monkeypatch.delenv("PERCHAI_MODELS", raising=False)
     defs.reload_definitions()
+
+
+def test_build_envelope_omits_promo_overflow_when_false() -> None:
+    given_model = "perchai/bedrock-mantle-google-gemma-4-31b"
+    given_payload: Dict[str, Any] = {
+        "model": "bedrock-mantle-google-gemma-4-31b",
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    when_envelope = PerchaiProvider._build_envelope(
+        model=given_model, payload=given_payload
+    )
+    then_no_promo = "promoOverflowAccepted" not in when_envelope
+    assert then_no_promo, (
+        f"envelope should not include promoOverflowAccepted when false, "
+        f"got: {when_envelope!r}"
+    )
+    then_strict = when_envelope.get("strictManual") is False
+    assert then_strict, (
+        f"envelope should include strictManual=False, "
+        f"got: {when_envelope!r}"
+    )
+
+
+def test_parse_sse_done_event_with_tool_calls() -> None:
+    given_line = (
+        'data: {"type":"done","ok":true,"text":"done","toolCalls":'
+        '[{"id":"call_0","name":"bash","arguments":"{}"}]}'
+    )
+    when_chunk = PerchaiProvider._parse_sse_line(given_line)
+    assert when_chunk is not None, (
+        "done event with toolCalls should produce a chunk, got None"
+    )
+    then_finish = when_chunk.choices[0].finish_reason == "tool_calls"
+    assert then_finish, (
+        f"done event with toolCalls should have finish_reason=tool_calls, "
+        f"got: {when_chunk.choices[0].finish_reason!r}"
+    )
+
+
+def test_parse_sse_done_event_without_tool_calls() -> None:
+    given_line = (
+        'data: {"type":"done","ok":true,"text":"hello","finishReason":"stop"}'
+    )
+    when_chunk = PerchaiProvider._parse_sse_line(given_line)
+    assert when_chunk is not None, (
+        "done event without toolCalls should produce a chunk, got None"
+    )
+    then_finish = when_chunk.choices[0].finish_reason == "stop"
+    assert then_finish, (
+        f"done event without toolCalls should have finish_reason=stop, "
+        f"got: {when_chunk.choices[0].finish_reason!r}"
+    )
+
+
+def test_parse_sse_done_event_with_error_returns_none() -> None:
+    given_line = (
+        'data: {"type":"done","ok":false,"error":"Model call failed"}'
+    )
+    when_chunk = PerchaiProvider._parse_sse_line(given_line)
+    assert when_chunk is None, (
+        f"done event with ok=false should return None, got: {when_chunk!r}"
+    )
+
+
+def test_red_build_payload_does_not_inject_reasoning_content_on_tool_calls() -> None:
+    given_kwargs: Dict[str, Any] = {
+        "model": "perchai/bedrock-mantle-google-gemma-4-31b",
+        "messages": [
+            {"role": "user", "content": "call a tool"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_0",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "content": "result", "tool_call_id": "call_0"},
+        ],
+    }
+    when_payload = PerchaiProvider._build_payload(
+        model_name="bedrock-mantle-google-gemma-4-31b",
+        kwargs=given_kwargs,
+    )
+    then_messages = when_payload.get("messages", [])
+    then_assistant = next(
+        (m for m in then_messages if m.get("role") == "assistant" and m.get("tool_calls")),
+        None,
+    )
+    assert then_assistant is not None, "test setup: expected assistant message with tool_calls"
+    then_no_reasoning = "reasoning_content" not in then_assistant
+    assert then_no_reasoning, (
+        f"reasoning_content must NOT be injected on assistant tool-call messages. "
+        f"The Perch CLI never sends this field - injecting it corrupts conversation. "
+        f"Got: {then_assistant!r}"
+    )
+
+
+def test_red_parse_sse_done_event_with_tool_calls() -> None:
+    given_line = (
+        'data: {"type":"done","ok":true,"text":"done","toolCalls":'
+        '[{"id":"call_0","name":"bash","arguments":"{}"}]}'
+    )
+    when_chunk = PerchaiProvider._parse_sse_line(given_line)
+    assert when_chunk is not None, (
+        "done event with toolCalls must produce a chunk. "
+        "OLD CODE silently dropped done events - tool calls were lost."
+    )
+    then_finish = when_chunk.choices[0].finish_reason == "tool_calls"
+    assert then_finish, (
+        f"done event with toolCalls must set finish_reason=tool_calls. "
+        f"Got: {when_chunk.choices[0].finish_reason!r}"
+    )
+
+
+def test_red_envelope_does_not_send_promo_overflow_false() -> None:
+    given_model = "perchai/bedrock-mantle-google-gemma-4-31b"
+    given_payload: Dict[str, Any] = {
+        "model": "bedrock-mantle-google-gemma-4-31b",
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    when_envelope = PerchaiProvider._build_envelope(
+        model=given_model, payload=given_payload
+    )
+    then_no_promo = "promoOverflowAccepted" not in when_envelope
+    assert then_no_promo, (
+        f"envelope must NOT include promoOverflowAccepted when false. "
+        f"The Perch CLI only sends it when true. "
+        f"Got: {when_envelope!r}"
+    )
+    then_has_strict = "strictManual" in when_envelope
+    assert then_has_strict, (
+        f"envelope must include strictManual field. "
+        f"Got: {when_envelope!r}"
+    )

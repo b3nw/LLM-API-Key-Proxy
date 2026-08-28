@@ -1,3 +1,38 @@
+## 2026-08-28 — Resolve prompt cache busting across multi-turn sessions
+
+Target: `feat(codex): Responses API rewrite, dynamic model discovery, and OAuth exports`
+Files:
+- `src/rotator_library/providers/codex_provider.py`
+- `src/rotator_library/client/executor.py`
+- `src/proxy_app/responses_compat.py`
+- `tests/test_codex_prompt_caching.py`
+
+Branch:
+- `fix/codex-prompt-caching`
+
+Verification:
+- `uv run pytest tests/test_codex_prompt_caching.py -v` — passed (16 tests)
+- `uv run python3 -m py_compile src/rotator_library/providers/codex_provider.py src/rotator_library/client/executor.py src/proxy_app/responses_compat.py tests/test_codex_prompt_caching.py` — passed
+- `uv run ruff check src/rotator_library/providers/codex_provider.py src/rotator_library/client/executor.py src/proxy_app/responses_compat.py tests/test_codex_prompt_caching.py --select F401,F811,F821,E9` — passed
+
+Notes:
+- Bug: Near-zero prompt cache hit rates reported on Codex models during multi-turn chats.
+- Root cause:
+  1. `<think>` reasoning tags were injected into assistant responses and echoed back by clients in message history without being stripped in `_convert_messages_to_responses_input()`, causing prompt prefix divergence after turn 1.
+  2. Missing `"type": "message"` on assistant input items in the Responses API payload.
+  3. `SessionTracker` inferred `session_id`, but `executor._prepare_request_kwargs()` dropped `context.session_id`, leaving `headers["session_id"]` and `payload["prompt_cache_key"]` empty strings on every request.
+  4. Missing tool call IDs in history generated random UUIDs on each request (`uuid.uuid4()`), mutating past turns.
+  5. Responses API gateway (`responses_compat.py`) stripped `prompt_cache_key` and `session_id` when translating incoming `/v1/responses` requests to Chat Completions.
+- Fix:
+  1. Stripped leading `<think>` tags with prefix-anchored regex `^<(?:think|thought)(?:ing)?>.*?</(?:think|thought)(?:ing)?>\n?` while preserving exact whitespace and mid-sentence tags.
+  2. Explicitly added `"type": "message"` to assistant input items.
+  3. Propagated `context.session_id` through `_prepare_request_kwargs()` to populate `headers["session_id"]` and `payload["prompt_cache_key"]`.
+  4. Replaced random UUID generation with request-scoped deterministic hash IDs (`call_gen_{global_tool_idx}_{content_hash}`).
+  5. Passed through `prompt_cache_key`, `session_id`, and `conversation_id` in `responses_compat.py`.
+  6. Generated unique `x-client-request-id` per request to avoid upstream deduplication conflicts.
+
+---
+
 ## 2026-06-26 — Don't block routing when paid credits bypass included-window exhaustion
 
 Target: `feat(codex): Responses API rewrite, dynamic model discovery, and OAuth exports`

@@ -240,6 +240,17 @@ def convert_responses_request_to_chat(request_data: Dict[str, Any]) -> Dict[str,
     if request_data.get("user"):
         cc_request["user"] = request_data["user"]
 
+    # Pass through cache and session routing identifiers
+    for key in (
+        "prompt_cache_key",
+        "session_id",
+        "sessionId",
+        "conversation_id",
+        "conversationId",
+    ):
+        if request_data.get(key):
+            cc_request[key] = request_data[key]
+
     return cc_request
 
 

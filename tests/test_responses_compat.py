@@ -233,3 +233,105 @@ def test_flatten_output_content():
     assert _flatten_output_content("hello") == "hello"
     assert _flatten_output_content([{"type": "output_text", "text": "hi"}, "there"]) == "hi\nthere"
     assert _flatten_output_content(None) == ""
+
+
+def parse_sse_events(raw):
+    """Parse a raw SSE string into a list of (event_type, data_dict) tuples."""
+    events = []
+    current_event = None
+    for line in raw.split("\n"):
+        if line.startswith("event: "):
+            current_event = line[len("event: "):]
+        elif line.startswith("data: "):
+            data = json.loads(line[len("data: "):])
+            events.append((current_event, data))
+            current_event = None
+    return events
+
+
+def test_responses_stream_converter_emits_reasoning_lifecycle():
+    """Reasoning stream emits output_item.added, summary_part.added, delta, then done events."""
+    converter = ResponsesStreamConverter("resp_123", "test-model")
+
+    # Creation chunk
+    chunk1 = {"model": "test-model", "choices": [], "usage": None}
+    converter.convert_chunk(f"data: {json.dumps(chunk1)}")
+
+    # First reasoning delta — should emit output_item.added + summary_part.added + delta
+    chunk2 = {"choices": [{"delta": {"reasoning_content": "thinking..."}}]}
+    events2 = parse_sse_events(converter.convert_chunk(f"data: {json.dumps(chunk2)}"))
+    event_types = [e[0] for e in events2]
+    assert "response.output_item.added" in event_types
+    assert "response.reasoning_summary_part.added" in event_types
+    assert "response.reasoning_summary_text.delta" in event_types
+
+    # Verify the output_item.added has type "reasoning"
+    added_event = next(e for e in events2 if e[0] == "response.output_item.added")
+    assert added_event[1]["item"]["type"] == "reasoning"
+
+    # Second reasoning delta — should only emit delta (no added events)
+    chunk3 = {"choices": [{"delta": {"reasoning_content": " more thinking"}}]}
+    events3 = parse_sse_events(converter.convert_chunk(f"data: {json.dumps(chunk3)}"))
+    event_types3 = [e[0] for e in events3]
+    assert "response.reasoning_summary_text.delta" in event_types3
+    assert "response.output_item.added" not in event_types3
+    assert "response.reasoning_summary_part.added" not in event_types3
+
+    # Finalize — should emit summary_text.done, summary_part.done, output_item.done
+    events_final = parse_sse_events(converter.convert_chunk("data: [DONE]"))
+    final_types = [e[0] for e in events_final]
+    assert "response.reasoning_summary_text.done" in final_types
+    assert "response.reasoning_summary_part.done" in final_types
+    assert "response.output_item.done" in final_types
+    assert "response.completed" in final_types
+
+
+def test_responses_stream_converter_allocates_unique_output_indices():
+    """Mixed reasoning + message + function_call get unique output indices (0, 1, 2)."""
+    converter = ResponsesStreamConverter("resp_456", "test-model")
+
+    # Creation chunk
+    chunk1 = {"model": "test-model", "choices": [], "usage": None}
+    converter.convert_chunk(f"data: {json.dumps(chunk1)}")
+
+    # Reasoning delta
+    chunk2 = {"choices": [{"delta": {"reasoning_content": "thinking"}}]}
+    converter.convert_chunk(f"data: {json.dumps(chunk2)}")
+
+    # Content delta (message)
+    chunk3 = {"choices": [{"delta": {"content": "hello"}}]}
+    converter.convert_chunk(f"data: {json.dumps(chunk3)}")
+
+    # Tool call delta
+    chunk4 = {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "function": {"name": "f", "arguments": "{}"}}]}}]}
+    converter.convert_chunk(f"data: {json.dumps(chunk4)}")
+
+    # Finalize
+    events_final = parse_sse_events(converter.convert_chunk("data: [DONE]"))
+
+    # Collect all output_index values from output_item.done events
+    done_indices = []
+    for event_type, data in events_final:
+        if event_type == "response.output_item.done":
+            done_indices.append(data["output_index"])
+
+    # All three item types should have unique indices
+    assert set(done_indices) == {0, 1, 2}, f"Expected indices {{0, 1, 2}}, got {set(done_indices)}"
+
+    # output_item.done events must be emitted in allocation order so
+    # stream event order matches the final output array order.
+    assert done_indices == sorted(done_indices), \
+        f"Done event order {done_indices} != sorted {sorted(done_indices)}"
+
+    # Verify the completed response output array matches the done event order
+    completed = next(
+        data for etype, data in events_final
+        if etype == "response.completed"
+    )
+    output = completed["response"]["output"]
+    assert len(output) == 3
+    for i, (etype, data) in enumerate(
+        (e for e in events_final if e[0] == "response.output_item.done")
+    ):
+        assert output[i] == data["item"], \
+            f"Output array position {i} does not match done event item"

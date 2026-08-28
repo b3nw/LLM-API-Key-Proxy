@@ -691,24 +691,15 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
             break
 
         if not saw_done:
-            lib_logger.debug(
-                "Perchai stream ended without [DONE] sentinel; "
-                "synthesizing final stop chunk"
+            lib_logger.warning(
+                f"Perchai stream ended without [DONE] sentinel for {model}; "
+                f"stream was truncated"
             )
             if saw_tool_call:
                 return
-            yield litellm.ModelResponseStream(
-                id=stream_id,
-                created=int(time.time()),
-                model=model,
-                object="chat.completion.chunk",
-                choices=[
-                    {
-                        "index": 0,
-                        "delta": {},
-                        "finish_reason": "stop",
-                    }
-                ],
+            raise RuntimeError(
+                f"Perchai stream ended prematurely for {model}: "
+                f"no [DONE] marker received"
             )
 
     @staticmethod

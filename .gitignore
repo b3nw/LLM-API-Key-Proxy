@@ -148,6 +148,7 @@ tests/*
 !tests/test_access_log_middleware.py
 !tests/test_gemini_cli_models.py
 !tests/test_suppress_litellm_warnings.py
+!tests/test_codex_prompt_caching.py
 docs/ignored/
 .env
 .agent/

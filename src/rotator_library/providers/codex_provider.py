@@ -16,9 +16,11 @@ Key Features:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -395,11 +397,9 @@ HTTP_RETRY_BASE_DELAY = max(0.5, float(os.getenv("CODEX_HTTP_RETRY_BASE_DELAY", 
 HTTP_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
-import re as _re
-
-_RETRYABLE_ERROR_PATTERN = _re.compile(
+_RETRYABLE_ERROR_PATTERN = re.compile(
     r"rate.?limit|overloaded|service.?unavailable|upstream.?connect|connection.?refused",
-    _re.IGNORECASE,
+    re.IGNORECASE,
 )
 
 
@@ -642,6 +642,29 @@ def _sanitize_call_id(raw_id: str, id_map: Dict[str, str]) -> str:
     return sanitized
 
 
+_LEADING_THINK_TAG_PATTERN = re.compile(
+    r"^<(?:think|thought)(?:ing)?>.*?</(?:think|thought)(?:ing)?>\n?",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _strip_think_tags(text: Any) -> str:
+    """
+    Strip leading <think>...</think> or <thought>...</thought> block from assistant message history.
+
+    _apply_reasoning_to_message prepends `<think>{rtxt}</think>` + optional `\n` to assistant output.
+    Stripping only the leading think block restores the byte-exact original model output,
+    preserving prompt cache matches without mangling mid-sentence tags or modifying whitespace.
+    """
+    if not isinstance(text, str) or not text:
+        return ""
+    lower = text[:30].lower()
+    if "<think" not in lower and "<thought" not in lower:
+        return text
+    # Only strip a leading thinking block
+    return _LEADING_THINK_TAG_PATTERN.sub("", text)
+
+
 def _convert_messages_to_responses_input(
     messages: List[Dict[str, Any]],
     inject_identity_override: bool = False,
@@ -658,6 +681,7 @@ def _convert_messages_to_responses_input(
     system_messages = []
     # Shared mapping for call_id sanitization across the entire request
     call_id_map: Dict[str, str] = {}
+    global_tool_idx = 0
 
     for msg in messages:
         role = msg.get("role", "user")
@@ -713,24 +737,28 @@ def _convert_messages_to_responses_input(
             continue
 
         if role == "assistant":
-            # Assistant messages
-            if isinstance(content, str) and content:
-                input_items.append({
-                    "role": "assistant",
-                    "content": [{"type": "output_text", "text": content}]
-                })
+            # Assistant messages - strip leading <think> tags so history matches cached output_text
+            if isinstance(content, str):
+                cleaned_text = _strip_think_tags(content)
+                if cleaned_text:
+                    input_items.append({
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": cleaned_text}]
+                    })
             elif isinstance(content, list):
                 # Handle assistant content as a list
                 parts = []
                 for part in content:
                     if isinstance(part, dict):
                         part_type = part.get("type", "")
-                        if part_type == "text":
-                            parts.append({"type": "output_text", "text": part.get("text", "")})
-                        elif part_type == "output_text":
-                            parts.append({"type": "output_text", "text": part.get("text", "")})
+                        if part_type in ("text", "output_text"):
+                            cleaned_t = _strip_think_tags(part.get("text", ""))
+                            if cleaned_t:
+                                parts.append({"type": "output_text", "text": cleaned_t})
                 if parts:
                     input_items.append({
+                        "type": "message",
                         "role": "assistant",
                         "content": parts
                     })
@@ -739,8 +767,18 @@ def _convert_messages_to_responses_input(
             tool_calls = msg.get("tool_calls", [])
             for tc in tool_calls:
                 if isinstance(tc, dict) and tc.get("type") == "function":
-                    func = tc.get("function", {})
-                    raw_id = tc.get("id", "") or str(uuid.uuid4())
+                    func = tc.get("function") or {}
+                    raw_id = tc.get("id", "")
+                    if not raw_id:
+                        # Deterministic fallback ID based on global tool occurrence in request
+                        # to ensure uniqueness across multiple calls within the request while
+                        # remaining identical across multi-turn requests for the same history.
+                        name = func.get("name", "")
+                        args = func.get("arguments", "{}")
+                        content_hash = hashlib.sha256(f"{global_tool_idx}:{name}:{args}".encode("utf-8")).hexdigest()[:16]
+                        raw_id = f"call_gen_{global_tool_idx}_{content_hash}"
+                    global_tool_idx += 1
+
                     input_items.append({
                         "type": "function_call",
                         "call_id": _sanitize_call_id(raw_id, call_id_map),
@@ -1291,6 +1329,7 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
         reasoning_effort = kwargs.get("reasoning_effort", DEFAULT_REASONING_EFFORT)
         extra_headers = kwargs.get("extra_headers", {})
         session_id = kwargs.get("session_id") or kwargs.get("sessionId") or ""
+        prompt_cache_key = kwargs.get("prompt_cache_key") or session_id
 
         # Cursor may send requests in Responses API format (with `input` instead of
         # `messages`).  Normalize to `messages` so the rest of the pipeline works.
@@ -1379,7 +1418,12 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
         # Session affinity headers (enables server-side prompt caching)
         if session_id:
             headers["session_id"] = session_id
-            headers["x-client-request-id"] = session_id
+
+        # Unique client request ID to avoid deduplication bugs upstream
+        if "x-client-request-id" in kwargs:
+            headers["x-client-request-id"] = kwargs["x-client-request-id"]
+        elif session_id:
+            headers["x-client-request-id"] = f"{session_id}_{uuid.uuid4().hex[:8]}"
 
         # Add any extra headers
         headers.update(extra_headers)
@@ -1407,8 +1451,8 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
             payload["tool_choice"] = tool_choice if tool_choice in ("auto", "none") else "auto"
             payload["parallel_tool_calls"] = bool(parallel_tool_calls)
 
-        if session_id:
-            payload["prompt_cache_key"] = session_id
+        if prompt_cache_key:
+            payload["prompt_cache_key"] = prompt_cache_key
 
         if reasoning_param:
             payload["reasoning"] = reasoning_param

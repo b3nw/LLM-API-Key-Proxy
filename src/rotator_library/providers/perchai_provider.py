@@ -701,13 +701,17 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
 
         if not saw_done and not saw_done_event:
             stream_duration = time.time() - stream_start_time
+            if saw_tool_call:
+                lib_logger.debug(
+                    f"Perchai tool call stream ended for {model} "
+                    f"after {stream_duration:.1f}s, {chunk_count} chunks, {bytes_received} bytes"
+                )
+                return
             lib_logger.warning(
-                f"Perchai stream ended without [DONE] sentinel or done event for {model}; "
-                f"stream was truncated after {stream_duration:.1f}s, "
+                f"Perchai stream ended without completion signal for {model}; "
+                f"no [DONE] or done event after {stream_duration:.1f}s, "
                 f"{chunk_count} chunks, {bytes_received} bytes"
             )
-            if saw_tool_call:
-                return
             raise RuntimeError(
                 f"Perchai stream ended prematurely for {model}: "
                 f"no [DONE] marker or done event received after {stream_duration:.1f}s"

@@ -93,3 +93,29 @@ uv run python -m pytest tests/test_perchai_provider.py -v --tb=short -k "not exp
 - Added `_extract_tool_names` for real tool name resolution from request payload
 
 48 tests pass (43 unit + 5 live API).
+
+## 2026-08-29: Live thinking-respect regression tests
+
+**Branch**: `feat/provider-app.perchai` (worktree: `feat-provider-app.perchai`)
+
+**Question answered**: does the Perch upstream actually honor the thinking values the proxy normalizes? Mocked tests only proved we SEND them. Live tests now prove upstream behavior.
+
+**Files changed**:
+- `tests/test_perchai_provider.py` - Added 2 live e2e thinking tests gated on `~/.perch/cli-auth-session.json`; removed module-level `pytestmark` skipif (mocked tests now run everywhere; live tests carry per-test `@live_only` gate; also applied to the 2 expired-token refresh tests and the option_id probe test).
+
+**Tests added**:
+1. `test_live_thinking_disabled_suppresses_reasoning` - `thinking={"type": "disabled"}` -> upstream returns 0 reasoning chars (streaming, real API.
+2. `test_live_thinking_effort_modulates_reasoning_volume` - `reasoning_effort=high` produces MORE reasoning chars than `low` (soft monotonic, one retry guard on high). Model: `perchai/wandb-deepseek-ai-deepseek-v4-flash` (cheap Starter-tier option ID, overridable via `PERCHAI_THINKING_TEST_MODEL`).
+
+**Result**: Perch upstream RESPECTS the normalized thinking values:
+- `thinking: disabled` suppresses `reasoning_content` entirely (0 chars.
+- `reasoning_effort` modulates reasoning volume (high > low.
+- Expired access token auto-revived via `refresh_on_401` (refresh token still valid.
+
+**Verification**:
+```bash
+uv run python3 -m py_compile tests/test_perchai_provider.py
+uv run ruff check tests/test_perchai_provider.py --select F401,F811,F821,E9
+uv run python -m pytest tests/test_perchai_provider.py -v --tb=short
+```
+85 tests pass (79 mocked + 6 live: 2 expired-token refresh,  ​2 option_id probes,​ 2 thinking-respect.

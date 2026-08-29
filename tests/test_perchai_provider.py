@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
+import httpx
 import pytest
 
 from rotator_library.providers import PROVIDER_PLUGINS
@@ -30,12 +33,12 @@ from proxy_app.provider_urls import PROVIDER_URL_MAP
 PERCHAI_SESSION: Path = Path.home() / ".perch" / "cli-auth-session.json"
 HAS_SESSION: bool = PERCHAI_SESSION.is_file()
 
-pytestmark = [
-    pytest.mark.skipif(
-        not HAS_SESSION,
-        reason="No perchai session - run `perch login`",
-    ),
-]
+# Live tests (real upstream HTTP) require a Perch OAuth session. Mocked
+# unit tests above must run everywhere, so the gate is per-test, not module-level.
+live_only = pytest.mark.skipif(
+    not HAS_SESSION,
+    reason="No perchai session - run `perch login`",
+)
 
 
 PERCHAI_ERROR_CODE_CASES = [
@@ -496,6 +499,7 @@ async def test_run_background_job_invalid_token_no_crash() -> None:
 
 
 @pytest.mark.asyncio
+@live_only
 async def test_expired_token_non_stream_refreshes_and_retries(
     tmp_path: Path,
 ) -> None:
@@ -524,6 +528,7 @@ async def test_expired_token_non_stream_refreshes_and_retries(
 
 
 @pytest.mark.asyncio
+@live_only
 async def test_expired_token_stream_refreshes_and_retries(
     tmp_path: Path,
 ) -> None:
@@ -656,6 +661,7 @@ PROBE_OPTION_IDS = [
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("option_id", PROBE_OPTION_IDS)
+@live_only
 async def test_option_id_routes_to_real_upstream(
     option_id: str,
 ) -> None:
@@ -1824,3 +1830,90 @@ def test_done_event_uses_real_uuid_when_no_deltas() -> None:
     assert done_tool_calls[0].get("id") == "real-uuid-123"
     assert done_tool_calls[0].get("function", {}).get("name") == "bash"
     assert done_tool_calls[0].get("function", {}).get("arguments") == "echo hi"
+
+
+LIVE_THINKING_MODEL: str = os.environ.get(
+    "PERCHAI_THINKING_TEST_MODEL",
+    "perchai/wandb-deepseek-ai-deepseek-v4-flash",
+)
+LIVE_THINKING_PROMPT: str = (
+    "Work through this calculation carefully, step by step: "
+    "17 * 23 + 45 * 19 - 37 = ?"
+)
+
+
+def _chunk_reasoning_len(chunk: Any) -> int:
+    if not chunk.choices:
+        return 0
+    delta = chunk.choices[0].delta
+    if isinstance(delta, dict):
+        reasoning = delta.get("reasoning_content") or ""
+    else:
+        reasoning = getattr(delta, "reasoning_content", "") or ""
+    return len(reasoning)
+
+
+async def _live_thinking_metrics(
+    provider: PerchaiProvider,
+    client: httpx.AsyncClient,
+    thinking: Dict[str, Any],
+    reasoning_effort: Optional[str] = None,
+) -> Tuple[int, float]:
+    kwargs: Dict[str, Any] = {
+        "model": LIVE_THINKING_MODEL,
+        "messages": [{"role": "user", "content": LIVE_THINKING_PROMPT}],        "stream": True,
+        "max_tokens": 512,
+        "thinking": thinking,
+        "credential_identifier": "",    }
+    if reasoning_effort is not None:        kwargs["reasoning_effort"] = reasoning_effort
+    start = time.monotonic()
+    reasoning_chars = 0
+    async for chunk in await provider.acompletion(client, **kwargs):
+        reasoning_chars += _chunk_reasoning_len(chunk)
+    elapsed = time.monotonic() - start
+    return reasoning_chars, elapsed
+
+
+@pytest.mark.asyncio
+@live_only
+async def test_live_thinking_disabled_suppresses_reasoning() -> None:
+    given_provider = PerchaiProvider()
+    async with httpx.AsyncClient() as given_client:
+        when_reasoning, when_elapsed = await _live_thinking_metrics(
+            given_provider, given_client, thinking={"type": "disabled"},
+        )
+    assert when_reasoning == 0, (
+        "thinking=disabled must suppress reasoning_content from the Perch upstream, "
+        f"got {when_reasoning} reasoning chars ({when_elapsed:.1f}s). "
+        "Perchai may ignore the normalized thinking config."
+    )
+
+
+@pytest.mark.asyncio
+@live_only
+async def test_live_thinking_effort_modulates_reasoning_volume() -> None:
+    given_provider = PerchaiProvider()
+    async with httpx.AsyncClient() as given_client:
+        low_reasoning, low_elapsed = await _live_thinking_metrics(
+            given_provider, given_client,
+            thinking={"type": "enabled"}, reasoning_effort="low",
+        )
+        high_reasoning, high_elapsed = await _live_thinking_metrics(
+            given_provider, given_client,
+            thinking={"type": "enabled"}, reasoning_effort="high",
+        )
+        if high_reasoning <= low_reasoning:
+            high_reasoning, high_elapsed = await _live_thinking_metrics(
+                given_provider, given_client,
+                thinking={"type": "enabled"}, reasoning_effort="high",
+            )
+    assert low_reasoning > 0, (
+        "thinking=enabled + reasoning_effort=low must produce reasoning, "
+        f"got {low_reasoning} reasoning chars ({low_elapsed:.1f}s)."
+    )
+    assert high_reasoning > low_reasoning, (
+        "reasoning_effort=high must produce MORE reasoning than low, "
+        f"low={low_reasoning} chars/{low_elapsed:.1f}s, "
+        f"high={high_reasoning} chars/{high_elapsed:.1f}s. "
+        "Perchai may ignore reasoning_effort."
+    )

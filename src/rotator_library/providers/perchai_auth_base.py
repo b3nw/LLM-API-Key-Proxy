@@ -84,12 +84,8 @@ class PerchaiAuthBase:
         self._credential_path: str = credential_path
 
     def load_session(self) -> PerchaiSession:
-        if self._session is not None:
-            return self._session
-
         if self._credential_path:
-            self._session = self._load_session_from_path(self._credential_path)
-            return self._session
+            return self._load_session_from_path(self._credential_path)
 
         session_path = _resolve_session_file()
 
@@ -150,7 +146,6 @@ class PerchaiAuthBase:
             "expiresAt": data.get("expiresAt"),
             "userId": data.get("userId"),
         }
-        self._session = session
         lib_logger.debug(
             f"Loaded perchai session from {session_path} "
             f"(userId={session['userId']!r}, expiresAt={session['expiresAt']!r})"

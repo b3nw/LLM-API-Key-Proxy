@@ -119,3 +119,26 @@ uv run ruff check tests/test_perchai_provider.py --select F401,F811,F821,E9
 uv run python -m pytest tests/test_perchai_provider.py -v --tb=short
 ```
 85 tests pass (79 mocked + 6 live: 2 expired-token refresh,  ​2 option_id probes,​ 2 thinking-respect.
+
+## 2026-08-29: Re-read OAuth session file on every request
+
+**Branch**: `feat/provider-app.perchai` (worktree: `feat-provider-app.perchai`)
+
+**Problem**: `PerchaiAuthBase.load_session` cached the parsed session in `self._session` after the first call. When `perch login` rewrote `~/.perch/cli-auth-session.json` in a separate process, the running proxy still served the stale cached token. Fix required a reboot.
+
+**Files changed**:
+- `src/rotator_library/providers/perchai_auth_base.py` - Removed the `self._session` in-memory cache in `load_session` (dropped the early-return + two assignments). `_ensure_session` now always invokes `load_session`, which re-reads the file on every call. Supabase config cache (`_supabase_url`/`_supabase_anon_key`) kept (separate concern, expensive HTTP).
+- `tests/test_perchai_provider.py` - Added `test_load_session_re_reads_file_on_every_call` (RED-first TDD): monkeypatches `_resolve_session_file` to a tmp path, writes a token, loads, rewrites the file with a new token (simulating `perch login`), loads again, asserts the new token is returned. Fails before the fix, passes after.
+
+**Behaviour preserved**:
+- `refresh_on_401` single-flight still works: it calls `_ensure_session` (now always reloads), compares the on-disk token to the expired one, and skips redundant refresh if another coroutine already wrote a new token via `_persist_session`.
+- `refresh_token` reads the (rotated) refresh token from disk each time so single-use rotation still applies.
+- `get_app_url` re-reads the file too; appUrl rarely changes, cost is one small JSON parse per call.
+
+**Verification**:
+```bash
+uv run python3 -m py_compile src/rotator_library/providers/perchai_auth_base.py tests/test_perchai_provider.py
+uv run ruff check src/rotator_library/providers/perchai_auth_base.py tests/test_perchai_provider.py --select F401,F811,F821,E9
+uv run python -m pytest tests/test_perchai_provider.py --tb=short
+```
+86 tests pass (80 mocked + 6 live: 2 expired-token refresh, 2 option_id probes, 2 thinking-respect).

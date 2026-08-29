@@ -639,6 +639,60 @@ def test_empty_credential_identifier_falls_back_to_default() -> None:
         pass
 
 
+def test_load_session_re_reads_file_on_every_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rotator_library.providers import perchai_auth_base as perchai_auth
+    from rotator_library.providers.perchai_auth_base import PerchaiAuthBase
+
+    given_file = tmp_path / "session.json"
+    given_file.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "appUrl": "https://app.perchai.app",
+                "accessToken": "token-before-perch-login",
+                "refreshToken": "refresh-before",
+                "userId": "u1",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(perchai_auth, "_resolve_session_file", lambda: given_file)
+
+    given_auth = PerchaiAuthBase()
+
+    when_first = given_auth.load_session()
+    then_first_old = when_first.get("accessToken") == "token-before-perch-login"
+    assert then_first_old, (
+        "first load_session should read the initial token from disk, "
+        f"got {when_first.get('accessToken')!r}"
+    )
+
+    given_file.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "appUrl": "https://app.perchai.app",
+                "accessToken": "token-after-perch-login",
+                "refreshToken": "refresh-after",
+                "userId": "u1",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    when_second = given_auth.load_session()
+    then_second_new = when_second.get("accessToken") == "token-after-perch-login"
+    assert then_second_new, (
+        "load_session must re-read the session file on every call so that "
+        "`perch login` (which rewrites the file in a separate process) is "
+        "picked up without rebooting the proxy. "
+        f"Got {when_second.get('accessToken')!r} instead of the new token."
+    )
+
+
 # ---------------------------------------------------------------------------
 # E2E routing verification: option IDs listed in the docs must actually route
 # to a real upstream, not silently fall back to the workspace default

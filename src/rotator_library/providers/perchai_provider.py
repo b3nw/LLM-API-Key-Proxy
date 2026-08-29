@@ -584,6 +584,10 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
             stream_headers = dict(build_headers(token))
             stream_headers["Content-Type"] = "application/json; charset=utf-8"
 
+            stream_start_time = time.time()
+            chunk_count = 0
+            bytes_received = 0
+
             ctx = client.stream(
                 "POST",
                 url,
@@ -608,6 +612,8 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                 await self._raise_for_status(response, model)
 
                 async for line in response.aiter_lines():
+                    chunk_count += 1
+                    bytes_received += len(line)
                     file_logger.log_response_chunk(line)
 
                     if not line.startswith("data:"):
@@ -691,15 +697,17 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
             break
 
         if not saw_done:
+            stream_duration = time.time() - stream_start_time
             lib_logger.warning(
                 f"Perchai stream ended without [DONE] sentinel for {model}; "
-                f"stream was truncated"
+                f"stream was truncated after {stream_duration:.1f}s, "
+                f"{chunk_count} chunks, {bytes_received} bytes"
             )
             if saw_tool_call:
                 return
             raise RuntimeError(
                 f"Perchai stream ended prematurely for {model}: "
-                f"no [DONE] marker received"
+                f"no [DONE] marker received after {stream_duration:.1f}s"
             )
 
     @staticmethod

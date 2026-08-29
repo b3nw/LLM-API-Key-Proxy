@@ -106,3 +106,44 @@ async def test_perchai_stream_incomplete_raises_error():
     with pytest.raises(RuntimeError, match="prematurely|truncated"):
         async for chunk in stream:
             chunks.append(chunk)
+
+
+@pytest.mark.asyncio
+async def test_perchai_stream_done_event_termination():
+    provider = PerchaiProvider()
+    client = MagicMock(spec=httpx.AsyncClient)
+
+    text_chunk = {
+        "type": "text_delta",
+        "text": "Hello",
+    }
+    done_event = {
+        "type": "done",
+        "finishReason": "stop",
+        "ok": True,
+    }
+
+    lines = [
+        f"data: {json.dumps(text_chunk)}",
+        f"data: {json.dumps(done_event)}",
+    ]
+    response = MockStreamResponse(lines)
+    client.stream = MagicMock(return_value=response)
+
+    file_logger = AsyncMock()
+    stream = provider._stream_completion(
+        client=client,
+        url="https://api.perchai.com/v1/chat/completions",
+        build_headers=lambda token: {"Authorization": f"Bearer {token}"},
+        token="test-token",
+        payload={"model": "test-model", "messages": [{"role": "user", "content": "Hi"}]},
+        model="perchai/test-model",
+        file_logger=file_logger,
+    )
+
+    chunks = []
+    async for chunk in stream:
+        chunks.append(chunk)
+
+    assert len(chunks) >= 2
+    assert chunks[-1].choices[0].finish_reason == "stop"

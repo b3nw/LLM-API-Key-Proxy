@@ -572,6 +572,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         body = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
 
         saw_done = False
+        saw_done_event = False
         saw_tool_call = False
         tool_call_finish_emitted = False
         stream_id = f"chatcmpl-perchai-stream-{int(time.time())}"
@@ -682,6 +683,8 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                                 continue
                             saw_tool_call = True
                             tool_call_finish_emitted = True
+                        elif chunk_finish_reason in ("stop", "length"):
+                            saw_done_event = True
                         elif chunk_finish_reason is None:
                             try:
                                 chunk_delta = first_choice.get("delta") if isinstance(first_choice, dict) else getattr(first_choice, "delta", None)
@@ -696,10 +699,10 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                 await ctx.__aexit__(None, None, None)
             break
 
-        if not saw_done:
+        if not saw_done and not saw_done_event:
             stream_duration = time.time() - stream_start_time
             lib_logger.warning(
-                f"Perchai stream ended without [DONE] sentinel for {model}; "
+                f"Perchai stream ended without [DONE] sentinel or done event for {model}; "
                 f"stream was truncated after {stream_duration:.1f}s, "
                 f"{chunk_count} chunks, {bytes_received} bytes"
             )
@@ -707,7 +710,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                 return
             raise RuntimeError(
                 f"Perchai stream ended prematurely for {model}: "
-                f"no [DONE] marker received after {stream_duration:.1f}s"
+                f"no [DONE] marker or done event received after {stream_duration:.1f}s"
             )
 
     @staticmethod

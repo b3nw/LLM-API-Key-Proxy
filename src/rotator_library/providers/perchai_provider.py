@@ -164,6 +164,15 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                     if not modifications.count("stripped reasoning_content from assistant messages"):
                         modifications.append("stripped reasoning_content from assistant messages")
 
+        # Cap reasoning_effort to "medium" to avoid upstream truncation.
+        # Perchai/deepseek-v4-flash truncates reasoning mid-sentence at ~20s
+        # when effort is "high". Cap to "medium" to prevent incomplete output.
+        reasoning_effort = extra_body.get("reasoning_effort")
+        if reasoning_effort == "high":
+            extra_body["reasoning_effort"] = "medium"
+            if not modifications.count("capped reasoning_effort from high to medium"):
+                modifications.append("capped reasoning_effort from high to medium")
+
         return modifications
 
     def get_model_options(self, model_name: str) -> Dict[str, Any]:

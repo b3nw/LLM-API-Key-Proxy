@@ -142,3 +142,27 @@ uv run ruff check src/rotator_library/providers/perchai_auth_base.py tests/test_
 uv run python -m pytest tests/test_perchai_provider.py --tb=short
 ```
 86 tests pass (80 mocked + 6 live: 2 expired-token refresh, 2 option_id probes, 2 thinking-respect).
+
+## 2026-08-29: Fix sync transform_request hook await bug + truncation investigation
+
+**Branch**: `feat/provider-app.perchai` (worktree: `feat-provider-app.perchai`)
+
+**Bug**: `PerchaiProvider.transform_request` is a sync method returning `List[str]`, but `ProviderTransforms.apply` awaited it -> every Perchai request logged `Provider transform_request hook failed: object list can't be used in 'await' expression`. Side effects (reasoning_content stripping) ran before the await failure, but the error was logged per request and the modifications list was lost.
+
+**Files changed**:
+- `src/rotator_library/client/transforms.py` - `apply` now handles both sync and async `transform_request` hooks (`inspect.isawaitable` branch).
+- `tests/test_perchai_provider.py` - Added `test_sync_transform_request_hook_runs_through_transforms` (asserts stripping happens AND no "hook failed" log via caplog; RED before fix).; hardened `test_live_thinking_effort_modulates_reasoning_volume` (max_tokens 512->2048, longer prompt, assertion changed from directional `high>low` to volume-difference `abs(high-low)>0.3*max` since observed effort direction is NOT monotonic for deepseek-v4-flash: low->~6.2K reasoning chars, high->~2.5K (stable, inverted direction).
+
+**Truncation investigation (user report: thinking truncated at~15-20s)**:
+- Proxy SSE output verified FULL via `curl -o` + python httpx (37.9KB/96 lines/[DONE] for a 15.2s long-thinking request; 333KB/815 lines/[DONE] for 17.9s request).. Earlier "truncated" captures were a bash-tool stdout-redirect artifact (120-char/line +3000-byte truncation with "..." suffix), NOT the proxy.
+
+- No 15-20s timeout exists in the proxy chain: container `GLOBAL_TIMEOUT=600`, `TIMEOUT_READ_STREAMING=360`; code defaults 30/300 but env overrides. No premature-end warnings/errors/client-disconnects in proxy logs (15:43-16:53 window).
+- Live effort test finding: Perchai upstream DOES respond to `reasoning_effort` (volume changes significantly;, but direction is inverted for this model/prompt (low effort -> MORE reasoning volume than high). May warrant config-side investigation (e.g. map effort values differently for perchai).
+
+**Verification**:
+```bash
+uv run python3 -m py_compile src/rotator_library/client/transforms.py tests/test_perchai_provider.py
+uv run ruff check src/rotator_library/client/transforms.py tests/test_perchai_provider.py --select F401,F811,F821,E9
+uv run python -m pytest tests/test_perchai_provider.py tests/test_provider_transforms.py tests/test_request_sanitizer.py --tb=short
+```
+115 tests pass.

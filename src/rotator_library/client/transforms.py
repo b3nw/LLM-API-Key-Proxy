@@ -26,6 +26,7 @@ Provider-specific (keyed by provider name or model substring):
 Transforms are applied in a defined order with logging of modifications.
 """
 
+import inspect
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
@@ -132,11 +133,15 @@ class ProviderTransforms:
                     if result:
                         modifications.append(result)
 
-        # 2. Apply provider hook transforms (async)
+# 2. Apply provider hook transforms (async)
         plugin = self._get_plugin_instance(provider)
         if plugin and hasattr(plugin, "transform_request"):
             try:
-                hook_result = await plugin.transform_request(kwargs, model, credential)
+                hook = plugin.transform_request(kwargs, model, credential)
+                if inspect.isawaitable(hook):
+                    hook_result = await hook
+                else:
+                    hook_result = hook
                 if hook_result:
                     modifications.extend(hook_result)
             except Exception as e:

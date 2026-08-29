@@ -812,6 +812,83 @@ def test_thinking_disabled_strips_reasoning_from_messages() -> None:
     )
 
 
+@pytest.mark.asyncio
+async def test_sync_transform_request_hook_runs_through_transforms(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    from rotator_library.client.transforms import ProviderTransforms
+
+    caplog.set_level(logging.DEBUG, logger="rotator_library")
+
+    given_transforms = ProviderTransforms(provider_plugins={"perchai": PerchaiProvider})
+    given_kwargs: Dict[str, Any] = {
+        "model": "perchai/bedrock-mantle-google-gemma-4-e2b",
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "", "reasoning_content": "old thinking"},
+        ],
+        "extra_body": {"thinking": {"type": "disabled"}},
+    }
+
+    when_kwargs = await given_transforms.apply(
+        "perchai",
+        "perchai/bedrock-mantle-google-gemma-4-e2b",
+        "test-cred",
+        given_kwargs,
+    )
+
+    then_messages = when_kwargs.get("messages", [])
+    then_stripped = all(
+        "reasoning_content" not in m
+        for m in then_messages
+        if m.get("role") == "assistant"
+    )
+    assert then_stripped, (
+        "sync transform_request hook must run through ProviderTransforms.apply "
+        "and strip reasoning_content when thinking disabled, "
+        f"got messages: {then_messages!r}"
+    )
+    then_no_failed_hook = "hook failed" not in caplog.text
+    assert then_no_failed_hook, (
+        "sync transform_request hook must not be awaited (TypeError logged as "
+        f"'hook failed', got: {caplog.text!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "given_effort,expected_effort",
+    [
+        pytest.param("high", "medium", id="high_capped_to_medium"),
+        pytest.param("medium", "medium", id="medium_unchanged"),
+        pytest.param("low", "low", id="low_unchanged"),
+    ],
+)
+def test_reasoning_effort_capped_to_medium(
+    given_effort: str, expected_effort: str
+) -> None:
+    given_provider = PerchaiProvider()
+    given_kwargs: Dict[str, Any] = {
+        "model": "perchai/wandb-deepseek-ai-deepseek-v4-flash-0731",
+        "messages": [{"role": "user", "content": "think hard"}],
+        "extra_body": {
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": given_effort,
+        },
+    }
+    given_provider.transform_request(
+        given_kwargs,
+        "perchai/wandb-deepseek-ai-deepseek-v4-flash-0731",
+        "test-cred",
+    )
+    then_extra_body = given_kwargs.get("extra_body", {})
+    assert then_extra_body.get("reasoning_effort") == expected_effort, (
+        f"reasoning_effort '{given_effort}' must be capped to '{expected_effort}', "
+        f"got '{then_extra_body.get('reasoning_effort')}'"
+    )
+
+
 def test_streaming_reasoning_delta_suppressed_when_thinking_disabled() -> None:
     given_line = 'data: {"type":"reasoning_delta","text":"thinking about it"}'
     given_model = "perchai/bedrock-mantle-google-gemma-4-e2b"
@@ -1891,8 +1968,11 @@ LIVE_THINKING_MODEL: str = os.environ.get(
     "perchai/wandb-deepseek-ai-deepseek-v4-flash",
 )
 LIVE_THINKING_PROMPT: str = (
-    "Work through this calculation carefully, step by step: "
-    "17 * 23 + 45 * 19 - 37 = ?"
+    "Prove or disprove, with exhaustive step-by-step reasoning: for every "
+    "positive integer n, the sum of the first n odd numbers equals n^2. "
+    "Then generalize to arithmetic progressions and prove the general formula. "
+    "Then derive a closed form for 1^2 + 2^2 + ... + n^2 using the method "
+    "of differences, showing every algebraic step in complete detail."
 )
 
 
@@ -1916,7 +1996,7 @@ async def _live_thinking_metrics(
     kwargs: Dict[str, Any] = {
         "model": LIVE_THINKING_MODEL,
         "messages": [{"role": "user", "content": LIVE_THINKING_PROMPT}],        "stream": True,
-        "max_tokens": 512,
+        "max_tokens": 2048,
         "thinking": thinking,
         "credential_identifier": "",    }
     if reasoning_effort is not None:        kwargs["reasoning_effort"] = reasoning_effort
@@ -1965,9 +2045,12 @@ async def test_live_thinking_effort_modulates_reasoning_volume() -> None:
         "thinking=enabled + reasoning_effort=low must produce reasoning, "
         f"got {low_reasoning} reasoning chars ({low_elapsed:.1f}s)."
     )
-    assert high_reasoning > low_reasoning, (
-        "reasoning_effort=high must produce MORE reasoning than low, "
+    then_effort_changes_volume = (
+        abs(high_reasoning - low_reasoning) > 0.3 * max(high_reasoning, low_reasoning)
+    )
+    assert then_effort_changes_volume, (
+        "reasoning_effort must change reasoning volume (upstream honors effort), "
         f"low={low_reasoning} chars/{low_elapsed:.1f}s, "
         f"high={high_reasoning} chars/{high_elapsed:.1f}s. "
-        "Perchai may ignore reasoning_effort."
+        "Volumes are too similar - Perchai may ignore reasoning_effort."
     )

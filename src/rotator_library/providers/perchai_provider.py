@@ -962,7 +962,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
             )
 
         if event_type in ("answer_delta", "text_delta"):
-            text = (parsed_event.get("text") or "").rstrip()
+            text = parsed_event.get("text") or ""
             return litellm.ModelResponseStream(
                 id=f"chatcmpl-perchai-stream-{int(time.time())}",
                 created=int(time.time()),
@@ -980,7 +980,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         if event_type == "reasoning_delta":
             if thinking_disabled:
                 return None
-            text = (parsed_event.get("text") or "").rstrip()
+            text = parsed_event.get("text") or ""
             return litellm.ModelResponseStream(
                 id=f"chatcmpl-perchai-stream-{int(time.time())}",
                 created=int(time.time()),

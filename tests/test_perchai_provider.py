@@ -198,6 +198,26 @@ def test_text_delta_produces_content_chunk() -> None:
     )
 
 
+def test_text_delta_preserves_whitespace_only_chunks() -> None:
+    given_lines = [
+        'data: {"type":"answer_delta","text":"needs"}',
+        'data: {"type":"answer_delta","text":" "}',
+        'data: {"type":"answer_delta","text":"200+"}',
+    ]
+    given_model = "perchai/test-model"
+    given_chunks = [PerchaiProvider._parse_sse_line(line, given_model) for line in given_lines]
+    assert all(c is not None for c in given_chunks), "all deltas must produce chunks"
+    given_contents = []
+    for chunk in given_chunks:
+        choices = chunk.choices
+        delta = choices[0].get("delta") if isinstance(choices[0], dict) else choices[0].delta
+        content = delta.get("content") if isinstance(delta, dict) else delta.content
+        given_contents.append(content)
+    assert given_contents == ["needs", " ", "200+"], (
+        f"whitespace-only chunk must be preserved as ' ', got {given_contents!r}"
+    )
+
+
 def test_reasoning_delta_produces_reasoning_chunk() -> None:
     given_line = 'data: {"type":"reasoning_delta","text":"thinking step"}'
     given_model = "perchai/test-model"

@@ -1693,14 +1693,12 @@ def test_parse_sse_done_event_without_tool_calls() -> None:
     )
 
 
-def test_parse_sse_done_event_with_error_returns_none() -> None:
+def test_parse_sse_done_event_with_error_raises_runtime_error() -> None:
     given_line = (
         'data: {"type":"done","ok":false,"error":"Model call failed"}'
     )
-    when_chunk = PerchaiProvider._parse_sse_line(given_line)
-    assert when_chunk is None, (
-        f"done event with ok=false should return None, got: {when_chunk!r}"
-    )
+    with pytest.raises(RuntimeError, match="Perchai upstream error: Model call failed"):
+        PerchaiProvider._parse_sse_line(given_line)
 
 
 def test_red_build_payload_does_not_inject_reasoning_content_on_tool_calls() -> None:

@@ -1002,10 +1002,12 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
             ok = parsed_event.get("ok")
             if ok is False:
                 error_text = str(parsed_event.get("error") or "Model call failed")
-                lib_logger.debug(
+                lib_logger.warning(
                     f"Perchai stream: done event with error: {error_text}"
                 )
-                return None
+                raise RuntimeError(
+                    f"Perchai upstream error: {error_text}"
+                )
             finish_reason_done = (
                 parsed_event.get("finishReason")
                 or parsed_event.get("finish_reason")

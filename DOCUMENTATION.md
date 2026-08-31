@@ -1434,7 +1434,7 @@ PERCHAI_OAUTH_1=/home/your-user/.perch/cli-auth-session.json
 
 #### Available Models
 
-Perchai does **not** publish a public model catalog. **29 models are currently wired** - option IDs not on this list silently fall back to the default model (`bedrock_mantle:moonshotai.kimi-k2.5`).
+Perchai does **not** publish a public model catalog. **30 models are currently wired** - option IDs not on this list silently fall back to the default model (`bedrock_mantle:moonshotai.kimi-k2.5`).
 
 | Model | `model` value | Tier |
 |---|---|---|
@@ -1465,12 +1465,21 @@ Perchai does **not** publish a public model catalog. **29 models are currently w
 | Qwen 3.6 | `perchai/wandb-qwen3-6-35b-a3b` | Starter |
 | Qwen 3.7 Plus | `perchai/fireworks-accounts-fireworks-models-qwen3p7-plus` | Pro |
 | Qwen 3.8 27B | `perchai/wandb-qwen-qwen3-8-27b` | Pro |
+| Qwen 3.8 Flash | `perchai/dashscope-qwen3-8-flash` | Pro |
 | Qwen3 Coder | `perchai/bedrock-mantle-qwen-qwen3-coder-480b-a35b-instruct` | Starter |
 | Qwen3 VL | `perchai/bedrock-mantle-qwen-qwen3-vl-235b-a22b-instruct` | - |
 
 #### Discovering New Models
 
 Perchai does not publish option IDs anywhere public. To find new ones (or verify ones we missed), reverse-engineer them from the Perch CLI bundle (`perch.mjs`) and probe each candidate against `POST /api/perch-terminal/model-call`. **Task an LLM with this section** and your session file path - it will enumerate candidates from the bundle and probe them in batches.
+
+**Prerequisite**: Update the Perch CLI to get the latest model registry before extracting:
+
+```bash
+npm update -g perchai-cli
+```
+
+Bundle location: `/home/dehi/.asdf/installs/nodejs/24.8.0/lib/node_modules/perchai-cli/dist/perch.mjs` (adjust path for your Node.js version). Extract with `strings "$BUNDLE" | grep -oP '<pattern>' | sort -u` to enumerate option IDs, then probe each in batches of 10.
 
 ```json
 {"request": {"model": "probe", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 2, "stream": false},

@@ -166,3 +166,31 @@ uv run ruff check src/rotator_library/client/transforms.py tests/test_perchai_pr
 uv run python -m pytest tests/test_perchai_provider.py tests/test_provider_transforms.py tests/test_request_sanitizer.py --tb=short
 ```
 115 tests pass.
+
+## 2026-08-31: Fix silent error dropping in streaming
+
+**Branch**: `feat/provider-app.perchai`
+**Files changed**:
+- `src/rotator_library/providers/perchai_provider.py` - Changed error handling in `_parse_sse_line` when `done` event has `ok: false`
+- `tests/test_perchai_provider.py` - Updated test to expect RuntimeError instead of None return
+
+**Bug**: When Perch.ai sent `done` event with `ok: false` and error message, the error was logged at DEBUG level and silently dropped (`return None`). This caused streams to end prematurely without visible error, appearing as "thinks half second then interrupts" in long sessions.
+
+**Root cause**: `lib_logger.debug()` + `return None` made the error invisible in normal logs and prevented error propagation to the streaming handler.
+
+**Fix**:
+- Changed `lib_logger.debug` to `lib_logger.warning` (visible in normal logs)
+- Changed `return None` to `raise RuntimeError(f"Perchai upstream error: {error_text}")` (propagate error)
+- Error now propagates to streaming handler for proper retry/rotation
+
+**Test updated**: `test_parse_sse_done_event_with_error_returns_none` -> `test_parse_sse_done_event_with_error_raises_runtime_error`
+
+**Verification**:
+```bash
+uv run python3 -m py_compile src/rotator_library/providers/perchai_provider.py tests/test_perchai_provider.py
+uv run ruff check src/rotator_library/providers/perchai_provider.py tests/test_perchai_provider.py --select F401,F811,F821,E9
+uv run pytest tests/test_perchai_provider.py::test_parse_sse_done_event_with_error_raises_runtime_error -v
+```
+Test passes. All Perchai tests pass (except pre-existing credential-related failures).
+
+**Impact**: Upstream errors now visible in logs and properly handled by retry/rotation logic instead of silent truncation.

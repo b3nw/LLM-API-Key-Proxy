@@ -194,3 +194,34 @@ uv run pytest tests/test_perchai_provider.py::test_parse_sse_done_event_with_err
 Test passes. All Perchai tests pass (except pre-existing credential-related failures).
 
 **Impact**: Upstream errors now visible in logs and properly handled by retry/rotation logic instead of silent truncation.
+
+## 2026-09-01: Fix whitespace mangling + DeepSeek thinking_budget cap
+
+**Branch**: `feat/provider-app.perchai`
+
+**Bug 1 - mangled markdown** (`##Title`, `needs200+`): `_parse_sse_line` called `.rstrip()` on every `answer_delta`/`text_delta`/`reasoning_delta` chunk. DeepSeek emits whitespace as separate chunks (`"needs"` + `" "` + `"200+"`); rstrip turned the `" "` chunk into `""`, losing the space. Qwen bundles spaces with words so the bug was latent there - DeepSeek-specific visibility, proxy-side cause.
+
+**Bug 2 - reasoning truncation**: DeepSeek-v4-flash reasoning cut mid-sentence at ~13.3K chars (~3300 tokens) with `finish_reason=stop` + `[DONE]`. Proxy forwarded all chunks - NOT a proxy timeout. Confirmed upstream: Qwen 3.8 flash does not truncate. Reverse-engineered the `perchai-cli` bundle (`~/.asdf/installs/nodejs/24.8.0/lib/node_modules/perchai-cli/dist/perch.mjs`, binary - grep with `-a`) and found the wandb payload builder emits `chat_template_kwargs={enable_thinking: bool}` (vLLM/SGLang passthrough). Live probe proved the Perchai server ALSO honors `chat_template_kwargs.thinking_budget`.
+
+**DeepSeek effort mapping** (official docs): `medium -> high`, `high -> high`. Only `low` is a real reduction. Prior cap `high->medium` was a no-op.
+
+**Files changed**:
+- `src/rotator_library/providers/perchai_provider.py`:
+  - `_parse_sse_line`: removed `.rstrip()` from answer/text/reasoning delta text.
+  - `transform_request`: cap `reasoning_effort` `high -> low`; inject `chat_template_kwargs={enable_thinking:true, thinking_budget:3000}` when thinking enabled and effort is medium/high.
+- `tests/test_perchai_provider.py`:
+  - `test_text_delta_preserves_whitespace_only_chunks` (RED before fix)
+  - `test_reasoning_effort_capped_to_low` (parametrized, replaces broken `_capped_to_medium`)
+  - `test_high_effort_injects_thinking_budget`
+
+**Live verification** (thinking_budget probe): budget=1500 -> 4493 chars ends `.`; budget=3000 -> 3454 chars ends clean; no budget -> 13317/13366 chars truncated mid-word. 3000 is safe ceiling under the ~3300-token wall.
+
+**Verification**:
+```bash
+uv run python3 -m py_compile src/rotator_library/providers/perchai_provider.py tests/test_perchai_provider.py
+uv run ruff check src/rotator_library/providers/perchai_provider.py tests/test_perchai_provider.py --select F401,F811,F821,E9
+uv run pytest tests/test_perchai_provider.py tests/test_provider_transforms.py -k "not live"
+```
+102 pass; 4 live-gated failures pre-existing (`refresh_token_already_used` - stale session, unrelated).
+
+**Deploy**: binary rebuilt at `dist/proxy_app`; copy into `llm-proxy` container and restart (docker ops manual).

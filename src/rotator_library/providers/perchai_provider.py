@@ -164,14 +164,35 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                     if not modifications.count("stripped reasoning_content from assistant messages"):
                         modifications.append("stripped reasoning_content from assistant messages")
 
-        # Cap reasoning_effort to "medium" to avoid upstream truncation.
-        # Perchai/deepseek-v4-flash truncates reasoning mid-sentence at ~20s
-        # when effort is "high". Cap to "medium" to prevent incomplete output.
+        # Cap reasoning_effort to "low" to avoid upstream truncation.
+        # DeepSeek maps medium->high upstream, so medium is not a real
+        # reduction. "low" is the only effort that shortens reasoning.
         reasoning_effort = extra_body.get("reasoning_effort")
         if reasoning_effort == "high":
-            extra_body["reasoning_effort"] = "medium"
-            if not modifications.count("capped reasoning_effort from high to medium"):
-                modifications.append("capped reasoning_effort from high to medium")
+            extra_body["reasoning_effort"] = "low"
+            if not modifications.count("capped reasoning_effort from high to low"):
+                modifications.append("capped reasoning_effort from high to low")
+
+        # Inject a hard thinking_budget via chat_template_kwargs (vLLM/SGLang
+        # passthrough the Perchai server honors). DeepSeek-v4-flash truncates
+        # reasoning mid-sentence at ~3300 tokens; a 3000-token budget keeps
+        # reasoning under the wall so it completes cleanly instead of stopping
+        # with finish_reason=stop and half a sentence.
+        if (
+            isinstance(thinking, dict)
+            and thinking.get("type") == "enabled"
+            and reasoning_effort in ("medium", "high")
+        ):
+            ctk = extra_body.get("chat_template_kwargs")
+            if not isinstance(ctk, dict):
+                ctk = {}
+            ctk.setdefault("enable_thinking", True)
+            ctk.setdefault("thinking_budget", 3000)
+            extra_body["chat_template_kwargs"] = ctk
+            if not modifications.count("injected thinking_budget=3000 via chat_template_kwargs"):
+                modifications.append("injected thinking_budget=3000 via chat_template_kwargs")
+
+        kwargs["extra_body"] = extra_body
 
         return modifications
 

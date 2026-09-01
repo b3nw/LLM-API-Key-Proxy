@@ -880,12 +880,12 @@ async def test_sync_transform_request_hook_runs_through_transforms(
 @pytest.mark.parametrize(
     "given_effort,expected_effort",
     [
-        pytest.param("high", "medium", id="high_capped_to_medium"),
+        pytest.param("high", "low", id="high_capped_to_low"),
         pytest.param("medium", "medium", id="medium_unchanged"),
         pytest.param("low", "low", id="low_unchanged"),
     ],
 )
-def test_reasoning_effort_capped_to_medium(
+def test_reasoning_effort_capped_to_low(
     given_effort: str, expected_effort: str
 ) -> None:
     given_provider = PerchaiProvider()
@@ -906,6 +906,27 @@ def test_reasoning_effort_capped_to_medium(
     assert then_extra_body.get("reasoning_effort") == expected_effort, (
         f"reasoning_effort '{given_effort}' must be capped to '{expected_effort}', "
         f"got '{then_extra_body.get('reasoning_effort')}'"
+    )
+
+
+def test_high_effort_injects_thinking_budget() -> None:
+    given_provider = PerchaiProvider()
+    given_kwargs: Dict[str, Any] = {
+        "model": "perchai/wandb-deepseek-ai-deepseek-v4-flash-0731",
+        "messages": [{"role": "user", "content": "think hard"}],
+        "extra_body": {
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": "high",
+        },
+    }
+    given_provider.transform_request(
+        given_kwargs,
+        "perchai/wandb-deepseek-ai-deepseek-v4-flash-0731",
+        "test-cred",
+    )
+    then_ctk = given_kwargs["extra_body"].get("chat_template_kwargs", {})
+    assert then_ctk.get("thinking_budget") == 3000, (
+        f"high effort must inject thinking_budget=3000, got {then_ctk!r}"
     )
 
 

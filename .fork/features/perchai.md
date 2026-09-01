@@ -230,7 +230,7 @@ uv run pytest tests/test_perchai_provider.py tests/test_provider_transforms.py -
 
 **Branch**: `feat/provider-app.perchai`
 
-**Problem**: Hardcoded `thinking_budget=3000` for all models. DeepSeek needs it (wall at ~3300 tokens), but other models (Gemma, Qwen, GLM) don't need the cap and may benefit from longer reasoning.
+**Problem**: Hardcoded `thinking_budget=3000` for all models. Some models have unknown hard caps on the Perchai server side that truncate reasoning mid-sentence. DeepSeek-v4-flash truncates at ~3300 tokens, but other models (Gemma, Qwen, GLM) may have different limits or no limits at all. A one-size-fits-all budget either truncates reasoning (too high) or starves it (too low). We must accommodate per-model.
 
 **Solution**: Env var configuration with fallback chain:
 1. `PERCHAI_{MODEL}_THINKING_BUDGET_{LEVEL}` - model-specific override

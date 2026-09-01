@@ -1516,6 +1516,8 @@ curl -s https://app.perchai.app/api/perch-terminal/public-model-default \
 
 #### Configurable Thinking Budgets
 
+**Why**: Some models have unknown hard caps on the Perchai server side that truncate reasoning mid-sentence. DeepSeek-v4-flash truncates at ~3300 tokens, for example. Other models may have different limits or no limits at all. We must accommodate per-model because a one-size-fits-all just isn't a good solution.
+
 Perchai supports configurable thinking budgets per model and reasoning level. This controls the token budget for chain-of-thought reasoning when `thinking.type=enabled` is set.
 
 **Fallback chain** (first match wins):

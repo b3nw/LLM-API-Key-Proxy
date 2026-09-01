@@ -143,9 +143,59 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         self._auth_base_cache: Dict[str, Any] = {}
         self.model_definitions = ModelDefinitions()
 
+        budget_envs = {
+            k: v for k, v in os.environ.items()
+            if "THINKING_BUDGET" in k and k.startswith("PERCHAI_")
+        }
+        if budget_envs:
+            env_summary = ", ".join(
+                f"{k}={v}" for k, v in sorted(budget_envs.items())
+            )
+            lib_logger.info(f"Perchai thinking budgets configured: {env_summary}")
+
     @override
     def has_custom_logic(self) -> bool:
         return True
+
+    def _normalize_model_name_for_env(self, model_name: str) -> str:
+        if model_name.startswith("perchai/"):
+            model_name = model_name[len("perchai/"):]
+        normalized = model_name.replace("-", "_").replace(".", "_").upper()
+        return normalized
+
+    def _get_thinking_budget(
+        self, model_name: str, reasoning_effort: Optional[str]
+    ) -> Optional[int]:
+        if not reasoning_effort:
+            return None
+        normalized_model = self._normalize_model_name_for_env(model_name)
+        normalized_level = reasoning_effort.upper()
+        model_specific_key = (
+            f"PERCHAI_{normalized_model}_THINKING_BUDGET_{normalized_level}"
+        )
+        model_specific_value = os.environ.get(model_specific_key)
+        if model_specific_value is not None:
+            try:
+                return int(model_specific_value)
+            except (ValueError, TypeError):
+                lib_logger.debug(
+                    f"Invalid thinking budget in {model_specific_key}="
+                    f"{model_specific_value!r}, ignoring"
+                )
+        level_default_key = f"PERCHAI_THINKING_BUDGET_{normalized_level}_DEFAULT"
+        level_default_value = os.environ.get(level_default_key)
+        if level_default_value is not None:
+            try:
+                return int(level_default_value)
+            except (ValueError, TypeError):
+                lib_logger.debug(
+                    f"Invalid thinking budget in {level_default_key}="
+                    f"{level_default_value!r}, ignoring"
+                )
+        model_lower = model_name.lower()
+        if "deepseek" in model_lower:
+            return 3000
+        return None
 
     def transform_request(
         self, kwargs: Dict[str, Any], model: str, credential: str
@@ -173,24 +223,27 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
             if not modifications.count("capped reasoning_effort from high to low"):
                 modifications.append("capped reasoning_effort from high to low")
 
-        # Inject a hard thinking_budget via chat_template_kwargs (vLLM/SGLang
-        # passthrough the Perchai server honors). DeepSeek-v4-flash truncates
-        # reasoning mid-sentence at ~3300 tokens; a 3000-token budget keeps
-        # reasoning under the wall so it completes cleanly instead of stopping
-        # with finish_reason=stop and half a sentence.
+        # Inject a thinking_budget via chat_template_kwargs (vLLM/SGLang
+        # passthrough the Perchai server honors). Configurable per-model
+        # and per-reasoning-level via environment variables.
         if (
             isinstance(thinking, dict)
             and thinking.get("type") == "enabled"
             and reasoning_effort in ("medium", "high")
         ):
-            ctk = extra_body.get("chat_template_kwargs")
-            if not isinstance(ctk, dict):
-                ctk = {}
-            ctk.setdefault("enable_thinking", True)
-            ctk.setdefault("thinking_budget", 3000)
-            extra_body["chat_template_kwargs"] = ctk
-            if not modifications.count("injected thinking_budget=3000 via chat_template_kwargs"):
-                modifications.append("injected thinking_budget=3000 via chat_template_kwargs")
+            budget = self._get_thinking_budget(model, reasoning_effort)
+            if budget is not None:
+                ctk = extra_body.get("chat_template_kwargs")
+                if not isinstance(ctk, dict):
+                    ctk = {}
+                ctk.setdefault("enable_thinking", True)
+                ctk.setdefault("thinking_budget", budget)
+                extra_body["chat_template_kwargs"] = ctk
+                modification_msg = (
+                    f"injected thinking_budget={budget} via chat_template_kwargs"
+                )
+                if not modifications.count(modification_msg):
+                    modifications.append(modification_msg)
 
         kwargs["extra_body"] = extra_body
 

@@ -225,3 +225,37 @@ uv run pytest tests/test_perchai_provider.py tests/test_provider_transforms.py -
 102 pass; 4 live-gated failures pre-existing (`refresh_token_already_used` - stale session, unrelated).
 
 **Deploy**: binary rebuilt at `dist/proxy_app`; copy into `llm-proxy` container and restart (docker ops manual).
+
+## 2026-09-01: Configurable thinking budgets
+
+**Branch**: `feat/provider-app.perchai`
+
+**Problem**: Hardcoded `thinking_budget=3000` for all models. DeepSeek needs it (wall at ~3300 tokens), but other models (Gemma, Qwen, GLM) don't need the cap and may benefit from longer reasoning.
+
+**Solution**: Env var configuration with fallback chain:
+1. `PERCHAI_{MODEL}_THINKING_BUDGET_{LEVEL}` - model-specific override
+2. `PERCHAI_THINKING_BUDGET_{LEVEL}_DEFAULT` - level-wide default
+3. Hardcoded `3000` for DeepSeek models only (discovered wall)
+4. No cap (upstream decides) for non-DeepSeek models
+
+Model name normalization: strip `perchai/` prefix, replace `-` and `.` with `_`, uppercase. Example: `perchai/wandb-deepseek-ai-deepseek-v4-flash-0731` -> `WANDB_DEEPSEEK_AI_DEEPSEEK_V4_FLASH_0731`.
+
+**Files changed**:
+- `src/rotator_library/providers/perchai_provider.py`:
+  - Added `_normalize_model_name_for_env(model_name)` - model name normalization
+  - Added `_get_thinking_budget(model_name, reasoning_effort)` - env var lookup with fallback chain
+  - Updated `transform_request` to use configurable budget instead of hardcoded 3000
+- `tests/test_perchai_provider.py`:
+  - 11 new tests (RED-GREEN TDD): model normalization, reasoning level normalization, env var lookup (model-specific, level default, override precedence, deepseek fallback, non-deepseek no cap), integration with transform_request
+- `.env.example`: documented new env vars with examples
+- `DOCUMENTATION.md`: added "Configurable Thinking Budgets" subsection under Perchai section
+
+**Verification**:
+```bash
+uv run python3 -m py_compile src/rotator_library/providers/perchai_provider.py tests/test_perchai_provider.py
+uv run ruff check src/rotator_library/providers/perchai_provider.py tests/test_perchai_provider.py --select F401,F811,F821,E9
+uv run pytest tests/test_perchai_provider.py -k "thinking_budget or normalize_model" -v
+```
+10 new tests pass. Existing `test_high_effort_injects_thinking_budget` still passes (deepseek fallback to 3000). 97 total tests pass (6 live-gated failures pre-existing - stale OAuth session).
+
+**Startup logging**: Added `lib_logger.info()` in `__init__` that scans for `PERCHAI_*THINKING_BUDGET*` env vars and logs them at startup. Follows NanoGPT pattern - only log when non-default values exist. 2 additional tests verify logging behavior (singleton cache cleared for test isolation). 99 tests pass total.

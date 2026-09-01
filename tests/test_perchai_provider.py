@@ -2093,3 +2093,253 @@ async def test_live_thinking_effort_modulates_reasoning_volume() -> None:
         f"high={high_reasoning} chars/{high_elapsed:.1f}s. "
         "Volumes are too similar - Perchai may ignore reasoning_effort."
     )
+
+
+# ---------------------------------------------------------------------------
+# Configurable thinking budgets: env var lookup with fallback chain
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_model_name_strips_prefix_and_normalizes() -> None:
+    given_provider = PerchaiProvider()
+    given_model = "perchai/wandb-deepseek-ai-deepseek-v4-flash-0731"
+    when_normalized = given_provider._normalize_model_name_for_env(given_model)
+    then_expected = "WANDB_DEEPSEEK_AI_DEEPSEEK_V4_FLASH_0731"
+    assert when_normalized == then_expected, (
+        f"Model name normalization failed: expected {then_expected!r}, "
+        f"got {when_normalized!r}"
+    )
+
+
+def test_normalize_model_name_handles_dots_and_dashes() -> None:
+    given_provider = PerchaiProvider()
+    given_model = "perchai/bedrock.mantle-google.gemma-4-e2b"
+    when_normalized = given_provider._normalize_model_name_for_env(given_model)
+    then_expected = "BEDROCK_MANTLE_GOOGLE_GEMMA_4_E2B"
+    assert when_normalized == then_expected, (
+        f"Model name with dots/dashes normalization failed: expected {then_expected!r}, "
+        f"got {when_normalized!r}"
+    )
+
+
+def test_normalize_model_name_without_prefix() -> None:
+    given_provider = PerchaiProvider()
+    given_model = "some-model-name"
+    when_normalized = given_provider._normalize_model_name_for_env(given_model)
+    then_expected = "SOME_MODEL_NAME"
+    assert when_normalized == then_expected, (
+        f"Model name without prefix normalization failed: expected {then_expected!r}, "
+        f"got {when_normalized!r}"
+    )
+
+
+def test_get_thinking_budget_model_specific_env_var(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    given_provider = PerchaiProvider()
+    given_model = "perchai/wandb-deepseek-ai-deepseek-v4-flash-0731"
+    given_effort = "high"
+    monkeypatch.setenv(
+        "PERCHAI_WANDB_DEEPSEEK_AI_DEEPSEEK_V4_FLASH_0731_THINKING_BUDGET_HIGH",
+        "5000",
+    )
+    when_budget = given_provider._get_thinking_budget(given_model, given_effort)
+    then_expected = 5000
+    assert when_budget == then_expected, (
+        f"Model-specific env var should return {then_expected}, got {when_budget!r}"
+    )
+
+
+def test_get_thinking_budget_level_default_env_var(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    given_provider = PerchaiProvider()
+    given_model = "perchai/bedrock-mantle-google-gemma-4-e2b"
+    given_effort = "low"
+    monkeypatch.setenv("PERCHAI_THINKING_BUDGET_LOW_DEFAULT", "1000")
+    when_budget = given_provider._get_thinking_budget(given_model, given_effort)
+    then_expected = 1000
+    assert when_budget == then_expected, (
+        f"Level default env var should return {then_expected}, got {when_budget!r}"
+    )
+
+
+def test_get_thinking_budget_model_specific_overrides_level_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    given_provider = PerchaiProvider()
+    given_model = "perchai/wandb-deepseek-ai-deepseek-v4-flash-0731"
+    given_effort = "medium"
+    monkeypatch.setenv(
+        "PERCHAI_WANDB_DEEPSEEK_AI_DEEPSEEK_V4_FLASH_0731_THINKING_BUDGET_MEDIUM",
+        "4000",
+    )
+    monkeypatch.setenv("PERCHAI_THINKING_BUDGET_MEDIUM_DEFAULT", "2000")
+    when_budget = given_provider._get_thinking_budget(given_model, given_effort)
+    then_expected = 4000
+    assert when_budget == then_expected, (
+        f"Model-specific env var should override level default: expected {then_expected}, "
+        f"got {when_budget!r}"
+    )
+
+
+def test_get_thinking_budget_deepseek_fallback_3000(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    given_provider = PerchaiProvider()
+    given_model = "perchai/wandb-deepseek-ai-deepseek-v4-flash-0731"
+    given_effort = "high"
+    monkeypatch.delenv(
+        "PERCHAI_WANDB_DEEPSEEK_AI_DEEPSEEK_V4_FLASH_0731_THINKING_BUDGET_HIGH",
+        raising=False,
+    )
+    monkeypatch.delenv("PERCHAI_THINKING_BUDGET_HIGH_DEFAULT", raising=False)
+    when_budget = given_provider._get_thinking_budget(given_model, given_effort)
+    then_expected = 3000
+    assert when_budget == then_expected, (
+        f"Deepseek model should fallback to 3000, got {when_budget!r}"
+    )
+
+
+def test_get_thinking_budget_non_deepseek_no_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    given_provider = PerchaiProvider()
+    given_model = "perchai/bedrock-mantle-google-gemma-4-e2b"
+    given_effort = "high"
+    monkeypatch.delenv(
+        "PERCHAI_BEDROCK_MANTLE_GOOGLE_GEMMA_4_E2B_THINKING_BUDGET_HIGH",
+        raising=False,
+    )
+    monkeypatch.delenv("PERCHAI_THINKING_BUDGET_HIGH_DEFAULT", raising=False)
+    when_budget = given_provider._get_thinking_budget(given_model, given_effort)
+    assert when_budget is None, (
+        f"Non-deepseek model should return None (no cap), got {when_budget!r}"
+    )
+
+
+def test_get_thinking_budget_reasoning_level_normalization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    given_provider = PerchaiProvider()
+    given_model = "perchai/some-model"
+    given_effort = "HIGH"
+    monkeypatch.setenv("PERCHAI_SOME_MODEL_THINKING_BUDGET_HIGH", "6000")
+    when_budget = given_provider._get_thinking_budget(given_model, given_effort)
+    then_expected = 6000
+    assert when_budget == then_expected, (
+        f"Reasoning level should be normalized to uppercase: expected {then_expected}, "
+        f"got {when_budget!r}"
+    )
+
+
+def test_transform_request_uses_configurable_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    given_provider = PerchaiProvider()
+    given_model = "perchai/wandb-deepseek-ai-deepseek-v4-flash-0731"
+    given_kwargs: Dict[str, Any] = {
+        "model": given_model,
+        "messages": [{"role": "user", "content": "think hard"}],
+        "extra_body": {
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": "high",
+        },
+    }
+    monkeypatch.setenv(
+        "PERCHAI_WANDB_DEEPSEEK_AI_DEEPSEEK_V4_FLASH_0731_THINKING_BUDGET_HIGH",
+        "7000",
+    )
+    given_provider.transform_request(given_kwargs, given_model, "test-cred")
+    then_ctk = given_kwargs["extra_body"].get("chat_template_kwargs", {})
+    then_budget = then_ctk.get("thinking_budget")
+    assert then_budget == 7000, (
+        f"transform_request should use configurable budget 7000, got {then_budget!r}"
+    )
+
+
+def test_transform_request_no_budget_for_non_deepseek_without_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    given_provider = PerchaiProvider()
+    given_model = "perchai/bedrock-mantle-google-gemma-4-e2b"
+    given_kwargs: Dict[str, Any] = {
+        "model": given_model,
+        "messages": [{"role": "user", "content": "think hard"}],
+        "extra_body": {
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": "high",
+        },
+    }
+    monkeypatch.delenv(
+        "PERCHAI_BEDROCK_MANTLE_GOOGLE_GEMMA_4_E2B_THINKING_BUDGET_HIGH",
+        raising=False,
+    )
+    monkeypatch.delenv("PERCHAI_THINKING_BUDGET_HIGH_DEFAULT", raising=False)
+    given_provider.transform_request(given_kwargs, given_model, "test-cred")
+    then_ctk = given_kwargs["extra_body"].get("chat_template_kwargs", {})
+    then_has_budget = "thinking_budget" in then_ctk
+    assert not then_has_budget, (
+        f"Non-deepseek without env var should NOT inject thinking_budget, "
+        f"got chat_template_kwargs: {then_ctk!r}"
+    )
+
+
+def test_startup_logs_thinking_budget_env_vars(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+    from rotator_library.providers.provider_interface import SingletonABCMeta
+
+    monkeypatch.setenv(
+        "PERCHAI_WANDB_DEEPSEEK_AI_DEEPSEEK_V4_FLASH_0731_THINKING_BUDGET_HIGH",
+        "3000",
+    )
+    monkeypatch.setenv("PERCHAI_THINKING_BUDGET_LOW_DEFAULT", "1000")
+
+    SingletonABCMeta._instances.pop(PerchaiProvider, None)
+
+    with caplog.at_level(logging.INFO, logger="rotator_library"):
+        PerchaiProvider()
+
+    then_logged = any(
+        "Perchai thinking budgets configured" in record.message
+        and "PERCHAI_WANDB_DEEPSEEK_AI_DEEPSEEK_V4_FLASH_0731_THINKING_BUDGET_HIGH=3000" in record.message
+        and "PERCHAI_THINKING_BUDGET_LOW_DEFAULT=1000" in record.message
+        for record in caplog.records
+    )
+    assert then_logged, (
+        f"Expected INFO log with thinking budget env vars, got: "
+        f"{[r.message for r in caplog.records if 'Perchai' in r.message]!r}"
+    )
+
+
+def test_startup_no_log_when_no_thinking_budget_env_vars(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+    from rotator_library.providers.provider_interface import SingletonABCMeta
+
+    monkeypatch.delenv(
+        "PERCHAI_WANDB_DEEPSEEK_AI_DEEPSEEK_V4_FLASH_0731_THINKING_BUDGET_HIGH",
+        raising=False,
+    )
+    monkeypatch.delenv("PERCHAI_THINKING_BUDGET_LOW_DEFAULT", raising=False)
+    monkeypatch.delenv("PERCHAI_THINKING_BUDGET_HIGH_DEFAULT", raising=False)
+    monkeypatch.delenv("PERCHAI_THINKING_BUDGET_MEDIUM_DEFAULT", raising=False)
+
+    SingletonABCMeta._instances.pop(PerchaiProvider, None)
+
+    with caplog.at_level(logging.INFO, logger="rotator_library"):
+        PerchaiProvider()
+
+    then_no_log = not any(
+        "Perchai thinking budgets configured" in record.message
+        for record in caplog.records
+    )
+    assert then_no_log, (
+        f"Expected no INFO log when no thinking budget env vars set, got: "
+        f"{[r.message for r in caplog.records if 'thinking budgets' in r.message]!r}"
+    )

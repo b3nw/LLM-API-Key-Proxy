@@ -1514,6 +1514,36 @@ curl -s https://app.perchai.app/api/perch-terminal/public-model-default \
   | python3 -m json.tool
 ```
 
+#### Configurable Thinking Budgets
+
+Perchai supports configurable thinking budgets per model and reasoning level. This controls the token budget for chain-of-thought reasoning when `thinking.type=enabled` is set.
+
+**Fallback chain** (first match wins):
+
+1. `PERCHAI_{MODEL}_THINKING_BUDGET_{LEVEL}` - model-specific override
+2. `PERCHAI_THINKING_BUDGET_{LEVEL}_DEFAULT` - level-wide default
+3. Hardcoded `3000` for DeepSeek models only (discovered wall at ~3300 tokens)
+4. No cap (upstream decides) for non-DeepSeek models
+
+**Model name normalization**: strip `perchai/` prefix, replace `-` and `.` with `_`, uppercase. Example: `perchai/wandb-deepseek-ai-deepseek-v4-flash-0731` -> `WANDB_DEEPSEEK_AI_DEEPSEEK_V4_FLASH_0731`.
+
+**Reasoning level normalization**: uppercase (`HIGH`, `MEDIUM`, `LOW`).
+
+**Examples**:
+
+```bash
+# DeepSeek V4 Flash at high effort: 3000 tokens
+PERCHAI_WANDB_DEEPSEEK_AI_DEEPSEEK_V4_FLASH_0731_THINKING_BUDGET_HIGH=3000
+
+# All models at low effort: 1000 tokens
+PERCHAI_THINKING_BUDGET_LOW_DEFAULT=1000
+
+# Gemma 4 E2B at medium effort: 5000 tokens
+PERCHAI_BEDROCK_MANTLE_GOOGLE_GEMMA_4_E2B_THINKING_BUDGET_MEDIUM=5000
+```
+
+The thinking budget is injected via `chat_template_kwargs.thinking_budget` (vLLM/SGLang passthrough that Perchai honors). DeepSeek-v4-flash truncates reasoning mid-sentence at ~3300 tokens; a 3000-token budget keeps reasoning under the wall so it completes cleanly instead of stopping with `finish_reason=stop` and half a sentence.
+
 ---
 
 ## 4. Logging & Debugging

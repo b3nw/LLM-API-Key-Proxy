@@ -355,3 +355,150 @@ UNCHANGED - zero burn
 ```
 
 Full run time also dropped from about 34s to 14s, since nothing waits on the network any more.
+
+## 2026-09-02: The 403 is a missing turn ticket, not a blocked API
+
+Production started failing every Perchai credential with HTTP 403
+`perch_surface_required`: "Your plan includes Perch-hosted models for use in Perch AI
+Web, Desktop, and CLI only. Direct API access is not included." The working hypothesis
+was that Perch had fingerprinted the proxy and that the only way back in was to wrap the
+`perch` CLI as a subprocess transport.
+
+That hypothesis is wrong, and the fix is one header.
+
+Reverse-engineered `perchai-cli@2.4.97` (`dist/perch.mjs`, minified but greppable). The
+CLI mints a short-lived **turn ticket** at the start of every turn and attaches it to
+every model call:
+
+- `POST {appUrl}/api/perch-terminal/turn-ticket`, `Authorization: Bearer <accessToken>`,
+  body `{"surface":"cli","profile":"standard"}`, 8s timeout.
+- Returns `{ok, ticket, ticketId, runId, surface, profile, expiresAt}`. The ticket is an
+  HS256 JWT carrying `{tid, uid, wid, surface, plan, run, exp}`. **TTL 5 minutes.**
+- Every `/api/perch-terminal/model-call` then carries `x-perch-turn-ticket: <ticket>`.
+- Under 30s from expiry, the CLI re-POSTs `{"renew":true,"ticketId":…}` rather than
+  minting fresh, de-duplicated through one in-flight promise.
+- Mint can return 429 `{"enforced":true,"errorCode":"turn_rate_limited"}` — a per-*turn*
+  plan limit, distinct from token quota. This is new server-side accounting.
+
+Isolated the gate with a three-way live test on the operator's own session:
+
+| Request | Result |
+|---------|--------|
+| model-call **with** ticket + `User-Agent: perchai-cli/2.4.97` | 200 |
+| model-call **without** ticket, CLI User-Agent | 403 `perch_surface_required` |
+| model-call **with** ticket, `User-Agent: python-urllib/3` | 200 |
+
+The middle row reproduces the production error exactly; the third rules out User-Agent
+fingerprinting. The ticket header is the entire gate.
+
+Also measured, so the implementation does not have to guess:
+
+- One ticket serves **multiple** model-calls (second call: 200).
+- The ticket is **not** bound to the envelope's `runId` — a deliberately bogus `runId` in
+  the body still returned 200. Only the header is checked.
+- SSE streaming works with a ticket: `Accept: text/event-stream` returned 200 and the
+  familiar `reasoning_delta` / `done` events. So the SSE parser, the `done.toolCalls`
+  handling, and the `finish_reason` fixes from the 2026-08-23 entries are all unaffected.
+- Renewal via `{renew:true, ticketId}` returned 200.
+
+`ccr` in the bundle also falls back to a `PERCH_MODEL_CALL_PROXY_TOKEN` env var for the
+bearer. Noted so it is not rediscovered.
+
+**Second finding — `perch_surface_required` is misclassified today.** `parse_quota_error`
+treats the 403 as credential exhaustion, which is why a single missing header emptied the
+whole pool and produced "All 1 credential(s) exhausted". It is a retryable auth fault:
+drop the cached ticket, re-mint, retry. `turn_rate_limited` is the one that genuinely is
+exhaustion.
+
+**Measured the CLI-wrapper alternative before discarding it.** `perch run "Reply with
+exactly: OK" --json` took 16.5s wall / 8.2s server-side, printed a single JSON object at
+exit (no streaming), and reported `estimatedInputTokens: 18038` for a two-word prompt —
+Perch prepends ~18k tokens of its own agent scaffolding per turn. `perch run` also takes
+a single prompt string, not a messages array, offers only
+`--model standard|standard max|pro|pro max`, and runs its own agent loop with its own
+local tools, which in a proxy would execute against the proxy container's filesystem.
+Those are semantic mismatches with `/v1/chat/completions` that no amount of process
+warming fixes.
+
+**Not implemented in this session** — investigation only. Plan with the full design,
+integration point (`perchai_provider.py:350`, the sync `_headers` closure), test list,
+and the account-suspension risk assessment is in `.omo/plans/perchai-cli-wrapper.md`.
+
+**Risk carried forward**: the 403 body warns that repeated direct-access attempts may
+result in account suspension, and Perch added the ticket check deliberately after the
+proxy's previous access pattern worked. Sending `surface: "cli"` from something that is
+not the CLI is a decision for the operator to make knowingly, not a detail to bury in a
+diff.
+
+**Verification** (no repo files changed; live calls were non-destructive reads against
+the operator's own account, and the session file was not rotated):
+```bash
+perch status            # signed in as kevin@atvastacode.com
+perch run "Reply with exactly: OK" --json   # 16.5s, single-shot JSON
+# three-way model-call matrix run via python3 + urllib against app.perchai.app
+```
+
+## 2026-09-02: Implemented Part 1 (turn-ticket support) - TDD, and one plan
+correction
+
+Operator approved the account-risk tradeoff from the plan. Implemented with RED/GREEN:
+extended the fake server in `tests/test_perchai_auth.py` to require
+`x-perch-turn-ticket` on model-call (matching production), added a
+`/api/perch-terminal/turn-ticket` handler, wrote 5 failing tests, then implemented.
+
+**`PerchaiAuthBase.ensure_turn_ticket(access_token)`** (`perchai_auth_base.py`) mints or
+renews a ticket under the existing refresh lock, caches it, and returns the token. A 401
+from the mint endpoint (session's access token already stale, even though the local
+600s-buffer check thought it was fine) triggers one internal `_rotate_refresh_token` and
+retry - verified for free by the existing `test_model_call_401_refreshes_and_retries`
+tests, since the provider's own `_headers`/`refresh_on_401` self-heals the now-stale
+`token` variable used for the model-call itself via the "adopt, don't re-rotate" path
+already in `refresh_on_401`. `invalidate_turn_ticket()` drops the cache.
+
+`PerchaiProvider.acompletion` mints the ticket once per completion (after
+`_auth_context`), and both `_non_stream_completion` and `_stream_completion` now retry
+once on a 403 `perch_surface_required` response: invalidate the cached ticket, re-mint,
+retry - mirroring the existing 401 retry-once pattern.
+
+**Plan correction - `parse_quota_error` cannot express "retryable, not exhausting".**
+The plan's Part 1 said to classify `perch_surface_required` as
+`{"reason": "authentication", "retry_after": None}` so it would not exhaust the
+credential. Traced the actual consumer (`error_handler.py:960-1002`, `classify_error`)
+before implementing it: *any* truthy return from `parse_quota_error` forces
+`status_code=429` and `error_type` to either `"rate_limit"` or `"quota_exceeded"` - there
+is no path to an `"authentication"`-flavoured, non-exhausting outcome through this
+function. Returning that dict would have made things worse (forced `quota_exceeded`, a
+long cooldown) than doing nothing (falls through to the generic `status_code == 403` ->
+`"forbidden"` classification, unchanged from today).
+
+So `perch_surface_required` gets **no new classification** - the fix is the in-request
+retry above, which means a transient/expired ticket never reaches `parse_quota_error` at
+all in the common case. Only `turn_rate_limited` (429, `enforced: true`) was added to
+`_classify_perchai_error`, mirroring the existing `usage_limit_reached` pattern
+(`{"retry_after": DEFAULT_RETRY_AFTER_SECONDS, "reason": "rate_limit"}`), which does
+travel a verified path to real exhaustion.
+
+**Tests** (`tests/test_perchai_auth.py`, 5 new, all seam-level against the real local
+HTTP server, no mocking):
+- `test_model_call_sends_turn_ticket_header` - regression test for the reported 403.
+- `test_turn_ticket_is_reused_across_completions` - one mint serves two completions.
+- `test_turn_ticket_renews_within_margin` - a ticket inside the 30s margin renews
+  (`{renew:true, ticketId}`), not a fresh mint.
+- `test_surface_required_403_retries_with_fresh_ticket_and_succeeds` - simulates another
+  consumer invalidating the cached ticket server-side; the second completion still
+  succeeds via the drop/re-mint/retry path, proving the credential is not exhausted.
+- `test_turn_rate_limited_429_marks_exhausted` - classification unit test on
+  `parse_quota_error`.
+
+**Verification**:
+```bash
+uv run python3 -m py_compile src/rotator_library/providers/perchai_auth_base.py src/rotator_library/providers/perchai_provider.py
+uv run ruff check src/rotator_library/providers/perchai_auth_base.py src/rotator_library/providers/perchai_provider.py tests/test_perchai_auth.py --select F401,F811,F821,E9
+uv run pytest tests/test_perchai_auth.py tests/test_perchai_provider.py tests/test_perchai_stream_truncation.py -q -m "not live"   # 115 passed
+uv run pytest tests/ -q -m "not live"   # 632 passed, 3 pre-existing failures, 15 pre-existing collection errors - same baseline as 2026-09-02, no new breakage
+```
+No live tests added or run against `app.perchai.app` in this pass, per the live-test-burn
+warning in the 2026-08-31 entries above.
+
+**Not done**: the two follow-ups already on record (`perchai_quota_tracker.py` staying
+unticketed, and the `usage` vs `usage-meter` 405 mismatch) are still open.

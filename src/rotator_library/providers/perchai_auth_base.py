@@ -35,6 +35,30 @@ class PerchaiCredentialKind(StrEnum):
     RAW_TOKEN = "raw_token"
 
 
+class PerchaiTicketSurface(StrEnum):
+    CLI = "cli"
+    BROWSER = "browser"
+    FILESYSTEM = "filesystem"
+    GMAIL = "gmail"
+
+
+class PerchaiTicketProfile(StrEnum):
+    STANDARD = "standard"
+    FLOCK = "flock"
+
+
+class PerchaiTurnTicket(TypedDict):
+    token: str
+    ticket_id: str
+    run_id: str
+    expires_at: float
+    profile: str
+
+
+class PerchaiTicketRateLimitError(PerchaiAuthError):
+    pass
+
+
 lib_logger = logging.getLogger("rotator_library")
 if not lib_logger.handlers:
     lib_logger.addHandler(logging.NullHandler())
@@ -72,6 +96,10 @@ class PerchaiAuthBase:
     CONFIG_TIMEOUT: Final[float] = 15.0
     REFRESH_EXPIRY_BUFFER_SECONDS: Final[int] = 600
     REFRESH_TOKEN_ALREADY_USED: Final[str] = "refresh_token_already_used"
+    TURN_TICKET_PATH: Final[str] = "/api/perch-terminal/turn-ticket"
+    TICKET_TTL_FALLBACK_SECONDS: Final[int] = 300
+    TICKET_RENEW_MARGIN_SECONDS: Final[int] = 30
+    TICKET_MINT_TIMEOUT_SECONDS: Final[float] = 8.0
 
     def __init__(self, credential_path: str = "") -> None:
         self._session: Optional[PerchaiSession] = None
@@ -81,6 +109,7 @@ class PerchaiAuthBase:
         self._model_cache_filled_at: float = 0.0
         self._supabase_url: Optional[str] = None
         self._supabase_anon_key: Optional[str] = None
+        self._turn_ticket: Optional[PerchaiTurnTicket] = None
         # When set, load_session / _persist_session use this path instead of
         # auto-discovering. Supports file paths and env:// virtual paths.
         self._credential_path: str = credential_path
@@ -503,6 +532,115 @@ class PerchaiAuthBase:
                 self._session = session
                 return current
             return await self._rotate_refresh_token(session)
+
+    async def ensure_turn_ticket(self, access_token: str) -> str:
+        async with self._get_lock():
+            now = time.time()
+            cached = self._turn_ticket
+            if (
+                cached is not None
+                and cached["expires_at"] > now + self.TICKET_RENEW_MARGIN_SECONDS
+            ):
+                return cached["token"]
+
+            token = access_token
+            response = await self._post_turn_ticket(token, cached)
+            if response.status_code == 401:
+                token = await self._rotate_refresh_token(self.load_session())
+                response = await self._post_turn_ticket(token, cached)
+
+            minted = self._parse_turn_ticket_response(response)
+            self._turn_ticket = minted
+            return minted["token"]
+
+    def invalidate_turn_ticket(self) -> None:
+        self._turn_ticket = None
+
+    async def _post_turn_ticket(
+        self, access_token: str, cached: Optional[PerchaiTurnTicket]
+    ) -> httpx.Response:
+        session = self._ensure_session()
+        app_url = session.get("appUrl") or self.DEFAULT_APP_URL
+        url = f"{app_url.rstrip('/')}{self.TURN_TICKET_PATH}"
+        body: Dict[str, Any] = (
+            {"renew": True, "ticketId": cached["ticket_id"]}
+            if cached is not None
+            else {
+                "surface": PerchaiTicketSurface.CLI.value,
+                "profile": PerchaiTicketProfile.STANDARD.value,
+            }
+        )
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.TICKET_MINT_TIMEOUT_SECONDS
+            ) as client:
+                return await client.post(
+                    url,
+                    json=body,
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                    },
+                )
+        except httpx.HTTPError as exc:
+            raise PerchaiAuthError(
+                f"Perchai turn-ticket request failed: {exc}."
+            ) from exc
+
+    def _parse_turn_ticket_response(
+        self, response: httpx.Response
+    ) -> PerchaiTurnTicket:
+        if response.status_code == 429:
+            try:
+                err_payload = response.json()
+            except json.JSONDecodeError:
+                err_payload = {}
+            if isinstance(err_payload, dict) and err_payload.get("enforced"):
+                raise PerchaiTicketRateLimitError(
+                    str(err_payload.get("error") or "Perchai turn rate limited")
+                )
+
+        if response.status_code != 200:
+            snippet = response.text[:200] if response.text else "<empty>"
+            raise PerchaiAuthError(
+                f"Perchai turn-ticket request returned HTTP "
+                f"{response.status_code}: {snippet}."
+            )
+
+        try:
+            payload = response.json()
+        except json.JSONDecodeError as exc:
+            raise PerchaiAuthError(
+                f"Perchai turn-ticket response is invalid JSON: {exc}."
+            ) from exc
+
+        if (
+            not isinstance(payload, dict)
+            or not payload.get("ok")
+            or not payload.get("ticket")
+            or not payload.get("ticketId")
+        ):
+            raise PerchaiAuthError(
+                "Perchai turn-ticket response missing ok/ticket/ticketId."
+            )
+
+        return PerchaiTurnTicket(
+            token=payload["ticket"],
+            ticket_id=payload["ticketId"],
+            run_id=str(payload.get("runId") or ""),
+            expires_at=self._parse_ticket_expiry(payload.get("expiresAt")),
+            profile=str(payload.get("profile") or PerchaiTicketProfile.STANDARD.value),
+        )
+
+    @staticmethod
+    def _parse_ticket_expiry(value: Any) -> float:
+        if isinstance(value, str):
+            try:
+                return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                pass
+        return time.time() + PerchaiAuthBase.TICKET_TTL_FALLBACK_SECONDS
 
     def _adopt_persisted_session(self, presented: str) -> Optional[str]:
         # Another consumer rotated the family and persisted its session while

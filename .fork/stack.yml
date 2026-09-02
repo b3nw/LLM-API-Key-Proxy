@@ -182,6 +182,7 @@ features:
       - "src/rotator_library/providers/utilities/perchai_*.py"
       - "tests/test_perchai_provider.py"
       - "tests/test_perchai_auth.py"
+      - "tests/test_perchai_stream_truncation.py"
 
   - id: core
     prefix: "feat(core)"

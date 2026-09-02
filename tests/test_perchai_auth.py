@@ -24,13 +24,20 @@ import httpx
 import pytest
 
 from rotator_library.providers.perchai_auth_base import PerchaiAuthBase
-from rotator_library.providers.perchai_provider import PerchaiProvider
+from rotator_library.providers.perchai_provider import (
+    DEFAULT_RETRY_AFTER_SECONDS,
+    PerchaiProvider,
+)
 
 CONFIG_PATH = "/api/perch-terminal/cli-auth/config"
 TOKEN_PATH = "/auth/v1/token"
 MODEL_CALL_PATH = "/api/perch-terminal/model-call"
+TURN_TICKET_PATH = "/api/perch-terminal/turn-ticket"
+TURN_TICKET_HEADER = "x-perch-turn-ticket"
 USER_ID = "11111111-2222-3333-4444-555555555555"
 ALREADY_USED = "refresh_token_already_used"
+SURFACE_REQUIRED = "perch_surface_required"
+TURN_RATE_LIMITED = "turn_rate_limited"
 
 
 class FakePerchaiAuth:
@@ -46,6 +53,42 @@ class FakePerchaiAuth:
         self.on_reject: Optional[Callable[[], None]] = None
         self.completion_text: str = "hello"
         self.model_calls: List[str] = []
+        # Turn-ticket state. The fake requires a valid ticket on every
+        # model-call, matching the live gate this test suite regression-tests.
+        self._ticket_seq: int = 0
+        self.current_ticket_token: Optional[str] = None
+        self.current_ticket_id: Optional[str] = None
+        self.ticket_mints: int = 0
+        self.ticket_renews: List[str] = []
+        self.ticket_ttl_seconds: int = 300
+        self.ticket_rate_limited: bool = False
+        self.tickets_presented: List[str] = []
+
+    def issue_ticket(self, *, renew: bool, ticket_id: str) -> Dict[str, Any]:
+        with self._lock:
+            self._ticket_seq += 1
+            seq = self._ticket_seq
+            token = f"ticket-{seq}"
+            new_ticket_id = f"ticket-id-{seq}"
+            self.current_ticket_token = token
+            self.current_ticket_id = new_ticket_id
+            if renew:
+                self.ticket_renews.append(ticket_id)
+            else:
+                self.ticket_mints += 1
+            expires_at = time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ",
+                time.gmtime(time.time() + self.ticket_ttl_seconds),
+            )
+            return {
+                "ok": True,
+                "ticket": token,
+                "ticketId": new_ticket_id,
+                "runId": f"tkt-cli-{seq}",
+                "surface": "cli",
+                "profile": "standard",
+                "expiresAt": expires_at,
+            }
 
     def adopt_initial_refresh(self, refresh_token: str) -> None:
         with self._lock:
@@ -125,6 +168,9 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path == MODEL_CALL_PATH:
             self._model_call()
             return
+        if parsed.path == TURN_TICKET_PATH:
+            self._turn_ticket()
+            return
         if parsed.path != TOKEN_PATH:
             self._reply(404, {"error": "unexpected_post"})
             return
@@ -138,6 +184,29 @@ class _Handler(BaseHTTPRequestHandler):
         status, payload = self.state.exchange(str(body.get("refresh_token") or ""))
         self._reply(status, payload)
 
+    def _turn_ticket(self) -> None:
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            body = json.loads(raw or b"{}")
+        except json.JSONDecodeError:
+            self._reply(400, {"ok": False, "error": "invalid_json"})
+            return
+        if self.state.ticket_rate_limited:
+            self._reply(
+                429,
+                {
+                    "enforced": True,
+                    "errorCode": TURN_RATE_LIMITED,
+                    "error": "Too many turns started",
+                },
+            )
+            return
+        renew = bool(body.get("renew"))
+        ticket_id = str(body.get("ticketId") or "")
+        payload = self.state.issue_ticket(renew=renew, ticket_id=ticket_id)
+        self._reply(200, payload)
+
     def _model_call(self) -> None:
         length = int(self.headers.get("Content-Length") or 0)
         if length:
@@ -146,6 +215,22 @@ class _Handler(BaseHTTPRequestHandler):
         self.state.model_calls.append(presented)
         if presented != f"Bearer {self.state.issued_access}":
             self._reply(401, {"ok": False, "error": "invalid_token"})
+            return
+        ticket_presented = str(self.headers.get(TURN_TICKET_HEADER) or "")
+        self.state.tickets_presented.append(ticket_presented)
+        if ticket_presented != (self.state.current_ticket_token or ""):
+            self._reply(
+                403,
+                {
+                    "ok": False,
+                    "error": (
+                        "Your plan includes Perch-hosted models for use in "
+                        "Perch AI Web, Desktop, and CLI only. Direct API "
+                        "access is not included."
+                    ),
+                    "errorCode": SURFACE_REQUIRED,
+                },
+            )
             return
         if "text/event-stream" in str(self.headers.get("Accept") or ""):
             text = self.state.completion_text
@@ -521,4 +606,190 @@ async def test_model_call_401_refreshes_and_retries_stream(
     )
     assert then_state.rotations == 1, (
         f"expected exactly one refresh to recover from the 401, got {then_state.rotations}"
+    )
+
+
+def given_session_with_valid_access_token(
+    auth_server: AuthServer,
+    session_file: Path,
+) -> None:
+    write_session(
+        session_file,
+        app_url=auth_server.app_url,
+        access=auth_server.state.issued_access,
+        refresh="refresh-initial",
+        expires_at=int(time.time()) + 3000,
+    )
+    auth_server.state.adopt_initial_refresh("refresh-initial")
+
+
+async def test_model_call_sends_turn_ticket_header(
+    auth_server: AuthServer,
+    session_file: Path,
+) -> None:
+    given_session_with_valid_access_token(auth_server, session_file)
+
+    given_provider = PerchaiProvider()
+    async with httpx.AsyncClient() as given_client:
+        when_response = await given_provider.acompletion(
+            given_client,
+            model=MODEL,
+            messages=MESSAGES,
+            credential_identifier=str(session_file),
+            stream=False,
+        )
+
+    then_state = auth_server.state
+    assert when_response.choices[0].message.content == then_state.completion_text, (
+        "a completion must succeed once the turn-ticket header is attached, "
+        f"got {when_response.choices[0].message.content!r}"
+    )
+    assert then_state.tickets_presented, (
+        "the model-call must carry an x-perch-turn-ticket header. This is "
+        "the regression test for the perch_surface_required 403."
+    )
+    assert then_state.tickets_presented[-1] == then_state.current_ticket_token, (
+        "the presented ticket must match the one the server minted, got "
+        f"{then_state.tickets_presented[-1]!r} vs {then_state.current_ticket_token!r}"
+    )
+    assert then_state.ticket_mints == 1, (
+        "expected exactly one ticket mint for a single completion, got "
+        f"{then_state.ticket_mints}"
+    )
+
+
+async def test_turn_ticket_is_reused_across_completions(
+    auth_server: AuthServer,
+    session_file: Path,
+) -> None:
+    given_session_with_valid_access_token(auth_server, session_file)
+
+    given_provider = PerchaiProvider()
+    async with httpx.AsyncClient() as given_client:
+        await given_provider.acompletion(
+            given_client,
+            model=MODEL,
+            messages=MESSAGES,
+            credential_identifier=str(session_file),
+            stream=False,
+        )
+        await given_provider.acompletion(
+            given_client,
+            model=MODEL,
+            messages=MESSAGES,
+            credential_identifier=str(session_file),
+            stream=False,
+        )
+
+    then_state = auth_server.state
+    assert then_state.ticket_mints == 1, (
+        "a fresh, unexpired ticket must be reused across completions on the "
+        f"same credential instead of minting again, got {then_state.ticket_mints} mints"
+    )
+    assert then_state.tickets_presented[0] == then_state.tickets_presented[1], (
+        "both completions must present the same cached ticket"
+    )
+
+
+async def test_turn_ticket_renews_within_margin(
+    auth_server: AuthServer,
+    session_file: Path,
+) -> None:
+    given_session_with_valid_access_token(auth_server, session_file)
+    auth_server.state.ticket_ttl_seconds = 20  # inside the 30s renew margin
+
+    given_provider = PerchaiProvider()
+    async with httpx.AsyncClient() as given_client:
+        await given_provider.acompletion(
+            given_client,
+            model=MODEL,
+            messages=MESSAGES,
+            credential_identifier=str(session_file),
+            stream=False,
+        )
+        first_ticket_id = auth_server.state.current_ticket_id
+        await given_provider.acompletion(
+            given_client,
+            model=MODEL,
+            messages=MESSAGES,
+            credential_identifier=str(session_file),
+            stream=False,
+        )
+
+    then_state = auth_server.state
+    assert then_state.ticket_mints == 1, (
+        "a ticket inside the renew margin must renew, not mint fresh; got "
+        f"{then_state.ticket_mints} mints"
+    )
+    assert then_state.ticket_renews == [first_ticket_id], (
+        f"the renewal must carry the previous ticketId, got {then_state.ticket_renews!r}"
+    )
+
+
+async def test_surface_required_403_retries_with_fresh_ticket_and_succeeds(
+    auth_server: AuthServer,
+    session_file: Path,
+) -> None:
+    given_session_with_valid_access_token(auth_server, session_file)
+
+    given_provider = PerchaiProvider()
+    async with httpx.AsyncClient() as given_client:
+        await given_provider.acompletion(
+            given_client,
+            model=MODEL,
+            messages=MESSAGES,
+            credential_identifier=str(session_file),
+            stream=False,
+        )
+
+        then_state = auth_server.state
+        # Simulate the ticket being invalidated server-side (e.g. replaced by
+        # another consumer) before the local cache nears expiry.
+        then_state.issue_ticket(renew=False, ticket_id="")
+
+        when_response = await given_provider.acompletion(
+            given_client,
+            model=MODEL,
+            messages=MESSAGES,
+            credential_identifier=str(session_file),
+            stream=False,
+        )
+
+    assert when_response.choices[0].message.content == then_state.completion_text, (
+        "a 403 perch_surface_required must drop the stale ticket, mint a "
+        "fresh one, and retry - not raise or exhaust the credential, got "
+        f"{when_response.choices[0].message.content!r}"
+    )
+    presented = then_state.tickets_presented
+    assert len(presented) == 3, (
+        f"expected mint, stale attempt, retry attempt; got {presented!r}"
+    )
+    assert presented[-2] != then_state.current_ticket_token, (
+        "the second completion's first attempt must present the now-stale "
+        f"cached ticket, got {presented[-2]!r}"
+    )
+    assert presented[-1] == then_state.current_ticket_token, (
+        f"the retry must present the freshly minted ticket, got {presented[-1]!r}"
+    )
+
+
+def test_turn_rate_limited_429_marks_exhausted() -> None:
+    given_error_body = json.dumps(
+        {
+            "enforced": True,
+            "errorCode": "turn_rate_limited",
+            "error": "Too many turns started",
+        }
+    )
+
+    when_result = PerchaiProvider.parse_quota_error(
+        Exception(given_error_body), given_error_body
+    )
+
+    assert when_result == {
+        "retry_after": DEFAULT_RETRY_AFTER_SECONDS,
+        "reason": "rate_limit",
+    }, (
+        "turn_rate_limited is a real per-turn quota, distinct from token "
+        f"quota, and must be classified as exhausting; got {when_result!r}"
     )

@@ -60,8 +60,9 @@ async def test_perchai_stream_normal_termination():
     stream = provider._stream_completion(
         client=client,
         url="https://api.perchai.com/v1/chat/completions",
-        build_headers=lambda token: {"Authorization": f"Bearer {token}"},
+        build_headers=lambda token, ticket: {"Authorization": f"Bearer {token}"},
         token="test-token",
+        ticket="test-ticket",
         payload={"model": "test-model", "messages": [{"role": "user", "content": "Hi"}]},
         model="perchai/test-model",
         file_logger=file_logger,
@@ -95,8 +96,9 @@ async def test_perchai_stream_incomplete_raises_error():
     stream = provider._stream_completion(
         client=client,
         url="https://api.perchai.com/v1/chat/completions",
-        build_headers=lambda token: {"Authorization": f"Bearer {token}"},
+        build_headers=lambda token, ticket: {"Authorization": f"Bearer {token}"},
         token="test-token",
+        ticket="test-ticket",
         payload={"model": "test-model", "messages": [{"role": "user", "content": "Hi"}]},
         model="perchai/test-model",
         file_logger=file_logger,
@@ -134,8 +136,9 @@ async def test_perchai_stream_done_event_termination():
     stream = provider._stream_completion(
         client=client,
         url="https://api.perchai.com/v1/chat/completions",
-        build_headers=lambda token: {"Authorization": f"Bearer {token}"},
+        build_headers=lambda token, ticket: {"Authorization": f"Bearer {token}"},
         token="test-token",
+        ticket="test-ticket",
         payload={"model": "test-model", "messages": [{"role": "user", "content": "Hi"}]},
         model="perchai/test-model",
         file_logger=file_logger,

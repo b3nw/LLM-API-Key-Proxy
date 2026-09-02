@@ -34,6 +34,12 @@ MODEL_CACHE_TTL_SECONDS: int = 300
 MODEL_CALL_PATH: str = "/api/perch-terminal/model-call"
 
 
+TURN_TICKET_HEADER: str = "x-perch-turn-ticket"
+
+
+SURFACE_REQUIRED_ERROR_CODE: str = "perch_surface_required"
+
+
 USAGE_PATH: str = "/api/perch-terminal/usage"
 
 
@@ -342,18 +348,22 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         app_url, token = await self._auth_context(credential_identifier)
         url = f"{app_url.rstrip('/')}{MODEL_CALL_PATH}"
 
+        auth_base = self._get_auth_base(credential_identifier)
+        ticket = await auth_base.ensure_turn_ticket(token)
+
         file_logger = ProviderLogger(transaction_context)
         file_logger.log_request({"envelope_request": payload, "model": raw_model})
 
         stream_mode = bool(payload.get("stream"))
 
-        def _headers(using_token: str) -> Dict[str, str]:
+        def _headers(using_token: str, using_ticket: str) -> Dict[str, str]:
             return {
                 "Authorization": f"Bearer {using_token}",
                 "Content-Type": "application/json",
                 "Accept": (
                     "text/event-stream" if stream_mode else "application/json"
                 ),
+                TURN_TICKET_HEADER: using_ticket,
             }
 
         if stream_mode:
@@ -362,6 +372,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                 url=url,
                 build_headers=_headers,
                 token=token,
+                ticket=ticket,
                 payload=payload,
                 model=raw_model,
                 file_logger=file_logger,
@@ -375,6 +386,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
             url=url,
             build_headers=_headers,
             token=token,
+            ticket=ticket,
             payload=payload,
             model=raw_model,
             file_logger=file_logger,
@@ -389,6 +401,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         url: str,
         build_headers: Any,
         token: str,
+        ticket: str,
         payload: Dict[str, Any],
         model: str,
         file_logger: ProviderLogger,
@@ -400,8 +413,8 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
 
         body = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
 
-        def _post(using_token: str) -> Any:
-            headers = build_headers(using_token)
+        def _post(using_token: str, using_ticket: str) -> Any:
+            headers = build_headers(using_token, using_ticket)
             headers["Content-Type"] = "application/json; charset=utf-8"
             return client.post(
                 url,
@@ -410,12 +423,20 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                 timeout=TimeoutConfig.non_streaming(),
             )
 
-        response = await _post(token)
+        response = await _post(token, ticket)
 
         if response.status_code == 401:
             auth = self._get_auth_base(credential_identifier)
-            new_token = await auth.refresh_on_401(client, token)
-            response = await _post(new_token)
+            token = await auth.refresh_on_401(client, token)
+            response = await _post(token, ticket)
+
+        if response.status_code == 403 and self._is_surface_required_error(
+            response.text
+        ):
+            auth = self._get_auth_base(credential_identifier)
+            auth.invalidate_turn_ticket()
+            ticket = await auth.ensure_turn_ticket(token)
+            response = await _post(token, ticket)
 
         await self._raise_for_status(response, model)
 
@@ -643,6 +664,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         url: str,
         build_headers: Any,
         token: str,
+        ticket: str,
         payload: Dict[str, Any],
         model: str,
         file_logger: ProviderLogger,
@@ -665,7 +687,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         thinking_disabled = _is_thinking_disabled(payload)
 
         for attempt in range(2):
-            stream_headers = dict(build_headers(token))
+            stream_headers = dict(build_headers(token, ticket))
             stream_headers["Content-Type"] = "application/json; charset=utf-8"
 
             stream_start_time = time.time()
@@ -691,6 +713,19 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                 auth = self._get_auth_base(credential_identifier)
                 token = await auth.refresh_on_401(client, token)
                 continue
+
+            if (
+                response.status_code == 403
+                and attempt == 0
+                and auth_base_cls is not None
+            ):
+                await response.aread()
+                if self._is_surface_required_error(response.text):
+                    await ctx.__aexit__(None, None, None)
+                    auth = self._get_auth_base(credential_identifier)
+                    auth.invalidate_turn_ticket()
+                    ticket = await auth.ensure_turn_ticket(token)
+                    continue
 
             try:
                 await self._raise_for_status(response, model)
@@ -801,6 +836,19 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
             )
 
     @staticmethod
+    def _is_surface_required_error(text: str) -> bool:
+        if not text:
+            return False
+        try:
+            parsed = json.loads(text)
+        except (json.JSONDecodeError, TypeError):
+            return False
+        return (
+            isinstance(parsed, dict)
+            and parsed.get("errorCode") == SURFACE_REQUIRED_ERROR_CODE
+        )
+
+    @staticmethod
     @override
     def parse_quota_error(
         error: Exception, error_body: Optional[str] = None
@@ -889,6 +937,15 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
             return {
                 "retry_after": None,
                 "reason": "authentication",
+            }
+
+        if error_code == "turn_rate_limited":
+            # A per-turn limit, distinct from token quota. Unlike
+            # perch_surface_required, the provider cannot self-heal this by
+            # dropping and re-minting the ticket, so it is real exhaustion.
+            return {
+                "retry_after": DEFAULT_RETRY_AFTER_SECONDS,
+                "reason": "rate_limit",
             }
 
         if error_code in (

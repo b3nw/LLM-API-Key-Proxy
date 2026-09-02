@@ -282,8 +282,9 @@ async def test_stream_without_tool_id_has_synthetic_id() -> None:
     async for chunk in given_provider._stream_completion(
         client=given_client,
         url=given_url,
-        build_headers=lambda t: given_headers,
+        build_headers=lambda t, tk: given_headers,
         token=given_token,
+        ticket="test-ticket",
         payload=given_payload,
         model=given_model,
         file_logger=given_logger,
@@ -1040,8 +1041,9 @@ async def test_stream_only_reasoning_emits_stop_chunk() -> None:
     async for chunk in given_provider._stream_completion(
         client=given_client,
         url="https://api.perchai.com/v1/chat",
-        build_headers=lambda t: {"Authorization": "Bearer fake"},
+        build_headers=lambda t, tk: {"Authorization": "Bearer fake"},
         token="fake-token",
+        ticket="test-ticket",
         payload=given_payload,
         model="perchai/test-model",
         file_logger=given_logger,
@@ -1757,8 +1759,9 @@ def test_given_tool_use_end_then_done_with_toolcalls_then_done_must_not_emit_dup
         async for chunk in given_provider._stream_completion(
             client=given_client,
             url="https://api.perchai.com/v1/chat",
-            build_headers=lambda t: {"Authorization": "Bearer fake"},
+            build_headers=lambda t, tk: {"Authorization": "Bearer fake"},
             token="fake",
+            ticket="test-ticket",
             payload={
                 "model": "test-model",
                 "messages": [{"role": "user", "content": "test"}],

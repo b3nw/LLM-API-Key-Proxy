@@ -502,3 +502,34 @@ warning in the 2026-08-31 entries above.
 
 **Not done**: the two follow-ups already on record (`perchai_quota_tracker.py` staying
 unticketed, and the `usage` vs `usage-meter` 405 mismatch) are still open.
+
+## 2026-09-02: Live e2e check of the turn-ticket fix
+
+Ran the `@pytest.mark.live` tests in `test_perchai_provider.py` against the operator's
+real session to answer "does this actually fix the 403 end to end" (not just against the
+local fake server). `perch status` confirmed the session was signed in first.
+
+`test_live_thinking_disabled_suppresses_reasoning` goes through
+`PerchaiProvider.acompletion()` - the real code path a deployed proxy uses - and passed:
+200, not 403. That is the deployed-proxy acceptance check the plan asked for.
+
+Two other live failures, both pre-existing and unrelated to the ticket logic itself:
+
+- `test_option_id_routes_to_real_upstream` (both param cases) hand-crafts the model-call
+  request with raw `httpx` instead of going through the provider, so it never attached a
+  ticket and 403'd with `perch_surface_required` - the exact production symptom, just
+  from a test that predates the ticket requirement rather than from a regression. Fixed
+  by minting via `PerchaiAuthBase.ensure_turn_ticket()` and adding the header; both
+  params pass now.
+- `test_live_thinking_effort_modulates_reasoning_volume` failed on an unrelated
+  assertion (`low=5723 chars/63.6s, high=6763 chars/80.3s` - not different enough). Auth
+  succeeded, no 403, so the ticket fix is not implicated; this is upstream reasoning-effort
+  behavior, a pre-existing flake not touched here.
+
+**Verification**:
+```bash
+uv run pytest tests/test_perchai_provider.py -q -m live   # after the probe-test fix: all pass
+uv run pytest tests/test_perchai_auth.py tests/test_perchai_provider.py tests/test_perchai_stream_truncation.py -q -m "not live"   # 115 passed, unchanged
+```
+Session file was not rotated by this run (access token had ample TTL left; no refresh
+was triggered).

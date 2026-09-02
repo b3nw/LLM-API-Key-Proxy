@@ -15,6 +15,7 @@ from rotator_library.providers import PROVIDER_PLUGINS
 from rotator_library.providers.perchai_provider import (
     MODEL_CACHE_TTL_SECONDS,
     MODEL_CALL_PATH,
+    TURN_TICKET_HEADER,
     USAGE_PATH,
     PerchaiProvider,
 )
@@ -666,6 +667,7 @@ async def test_option_id_routes_to_real_upstream(
 
     given_auth = PerchaiAuthBase()
     given_token = await given_auth.ensure_access_token()
+    given_ticket = await given_auth.ensure_turn_ticket(given_token)
     given_url = f"{given_auth.get_app_url().rstrip('/')}{MODEL_CALL_PATH}"
     given_body = {
         "request": {
@@ -687,6 +689,7 @@ async def test_option_id_routes_to_real_upstream(
                 "Authorization": f"Bearer {given_token}",
                 "Content-Type": "application/json",
                 "Accept": "application/json",
+                TURN_TICKET_HEADER: given_ticket,
             },
             json=given_body,
             timeout=30.0,

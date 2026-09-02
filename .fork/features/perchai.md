@@ -259,3 +259,68 @@ uv run pytest tests/test_perchai_provider.py -k "thinking_budget or normalize_mo
 10 new tests pass. Existing `test_high_effort_injects_thinking_budget` still passes (deepseek fallback to 3000). 97 total tests pass (6 live-gated failures pre-existing - stale OAuth session).
 
 **Startup logging**: Added `lib_logger.info()` in `__init__` that scans for `PERCHAI_*THINKING_BUDGET*` env vars and logs them at startup. Follows NanoGPT pattern - only log when non-default values exist. 2 additional tests verify logging behavior (singleton cache cleared for test isolation). 99 tests pass total.
+
+## 2026-09-02: Stop forking the Perch session, rotate it in place
+
+**Branch**: `feat/provider-app.perchai`
+
+**Problem**: The operator had to run `perch login` periodically. Root cause was not token expiry, it was the proxy and the Perch CLI fighting over one single-use rotating Supabase refresh token.
+
+Reverse engineered the CLI bundle at `~/.asdf/installs/nodejs/24.8.0/lib/node_modules/perchai-cli/dist/perch.mjs` (v2.4.97). Its auth contract:
+
+- `Mm()` re-reads `~/.perch/cli-auth-session.json` on every use, never caches across operations.
+- `Db()` treats a token as valid while `expiresAt > now + 90`.
+- `f5()` refreshes proactively only inside that skew, always from a freshly loaded session, and persists immediately.
+- `Dne()` writes with `fs/promises.writeFile`, truncating in place, so the inode is stable.
+- `n4r()` rejects the session unless `version === 1` and `appUrl`, `accessToken`, `updatedAt` are truthy, and keeps `expiresAt` only when it is a JSON number. A string there is dropped, after which `Db()` reports the token valid forever and the CLI stops refreshing.
+- The CLI force-rotates whenever its model-call proxy asks for a token, so ordinary `perch` use rotates the chain.
+
+Four defects on our side, in severity order:
+
+1. `credential_manager.py` copy-on-discovery snapshotted `PERCHAI_OAUTH_1` into `oauth_creds/perchai_oauth_1.json` at container start (prod evidence: snapshot mtime 07:16:30 vs container start 07:16:21) and rotated inside that private copy. The CLI kept the pre-copy token, so the second presenter hit GoTrue reuse detection and the family was revoked.
+2. `credential_manager.py:199-207` short-circuits on any existing `oauth_creds/perchai_oauth_*.json` and logs "Skipping discovery", so a correctly configured env path is ignored. There was no configuration that used the live file.
+3. `perchai_provider.py` rotated only after an HTTP 401, unlike every other OAuth base in this repo.
+4. `refresh_token()` rotated from the cached `self._session`, so after one rotation the process never re-read the disk again.
+
+**Docker mount behaviour, reproduced rather than inferred**:
+- Single-file bind mount plus `os.replace()` gives `OSError(16, 'Device or resource busy')`. This is `llm-proxy-dev`, which mounts the session file directly.
+- Read-only directory mount gives `OSError(30, 'Read-only file system')`. This is `llm-proxy`, which mounts `~/.perch:/app/.perch` with `RW=False`.
+- Writable directory mount allows rename, and the host observes the new inode. Only the single-file form forbids rename.
+
+**Solution**:
+- `perchai_auth_base.py`: `REFRESH_EXPIRY_BUFFER_SECONDS = 600` plus `_is_token_expired()`, matching the house convention in `google_oauth_base`, `openai_oauth_base`, `anthropic_oauth_base`, `copilot_auth_base`. `ensure_access_token()` reads the disk, returns a healthy token, otherwise rotates. `get_auth_header()` is now async like `x_ai_auth_base`. `refresh_token()` reloads from disk inside the lock before the POST. `_adopt_persisted_session()` handles `refresh_token_already_used` by re-reading and adopting a newer unexpired session another consumer persisted, and only raises when nothing changed. `_persist_session()` truncates in place with `fsync` instead of temp plus rename, writes `updatedAt` as ISO-8601 and coerces `expiresAt` to int for CLI compatibility. Replaced the module-level global lock with a per-instance one so unrelated credentials do not serialize. Added `PerchaiCredentialKind` StrEnum (`session_file` / `env_virtual` / `raw_token`).
+- `perchai_provider.py`: implemented `proactively_refresh()`, which is the seam `BackgroundRefresher` already calls for every OAuth provider on `OAUTH_REFRESH_INTERVAL`; Perchai simply never implemented it. `_auth_context()` replaces `_resolve_app_url` plus `_resolve_credential_token` so one disk load serves both, down from two or three per request. Fixed `get_models()` sending the credential string itself as the bearer token, which for an OAuth credential is a file path, so dynamic model discovery silently degraded to static models.
+- `DOCUMENTATION.md` 2.6.3 rewritten: Perchai must not be snapshotted. Point the credential entry at the live file through a symlink, which `discover_and_prepare()` dereferences with `Path.resolve()`, and mount the directory read-write.
+- `.gitignore`: `tests/*` is allowlisted per file, so `!tests/test_perchai_auth.py` was required or the new test file is invisible to git.
+
+**Why a 600 second buffer and not the CLI's 90**: with one shared live file and no cross-process lock, two consumers with the same threshold rotate at the same boundary. Staggering the proxy ten minutes earlier means the proxy refreshes first and the CLI then finds a healthy token and leaves it alone.
+
+**Files changed**:
+- `src/rotator_library/providers/perchai_auth_base.py`
+- `src/rotator_library/providers/perchai_provider.py`
+- `tests/test_perchai_auth.py` (new, 7 tests)
+- `tests/test_perchai_provider.py` (removed `test_empty_credential_identifier_falls_back_to_default`, which asserted nothing on its success path; replaced by a real assertion in the new file)
+- `DOCUMENTATION.md`, `.gitignore`, `.fork/stack.yml`
+
+**Verification**:
+```bash
+uv run python3 -m py_compile src/rotator_library/providers/perchai_auth_base.py src/rotator_library/providers/perchai_provider.py tests/test_perchai_auth.py
+uv run ruff check src/rotator_library/providers/perchai_auth_base.py src/rotator_library/providers/perchai_provider.py tests/test_perchai_auth.py tests/test_perchai_provider.py --select F401,F811,F821,E9
+uv run pytest tests/test_perchai_auth.py tests/test_perchai_provider.py tests/test_perchai_stream_truncation.py tests/test_credential_manager.py -q -k "not live"
+uv run pytest tests/ -q -k "not live"
+```
+120 pass in the targeted run. Full suite 3 failed / 629 passed / 15 errors, against a clean-HEAD baseline of 3 failed / 623 passed / 15 errors, so the delta is exactly the 6 net new tests and every failure is pre-existing and unrelated (deepseek stream, umans quota constant, x_ai time-bomb date, `test_failure_logger.py` importing `src.*`, `tests/utils/test_paths.py` needing the undeclared `pytest-mock`).
+
+`tests/test_perchai_auth.py` runs against a real local HTTP server emulating GoTrue single-use rotation, including the `refresh_token_already_used` rejection. No mocking library, no vendor cost, real sockets and real files, so the rotation semantics under test are the ones production has.
+
+Live, non-destructive, against `app.perchai.app`: `GET /api/perchai/account` returned 200 with the stored token, and the session file's inode and refresh token were unchanged, confirming a healthy token triggers no rotation.
+
+Option 2 verified empirically: `CredentialManager` pointed at a temp pool containing a symlink returned the dereferenced live path and created no copy.
+
+**Not yet verified**: a real rotation against the live service. Deferred deliberately, because prod still runs the old build holding a boot snapshot of the current refresh token, and a host-side rotation would make that snapshot a reuse attempt and revoke the family for both sides. Acceptance test after deploy: watch the file rotate from proxy traffic, then run `perch` and confirm no re-login prompt, then reverse the order.
+
+**Deployment required**: mount `~/.perch` read-write as a directory in both containers, and create the credential as a symlink before the proxy starts. The two containers differ: `llm-proxy` has cwd `/usr/local/bin` from the frozen binary so its `oauth_creds` is ephemeral and needs a startup `command:`, while `llm-proxy-dev` has cwd `/app` with `oauth_creds` on a persistent host mount.
+
+**Residual risk accepted**: three read-write consumers (host CLI plus two proxy containers) on one token family with no cross-process lock. Adopt-on-conflict covers a loser that re-reads after the winner persisted. It does not cover two consumers POSTing the same token where GoTrue's reuse grace expires before the loser re-reads. Low probability, total consequence, one `perch login` to recover.
+
+**Follow-ups not in scope**: `perchai_quota_tracker.py` resolves its own token from env and the session file (lines 74-112) and never refreshes, so quota tracking can present a stale token. Dev container logs also show `Perchai usage fetch ... returned HTTP 405`, which is a wrong method or endpoint on `/api/perch-terminal/usage`, not an auth failure.

@@ -644,21 +644,6 @@ def test_env_virtual_path_resolves_to_access_token(
     )
 
 
-def test_empty_credential_identifier_falls_back_to_default() -> None:
-    given_provider = PerchaiProvider()
-
-    try:
-        given_provider._resolve_credential_token("")
-    except Exception as exc:
-        then_is_auth_error = "perch" in str(exc).lower() or "session" in str(exc).lower()
-        assert then_is_auth_error, (
-            f"Empty credential_identifier should fall back to default session "
-            f"resolution, got unexpected error: {exc!r}"
-        )
-    else:
-        pass
-
-
 def test_load_session_re_reads_file_on_every_call(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

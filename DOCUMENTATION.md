@@ -413,7 +413,7 @@ Examples:
 - env://gemini_cli/0  → GEMINI_CLI_ACCESS_TOKEN (legacy single credential)
 ```
 
-#### 2.6.3. Perchai OAuth: Manual Credential Path Required
+#### 2.6.3. Perchai OAuth: Live Session File Required
 
 Unlike other OAuth providers, perchai's `~/.perch/` is not auto-scanned.
 The default-directory scan is disabled in `credential_manager.py` (lines 222-226)
@@ -433,6 +433,27 @@ PERCHAI_1_REFRESH_TOKEN=<refresh_token>
 ```
 
 Without either, perchai won't appear in the provider count at startup.
+
+**Perchai must not be snapshotted into `oauth_creds/`.** Supabase issues single-use
+rotating refresh tokens, so the session file is live state rather than a durable
+secret. `credential_manager` copies `PERCHAI_OAUTH_1` into `oauth_creds/perchai_oauth_1.json`
+on first run, and the copy then rotates independently of the Perch CLI. Whoever
+presents the older token second hits GoTrue reuse detection, which revokes the
+whole token family and forces an interactive `perch login`.
+
+Because discovery short-circuits whenever `oauth_creds/perchai_oauth_*.json` already
+exists, a pre-existing entry wins and is never copied. Exploit that: make the entry a
+symlink to the live file. `credential_manager` calls `Path.resolve()` on it, so the
+provider receives the live path and rotates in place where the CLI can see it.
+
+```bash
+ln -sfn /app/.perch/cli-auth-session.json <oauth_creds>/perchai_oauth_1.json
+```
+
+The mount must be a writable **directory** mount (`~/.perch:/app/.perch`, no `:ro`).
+A read-only mount makes persistence fail with `EROFS`, and a single-file bind mount
+makes it fail with `EBUSY`. The provider writes the session in place on purpose, so
+the single-file form works too, but the directory form is the supported one.
 
 #### 2.6.4. Credential Tool Integration
 
@@ -1416,7 +1437,8 @@ The `PerchaiProvider` wraps [Perch](https://app.perchai.app) (perchai.app) - an 
 
 **1. Subscribe at [app.perchai.app](https://app.perchai.app)** (Starter or Pro tier).
 
-**2. Install the Perch CLI and log in.** `perch login` writes a session file the proxy replays against the upstream API:
+**2. Install the Perch CLI and log in.** `perch login` writes a session file that the
+proxy and the CLI share, rotating the same refresh-token chain:
 
 ```bash
 curl -fsSL https://app.perchai.app/install.sh | sh   # use the official URL
@@ -1431,6 +1453,15 @@ ls -l ~/.perch/cli-auth-session.json
 PERCHAI_OAUTH_1=/home/your-user/.perch/cli-auth-session.json
 # extra accounts: PERCHAI_OAUTH_2, PERCHAI_OAUTH_3, ...
 ```
+
+In a container, mount the directory read-write and point the credential entry at the
+live file through a symlink instead of letting it be copied. See
+[Perchai OAuth](#263-perchai-oauth-live-session-file-required).
+
+The proxy refreshes proactively once fewer than 600 seconds of validity remain, which
+is deliberately earlier than the CLI's own 90-second threshold. The proxy rotates first
+and the CLI then finds a healthy token and leaves it alone, which keeps the two from
+rotating the same single-use token at the same moment.
 
 #### Available Models
 

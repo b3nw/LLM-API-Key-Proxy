@@ -181,6 +181,7 @@ features:
       - "src/rotator_library/providers/perchai_*.py"
       - "src/rotator_library/providers/utilities/perchai_*.py"
       - "tests/test_perchai_provider.py"
+      - "tests/test_perchai_auth.py"
 
   - id: core
     prefix: "feat(core)"

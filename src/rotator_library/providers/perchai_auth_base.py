@@ -8,8 +8,10 @@ import json
 import logging
 import os
 import time
+from datetime import datetime, timezone
+from enum import StrEnum
 from pathlib import Path
-from typing import Dict, Final, List, Optional, TypedDict, final
+from typing import Any, Dict, Final, List, Optional, TypedDict, final
 
 import httpx
 
@@ -27,22 +29,20 @@ class PerchaiAuthError(Exception):
     pass
 
 
+class PerchaiCredentialKind(StrEnum):
+    SESSION_FILE = "session_file"
+    ENV_VIRTUAL = "env_virtual"
+    RAW_TOKEN = "raw_token"
+
+
 lib_logger = logging.getLogger("rotator_library")
 if not lib_logger.handlers:
     lib_logger.addHandler(logging.NullHandler())
 lib_logger.propagate = False
 
 
-# Lazy module-level lock: created on first call so __init__ (before the
-# asyncio loop starts) doesn't trip the Python 3.10+ warning.
-_refresh_lock: Optional[asyncio.Lock] = None
-
-
-def _get_lock() -> asyncio.Lock:
-    global _refresh_lock
-    if _refresh_lock is None:
-        _refresh_lock = asyncio.Lock()
-    return _refresh_lock
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _resolve_session_file() -> Path:
@@ -70,6 +70,8 @@ class PerchaiAuthBase:
     REFRESH_PATH: Final[str] = "/auth/v1/token"
     REFRESH_TIMEOUT: Final[float] = 30.0
     CONFIG_TIMEOUT: Final[float] = 15.0
+    REFRESH_EXPIRY_BUFFER_SECONDS: Final[int] = 600
+    REFRESH_TOKEN_ALREADY_USED: Final[str] = "refresh_token_already_used"
 
     def __init__(self, credential_path: str = "") -> None:
         self._session: Optional[PerchaiSession] = None
@@ -82,6 +84,18 @@ class PerchaiAuthBase:
         # When set, load_session / _persist_session use this path instead of
         # auto-discovering. Supports file paths and env:// virtual paths.
         self._credential_path: str = credential_path
+
+    def _get_lock(self) -> asyncio.Lock:
+        # Lazy: __init__ can run before an event loop exists.
+        if self._refresh_lock is None:
+            self._refresh_lock = asyncio.Lock()
+        return self._refresh_lock
+
+    def _is_token_expired(self, session: PerchaiSession) -> bool:
+        expires_at = session.get("expiresAt")
+        if not isinstance(expires_at, (int, float)):
+            return False
+        return float(expires_at) < time.time() + self.REFRESH_EXPIRY_BUFFER_SECONDS
 
     def load_session(self) -> PerchaiSession:
         if self._credential_path:
@@ -152,9 +166,35 @@ class PerchaiAuthBase:
         )
         return session
 
-    def get_auth_header(self, credential_identifier: str = "") -> Dict[str, str]:
-        token = credential_identifier if credential_identifier else self._get_access_token()
+    async def get_auth_header(
+        self, credential_identifier: str = ""
+    ) -> Dict[str, str]:
+        auth = self
+        if credential_identifier and credential_identifier != self._credential_path:
+            auth = PerchaiAuthBase(credential_identifier)
+        token = await auth.ensure_access_token()
         return {"Authorization": f"Bearer {token}"}
+
+    def _credential_kind(self) -> PerchaiCredentialKind:
+        credential = self._credential_path
+        if not credential:
+            return PerchaiCredentialKind.SESSION_FILE
+        if credential.startswith("env://"):
+            return PerchaiCredentialKind.ENV_VIRTUAL
+        if credential.endswith(".json") or Path(credential).expanduser().is_file():
+            return PerchaiCredentialKind.SESSION_FILE
+        return PerchaiCredentialKind.RAW_TOKEN
+
+    async def ensure_access_token(self) -> str:
+        kind = self._credential_kind()
+        if kind is PerchaiCredentialKind.RAW_TOKEN:
+            return self._credential_path
+
+        session = self.load_session()
+        if not self._is_token_expired(session):
+            self._session = session
+            return self._access_token_or_raise(session)
+        return await self.refresh_token()
 
     def get_app_url(self) -> str:
         session = self._ensure_session()
@@ -165,8 +205,8 @@ class PerchaiAuthBase:
             return self.load_session()
         return self._session
 
-    def _get_access_token(self) -> str:
-        session = self._ensure_session()
+    @staticmethod
+    def _access_token_or_raise(session: PerchaiSession) -> str:
         token = session.get("accessToken")
         if not token:
             raise PerchaiAuthError(
@@ -323,7 +363,10 @@ class PerchaiAuthBase:
         )
 
     async def refresh_token(self) -> str:
-        session = self._ensure_session()
+        async with self._get_lock():
+            return await self._rotate_refresh_token(self.load_session())
+
+    async def _rotate_refresh_token(self, session: PerchaiSession) -> str:
         refresh_token = session.get("refreshToken")
         if not refresh_token:
             raise PerchaiAuthError(
@@ -347,7 +390,7 @@ class PerchaiAuthBase:
                     json={"refresh_token": refresh_token},
                     headers={
                         "apikey": self._supabase_anon_key,
-                        "Authorization": f"Bearer {self._get_access_token()}",
+                        "Authorization": f"Bearer {self._access_token_or_raise(session)}",
                         "Content-Type": "application/json",
                         "Accept": "application/json",
                     },
@@ -366,11 +409,15 @@ class PerchaiAuthBase:
                 err_code = err_payload.get("error_code", "") if isinstance(err_payload, dict) else ""
             except Exception:
                 err_code = ""
-            if err_code == "refresh_token_already_used":
+            if err_code == self.REFRESH_TOKEN_ALREADY_USED:
+                adopted = self._adopt_persisted_session(refresh_token)
+                if adopted is not None:
+                    return adopted
                 lib_logger.error(
                     "Perchai refresh token has been consumed/expired. "
                     "The session file or env var contains a stale refresh token "
-                    "that was already used in a prior refresh. "
+                    "that was already used in a prior refresh, and no newer "
+                    "session was persisted by another consumer. "
                     "Run `perch login` to obtain fresh credentials, "
                     "then restart the proxy or redeploy."
                 )
@@ -401,11 +448,11 @@ class PerchaiAuthBase:
                 "The refresh token is single-use and must be rotated. "
                 "Run `perch login` to re-authenticate."
             )
-        new_expires_at = payload.get("expires_at")
+        new_expires_at = self._as_epoch_seconds(payload.get("expires_at"))
         if new_expires_at is None:
-            expires_in = payload.get("expires_in")
-            if isinstance(expires_in, (int, float)) and expires_in > 0:
-                new_expires_at = int(time.time() + expires_in)
+            expires_in = self._as_epoch_seconds(payload.get("expires_in"))
+            if expires_in is not None and expires_in > 0:
+                new_expires_at = int(time.time()) + expires_in
 
         user_payload = payload.get("user")
         new_user_id = (
@@ -439,21 +486,52 @@ class PerchaiAuthBase:
     async def refresh_on_401(
         self, client: httpx.AsyncClient, expired_token: str
     ) -> str:
-        # Single-flight: if another coroutine already refreshed while we
-        # waited on the lock, return the current token without re-hitting the network.
-        del client  # signature parity; refresh uses its own client
+        del client  # signature parity; rotation uses its own client
 
-        lock = _get_lock()
-        async with lock:
-            session = self._ensure_session()
+        async with self._get_lock():
+            session = self.load_session()
             current = session.get("accessToken")
-            if current and current != expired_token:
+            if (
+                current
+                and current != expired_token
+                and not self._is_token_expired(session)
+            ):
                 lib_logger.debug(
-                    "Perchai token already refreshed by another coroutine; "
+                    "Perchai token already refreshed by another worker; "
                     "skipping redundant refresh."
                 )
+                self._session = session
                 return current
-            return await self.refresh_token()
+            return await self._rotate_refresh_token(session)
+
+    def _adopt_persisted_session(self, presented: str) -> Optional[str]:
+        # Another consumer rotated the family and persisted its session while
+        # our request was in flight. Its token is the valid one; ours is not.
+        try:
+            session = self.load_session()
+        except PerchaiAuthError:
+            return None
+        if session.get("refreshToken") == presented or self._is_token_expired(session):
+            return None
+        access_token = session.get("accessToken")
+        if not access_token:
+            return None
+        self._session = session
+        lib_logger.info(
+            "Perchai rotation lost the race; adopted the session another "
+            "consumer persisted."
+        )
+        return access_token
+
+    @staticmethod
+    def _as_epoch_seconds(value: Any) -> Optional[int]:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+            return int(value.strip())
+        return None
 
     def _persist_session(self, session: PerchaiSession) -> None:
         if self._credential_path and self._credential_path.startswith("env://"):
@@ -464,19 +542,23 @@ class PerchaiAuthBase:
         else:
             session_path = _resolve_session_file()
 
+        payload = dict(session)
+        payload["updatedAt"] = _utc_now_iso()
+        content = json.dumps(payload, indent=2, sort_keys=True)
+
         try:
             session_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = session_path.with_suffix(session_path.suffix + ".tmp")
-            payload = dict(session)
-            payload["updatedAt"] = int(time.time())
-            tmp_path.write_text(
-                json.dumps(payload, indent=2, sort_keys=True),
-                encoding="utf-8",
-            )
-            os.replace(tmp_path, session_path)
+            # In-place write, deliberately not tempfile + rename: the Perch CLI
+            # rotates this same file, and renaming onto a single-file Docker
+            # bind mount fails with EBUSY, which silently loses the rotation
+            # and revokes the whole token family.
+            with open(session_path, "w", encoding="utf-8") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
         except OSError as exc:
-            lib_logger.warning(
+            lib_logger.error(
                 f"Could not persist refreshed perchai session to {session_path}: "
-                f"{exc}. The in-memory session is updated; the next refresh "
-                f"will overwrite this state."
+                f"{exc}. The next consumer to use the old refresh token will hit "
+                f"reuse detection; make this path writable."
             )

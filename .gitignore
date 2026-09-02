@@ -167,3 +167,5 @@ command_code_cookies.json
 !tests/test_anthropic_models_dev.py
 !tests/test_anthropic_oauth_headers.py
 !tests/test_perchai_provider.py
+
+!tests/test_perchai_auth.py

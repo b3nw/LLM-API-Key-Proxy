@@ -9,7 +9,7 @@ import logging
 import os
 import time
 import uuid
-from typing import Any, AsyncGenerator, Dict, List, Optional, TypedDict, Union, final, override
+from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, TypedDict, Union, final, override
 
 import httpx
 import litellm
@@ -277,12 +277,12 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                 static_ids.add(upstream_id)
 
         try:
-            app_url = self._resolve_app_url(api_key)
+            app_url, access_token = await self._auth_context(api_key)
 
             response = await client.get(
                 f"{app_url.rstrip('/')}/api/perchai/account",
                 headers={
-                    "Authorization": f"Bearer {api_key}",
+                    "Authorization": f"Bearer {access_token}",
                     "Accept": "application/json",
                 },
                 timeout=TimeoutConfig.non_streaming(),
@@ -339,14 +339,13 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         raw_model = kwargs.get("model", "")
         model_name = raw_model.split("/", 1)[1] if "/" in raw_model else raw_model
         payload = self._build_payload(model_name=model_name, kwargs=kwargs)
-        app_url = self._resolve_app_url(credential_identifier)
+        app_url, token = await self._auth_context(credential_identifier)
         url = f"{app_url.rstrip('/')}{MODEL_CALL_PATH}"
 
         file_logger = ProviderLogger(transaction_context)
         file_logger.log_request({"envelope_request": payload, "model": raw_model})
 
         stream_mode = bool(payload.get("stream"))
-        token = self._resolve_credential_token(credential_identifier)
 
         def _headers(using_token: str) -> Dict[str, str]:
             return {
@@ -375,6 +374,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
             client=client,
             url=url,
             build_headers=_headers,
+            token=token,
             payload=payload,
             model=raw_model,
             file_logger=file_logger,
@@ -388,6 +388,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         client: httpx.AsyncClient,
         url: str,
         build_headers: Any,
+        token: str,
         payload: Dict[str, Any],
         model: str,
         file_logger: ProviderLogger,
@@ -396,7 +397,6 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         auth_error_cls: Any,
     ) -> litellm.ModelResponse:
         envelope = self._build_envelope(model=model, payload=payload)
-        token = self._resolve_credential_token(credential_identifier)
 
         body = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
 
@@ -1258,41 +1258,20 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         self._auth_base_cache[credential_identifier] = auth_base
         return auth_base
 
-    def _resolve_app_url(self, credential_identifier: str = "") -> str:
+    @override
+    async def proactively_refresh(self, credential_path: str) -> None:
+        await self._get_auth_base(credential_path).ensure_access_token()
+
+    async def _auth_context(self, credential_identifier: str) -> Tuple[str, str]:
         auth_base = self._get_auth_base(credential_identifier)
+        token = await auth_base.ensure_access_token()
         try:
-            return auth_base.get_app_url()
+            app_url = auth_base.get_app_url()
         except Exception:
             from .perchai_auth_base import PerchaiAuthBase
 
-            return PerchaiAuthBase.DEFAULT_APP_URL
-
-    def _resolve_session_token(self) -> str:
-        session = self._get_auth_base("").load_session()
-        token = session.get("accessToken")
-        if not token:
-            from .perchai_auth_base import PerchaiAuthError
-
-            raise PerchaiAuthError(
-                "Perchai session has no accessToken. "
-                "Run `perch login` to re-authenticate."
-            )
-        return token
-
-    def _resolve_credential_token(self, credential_identifier: str) -> str:
-        if not credential_identifier:
-            return self._resolve_session_token()
-
-        session = self._get_auth_base(credential_identifier).load_session()
-        token = session.get("accessToken")
-        if not token:
-            from .perchai_auth_base import PerchaiAuthError
-
-            raise PerchaiAuthError(
-                f"Perchai credential at {credential_identifier} has no accessToken. "
-                f"Run `perch login` to re-authenticate."
-            )
-        return token
+            app_url = PerchaiAuthBase.DEFAULT_APP_URL
+        return app_url, token
 
     def _extract_model_ids(self, payload: Any) -> List[str]:
         if not isinstance(payload, dict):

@@ -324,3 +324,34 @@ Option 2 verified empirically: `CredentialManager` pointed at a temp pool contai
 **Residual risk accepted**: three read-write consumers (host CLI plus two proxy containers) on one token family with no cross-process lock. Adopt-on-conflict covers a loser that re-reads after the winner persisted. It does not cover two consumers POSTing the same token where GoTrue's reuse grace expires before the loser re-reads. Low probability, total consequence, one `perch login` to recover.
 
 **Follow-ups not in scope**: `perchai_quota_tracker.py` resolves its own token from env and the session file (lines 74-112) and never refreshes, so quota tracking can present a stale token. Dev container logs also show `Perchai usage fetch ... returned HTTP 405`, which is a wrong method or endpoint on `/api/perch-terminal/usage`, not an auth failure.
+
+## 2026-09-02: Test suite was consuming the operator's real refresh token
+
+**Discovered while watching a live rotation**: `pytest tests/ -k "not live"` does not skip the Perchai tests that hit the real service. `live_only` is a `skipif` decorator keyed on the existence of `~/.perch/cli-auth-session.json`, while `-k` filters on test *names*, so only the two tests literally named `test_live_thinking_*` were deselected. Four tests that make real authenticated calls kept running.
+
+Two distinct kinds of damage:
+
+- `test_option_id_routes_to_real_upstream`, parametrised twice, called `PerchaiAuthBase()` with no credential path and then `refresh_token()`. That forces a rotation of the operator's live session on every run and writes the replacement back to the real file.
+- `test_expired_token_non_stream_refreshes_and_retries` and its stream variant copied the live session into `tmp_path`, poisoned the access token to trigger a 401, and let the provider rotate. The replacement token was persisted into the tmp directory, which pytest then deleted. The live file was left pointing at a consumed token. That is the same single-use-token fork that broke production, automated and run by the developer.
+
+This also explains the ledger's recurring "live-gated failures pre-existing - stale OAuth session" notes. The session was not going stale on its own. CI never catches any of it because CI has no `~/.perch`, so `HAS_SESSION` is False and every one of these tests skips. The only machine this fires on is a developer's.
+
+**Changes**:
+- `tests/test_perchai_auth.py`: added `test_model_call_401_refreshes_and_retries` and `..._stream_...`, covering the same 401 then refresh then retry behaviour in both paths against the local GoTrue emulator, which now also serves `/api/perch-terminal/model-call`.
+- `tests/test_perchai_provider.py`: deleted the two `test_expired_token_*` live tests, replaced by the local pair. Switched `test_option_id_routes_to_real_upstream` from `refresh_token()` to `ensure_access_token()`, so it uses the existing token and rotates only when genuinely near expiry.
+- Registered a real `live` marker in `pyproject.toml` and applied `@pytest.mark.live` alongside `@live_only` on the three remaining network tests, so `-m "not live"` is now an accurate filter.
+
+**Verification**:
+```bash
+uv run pytest tests/test_perchai_provider.py tests/test_perchai_auth.py tests/test_perchai_stream_truncation.py -q -m "not live"
+uv run pytest tests/ -q -m "not live"
+```
+110 pass in the targeted run, 627 pass in the full run, both with the same 3 pre-existing failures and 15 pre-existing collection errors. The acceptance check is that the live session file is byte-identical before and after a full run:
+
+```
+BEFORE: 4v6wav45 2026-09-02T09:45:49.731Z 1788342349
+AFTER:  4v6wav45 2026-09-02T09:45:49.731Z 1788342349
+UNCHANGED - zero burn
+```
+
+Full run time also dropped from about 34s to 14s, since nothing waits on the network any more.

@@ -518,73 +518,7 @@ async def test_run_background_job_invalid_token_no_crash() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-@live_only
-async def test_expired_token_non_stream_refreshes_and_retries(
-    tmp_path: Path,
-) -> None:
-    import httpx
-
-    given_session = json.loads(PERCHAI_SESSION.read_text(encoding="utf-8"))
-    given_session["accessToken"] = "perchai-expired-token-will-401"
-    given_cred_file = tmp_path / "perchai_oauth_1.json"
-    given_cred_file.write_text(json.dumps(given_session), encoding="utf-8")
-
-    given_provider = PerchaiProvider()
-
-    when_responded = await given_provider.acompletion(
-        httpx.AsyncClient(),
-        model="perchai/nemotron-3.5-lightning",
-        messages=[{"role": "user", "content": "Say hello in one word"}],
-        credential_identifier=str(given_cred_file),
-        stream=False,
-    )
-
-    then_content = when_responded.choices[0].message.content
-    assert then_content, (
-        "Non-streaming with expired token should refresh and return content, "
-        f"got {then_content!r}"
-    )
-
-
-@pytest.mark.asyncio
-@live_only
-async def test_expired_token_stream_refreshes_and_retries(
-    tmp_path: Path,
-) -> None:
-    import httpx
-
-    given_session = json.loads(PERCHAI_SESSION.read_text(encoding="utf-8"))
-    given_session["accessToken"] = "perchai-expired-token-will-401"
-    given_cred_file = tmp_path / "perchai_oauth_1.json"
-    given_cred_file.write_text(json.dumps(given_session), encoding="utf-8")
-
-    given_provider = PerchaiProvider()
-
-    when_streamed = await given_provider.acompletion(
-        httpx.AsyncClient(),
-        model="perchai/nemotron-3.5-lightning",
-        messages=[{"role": "user", "content": "Say hello in one word"}],
-        credential_identifier=str(given_cred_file),
-        stream=True,
-    )
-
-    then_chunks = []
-    async for chunk in when_streamed:
-        then_chunks.append(chunk)
-
-    then_has_chunks = len(then_chunks) > 0
-    then_last_finish = (
-        then_chunks[-1].choices[0].finish_reason if then_chunks else None
-    )
-    assert then_has_chunks, (
-        "Streaming with expired token should refresh and yield chunks, "
-        f"got {len(then_chunks)} chunks"
-    )
-    assert then_last_finish == "stop", (
-        f"Last chunk should have finish_reason='stop', got {then_last_finish!r}"
-    )
-
+# Covered without burning a real token in tests/test_perchai_auth.py.
 
 # ---------------------------------------------------------------------------
 # Credential path resolution: credential_identifier passed by the rotator
@@ -720,6 +654,7 @@ PROBE_OPTION_IDS = [
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("option_id", PROBE_OPTION_IDS)
+@pytest.mark.live
 @live_only
 async def test_option_id_routes_to_real_upstream(
     option_id: str,
@@ -729,7 +664,7 @@ async def test_option_id_routes_to_real_upstream(
     from rotator_library.providers.perchai_auth_base import PerchaiAuthBase
 
     given_auth = PerchaiAuthBase()
-    given_token = await given_auth.refresh_token()
+    given_token = await given_auth.ensure_access_token()
     given_url = f"{given_auth.get_app_url().rstrip('/')}{MODEL_CALL_PATH}"
     given_body = {
         "request": {
@@ -2033,6 +1968,7 @@ async def _live_thinking_metrics(
 
 
 @pytest.mark.asyncio
+@pytest.mark.live
 @live_only
 async def test_live_thinking_disabled_suppresses_reasoning() -> None:
     given_provider = PerchaiProvider()
@@ -2048,6 +1984,7 @@ async def test_live_thinking_disabled_suppresses_reasoning() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.live
 @live_only
 async def test_live_thinking_effort_modulates_reasoning_volume() -> None:
     given_provider = PerchaiProvider()

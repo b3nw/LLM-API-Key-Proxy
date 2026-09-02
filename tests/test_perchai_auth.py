@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
+import httpx
 import pytest
 
 from rotator_library.providers.perchai_auth_base import PerchaiAuthBase
@@ -27,6 +28,7 @@ from rotator_library.providers.perchai_provider import PerchaiProvider
 
 CONFIG_PATH = "/api/perch-terminal/cli-auth/config"
 TOKEN_PATH = "/auth/v1/token"
+MODEL_CALL_PATH = "/api/perch-terminal/model-call"
 USER_ID = "11111111-2222-3333-4444-555555555555"
 ALREADY_USED = "refresh_token_already_used"
 
@@ -42,6 +44,8 @@ class FakePerchaiAuth:
         self._seq: int = 0
         self.ttl: int = 3600
         self.on_reject: Optional[Callable[[], None]] = None
+        self.completion_text: str = "hello"
+        self.model_calls: List[str] = []
 
     def adopt_initial_refresh(self, refresh_token: str) -> None:
         with self._lock:
@@ -117,7 +121,11 @@ class _Handler(BaseHTTPRequestHandler):
         self._reply(404, {"error": "unexpected_get"})
 
     def do_POST(self) -> None:
-        if urlparse(self.path).path != TOKEN_PATH:
+        parsed = urlparse(self.path)
+        if parsed.path == MODEL_CALL_PATH:
+            self._model_call()
+            return
+        if parsed.path != TOKEN_PATH:
             self._reply(404, {"error": "unexpected_post"})
             return
         length = int(self.headers.get("Content-Length") or 0)
@@ -129,6 +137,29 @@ class _Handler(BaseHTTPRequestHandler):
             return
         status, payload = self.state.exchange(str(body.get("refresh_token") or ""))
         self._reply(status, payload)
+
+    def _model_call(self) -> None:
+        length = int(self.headers.get("Content-Length") or 0)
+        if length:
+            self.rfile.read(length)
+        presented = str(self.headers.get("Authorization") or "")
+        self.state.model_calls.append(presented)
+        if presented != f"Bearer {self.state.issued_access}":
+            self._reply(401, {"ok": False, "error": "invalid_token"})
+            return
+        if "text/event-stream" in str(self.headers.get("Accept") or ""):
+            text = self.state.completion_text
+            body = (
+                f'data: {json.dumps({"type": "text_delta", "text": text})}\n\n'
+                f'data: {json.dumps({"type": "done"})}\n\n'
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self._reply(200, {"ok": True, "text": self.state.completion_text})
 
 
 class AuthServer:
@@ -410,4 +441,84 @@ async def test_auth_context_falls_back_to_default_session_file(
     )
     assert then_app_url == auth_server.app_url, (
         f"expected appUrl from the session file, got {then_app_url!r}"
+    )
+
+
+MODEL = "perchai/nemotron-3.5-lightning"
+MESSAGES = [{"role": "user", "content": "Say hello in one word"}]
+
+
+def given_session_with_dead_access_token(
+    auth_server: AuthServer,
+    session_file: Path,
+) -> None:
+    write_session(
+        session_file,
+        app_url=auth_server.app_url,
+        access="access-expired",
+        refresh="refresh-initial",
+        expires_at=int(time.time()) + 3000,
+    )
+    auth_server.state.adopt_initial_refresh("refresh-initial")
+
+
+async def test_model_call_401_refreshes_and_retries(
+    auth_server: AuthServer,
+    session_file: Path,
+) -> None:
+    given_session_with_dead_access_token(auth_server, session_file)
+
+    given_provider = PerchaiProvider()
+    async with httpx.AsyncClient() as given_client:
+        when_response = await given_provider.acompletion(
+            given_client,
+            model=MODEL,
+            messages=MESSAGES,
+            credential_identifier=str(session_file),
+            stream=False,
+        )
+
+    then_state = auth_server.state
+    assert when_response.choices[0].message.content == then_state.completion_text, (
+        "a 401 from the model endpoint must be retried after a refresh, got "
+        f"{when_response.choices[0].message.content!r}"
+    )
+    assert then_state.rotations == 1, (
+        f"expected exactly one refresh to recover from the 401, got {then_state.rotations}"
+    )
+    assert then_state.model_calls[-1] == f"Bearer {then_state.issued_access}", (
+        "the retry must carry the freshly issued access token, got "
+        f"{then_state.model_calls[-1]!r}"
+    )
+
+
+async def test_model_call_401_refreshes_and_retries_stream(
+    auth_server: AuthServer,
+    session_file: Path,
+) -> None:
+    given_session_with_dead_access_token(auth_server, session_file)
+
+    given_provider = PerchaiProvider()
+    collected: List[str] = []
+    async with httpx.AsyncClient() as given_client:
+        when_stream = await given_provider.acompletion(
+            given_client,
+            model=MODEL,
+            messages=MESSAGES,
+            credential_identifier=str(session_file),
+            stream=True,
+        )
+        async for given_chunk in when_stream:
+            if not given_chunk.choices:
+                continue
+            collected.append(given_chunk.choices[0].delta.content or "")
+
+    then_text = "".join(collected)
+    then_state = auth_server.state
+    assert then_state.completion_text in then_text, (
+        "streaming must recover from a 401 the same way non-streaming does, "
+        f"collected {then_text!r}"
+    )
+    assert then_state.rotations == 1, (
+        f"expected exactly one refresh to recover from the 401, got {then_state.rotations}"
     )

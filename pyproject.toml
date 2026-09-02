@@ -39,6 +39,7 @@ asyncio_mode = "auto"
 markers = [
     "unit: Pure logic tests, no I/O, no network (<1s each)",
     "integration: Component interaction with mocked HTTP",
+    "live: Hits the real provider network and consumes real credentials. Opt in with -m live, skip with -m 'not live'",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning:litellm",

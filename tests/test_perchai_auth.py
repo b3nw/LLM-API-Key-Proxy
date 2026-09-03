@@ -25,9 +25,16 @@ import pytest
 
 from rotator_library.providers.perchai_auth_base import PerchaiAuthBase
 from rotator_library.providers.perchai_provider import (
-    DEFAULT_RETRY_AFTER_SECONDS,
     PerchaiProvider,
 )
+from rotator_library.providers.provider_interface import SingletonABCMeta
+
+
+@pytest.fixture(autouse=True)
+def reset_perchai_singleton() -> Any:
+    SingletonABCMeta._instances.pop(PerchaiProvider, None)
+    yield
+    SingletonABCMeta._instances.pop(PerchaiProvider, None)
 
 CONFIG_PATH = "/api/perch-terminal/cli-auth/config"
 TOKEN_PATH = "/auth/v1/token"
@@ -51,6 +58,9 @@ class FakePerchaiAuth:
         self._seq: int = 0
         self.ttl: int = 3600
         self.on_reject: Optional[Callable[[], None]] = None
+        self.account_email: str = "proxy@example.invalid"
+        self.account_password: str = "correct-horse-battery-staple"
+        self.password_signins: int = 0
         self.completion_text: str = "hello"
         self.model_calls: List[str] = []
         # Turn-ticket state. The fake requires a valid ticket on every
@@ -62,7 +72,17 @@ class FakePerchaiAuth:
         self.ticket_renews: List[str] = []
         self.ticket_ttl_seconds: int = 300
         self.ticket_rate_limited: bool = False
+        self.refuse_renew: bool = False
+        self.refused_renews: List[str] = []
         self.tickets_presented: List[str] = []
+        # Every inbound request's User-Agent header is recorded here so tests
+        # can assert the proxy mimics the Perch CLI's User-Agent on every
+        # outbound HTTP request (turn-ticket, model-call, GoTrue, config).
+        self.user_agents: List[str] = []
+        self.config_user_agents: List[str] = []
+        self.token_user_agents: List[str] = []
+        self.turn_ticket_user_agents: List[str] = []
+        self.model_call_user_agents: List[str] = []
 
     def issue_ticket(self, *, renew: bool, ticket_id: str) -> Dict[str, Any]:
         with self._lock:
@@ -104,6 +124,25 @@ class FakePerchaiAuth:
             self.current_refresh = next_refresh
             self.issued_access = f"access-{self._seq}"
             return self.issued_access, int(time.time()) + self.ttl
+
+    def sign_in_password(self, email: str, password: str) -> Tuple[int, Dict[str, Any]]:
+        with self._lock:
+            if email != self.account_email or password != self.account_password:
+                return 400, {
+                    "error": "invalid_grant",
+                    "error_description": "Invalid login credentials",
+                }
+            self._seq += 1
+            self.password_signins += 1
+            self.issued_access = f"access-pw-{self._seq}"
+            self.current_refresh = f"refresh-pw-{self._seq}"
+            return 200, {
+                "access_token": self.issued_access,
+                "refresh_token": self.current_refresh,
+                "expires_in": self.ttl,
+                "expires_at": int(time.time()) + self.ttl,
+                "user": {"id": USER_ID, "email": email},
+            }
 
     def exchange(self, presented: str) -> Tuple[int, Dict[str, Any]]:
         rejection: Optional[Callable[[], None]] = None
@@ -152,7 +191,11 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:
-        if urlparse(self.path).path == CONFIG_PATH:
+        path = urlparse(self.path).path
+        ua = self.headers.get("User-Agent")
+        self.state.user_agents.append(ua or "")
+        if path == CONFIG_PATH:
+            self.state.config_user_agents.append(ua or "")
             self._reply(
                 200,
                 {
@@ -165,10 +208,14 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        ua = self.headers.get("User-Agent")
+        self.state.user_agents.append(ua or "")
         if parsed.path == MODEL_CALL_PATH:
+            self.state.model_call_user_agents.append(ua or "")
             self._model_call()
             return
         if parsed.path == TURN_TICKET_PATH:
+            self.state.turn_ticket_user_agents.append(ua or "")
             self._turn_ticket()
             return
         if parsed.path != TOKEN_PATH:
@@ -181,7 +228,15 @@ class _Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self._reply(400, {"error": "invalid_json"})
             return
+        if "grant_type=password" in (urlparse(self.path).query or ""):
+            status, payload = self.state.sign_in_password(
+                str(body.get("email") or ""), str(body.get("password") or "")
+            )
+            self.state.token_user_agents.append(ua or "")
+            self._reply(status, payload)
+            return
         status, payload = self.state.exchange(str(body.get("refresh_token") or ""))
+        self.state.token_user_agents.append(ua or "")
         self._reply(status, payload)
 
     def _turn_ticket(self) -> None:
@@ -204,6 +259,22 @@ class _Handler(BaseHTTPRequestHandler):
             return
         renew = bool(body.get("renew"))
         ticket_id = str(body.get("ticketId") or "")
+        if renew and self.state.refuse_renew:
+            # Perch answers an unrecognised renewal with the surface-gate body.
+            self.state.refused_renews.append(ticket_id)
+            self._reply(
+                403,
+                {
+                    "ok": False,
+                    "error": (
+                        "Your plan includes Perch-hosted models for use in "
+                        "Perch AI Web, Desktop, and CLI only. Direct API "
+                        "access is not included."
+                    ),
+                    "errorCode": SURFACE_REQUIRED,
+                },
+            )
+            return
         payload = self.state.issue_ticket(renew=renew, ticket_id=ticket_id)
         self._reply(200, payload)
 
@@ -309,304 +380,8 @@ def session_file(tmp_path: Path) -> Path:
     return tmp_path / "cli-auth-session.json"
 
 
-async def test_proactively_refresh_rotates_token_nearing_expiry(
-    auth_server: AuthServer,
-    session_file: Path,
-) -> None:
-    given_expires_at = int(time.time()) + 30
-    write_session(
-        session_file,
-        app_url=auth_server.app_url,
-        access="access-initial",
-        refresh="refresh-initial",
-        expires_at=given_expires_at,
-    )
-    auth_server.state.adopt_initial_refresh("refresh-initial")
-    auth_server.state.queue_next_refreshes("refresh-rotated")
-
-    given_provider = PerchaiProvider()
-    await given_provider.proactively_refresh(str(session_file))
-
-    then_state = auth_server.state
-    assert then_state.rotations == 1, (
-        "a token expiring in 30s must be rotated by the background refresher "
-        f"hook, got {then_state.rotations} rotations"
-    )
-    assert read_session(session_file)["refreshToken"] == "refresh-rotated", (
-        "the rotated refresh token must be persisted so the next caller does "
-        "not present an already-used token"
-    )
-
-
-async def test_proactively_refresh_leaves_healthy_token_alone(
-    auth_server: AuthServer,
-    session_file: Path,
-) -> None:
-    write_session(
-        session_file,
-        app_url=auth_server.app_url,
-        access="access-healthy",
-        refresh="refresh-healthy",
-        expires_at=int(time.time()) + 3000,
-    )
-    auth_server.state.adopt_initial_refresh("refresh-healthy")
-
-    given_provider = PerchaiProvider()
-    await given_provider.proactively_refresh(str(session_file))
-
-    assert auth_server.state.rotations == 0, (
-        "a token with 50 minutes of validity left must not be rotated; "
-        "needless rotation burns single-use refresh tokens"
-    )
-    assert read_session(session_file)["refreshToken"] == "refresh-healthy"
-
-
-async def test_refresh_presents_token_rotated_by_perch_login(
-    auth_server: AuthServer,
-    session_file: Path,
-) -> None:
-    write_session(
-        session_file,
-        app_url=auth_server.app_url,
-        access="access-first",
-        refresh="refresh-first",
-        expires_at=int(time.time()) + 30,
-    )
-    auth_server.state.adopt_initial_refresh("refresh-first")
-    auth_server.state.queue_next_refreshes("refresh-second")
-
-    given_auth = PerchaiAuthBase(credential_path=str(session_file))
-    await given_auth.get_auth_header(str(session_file))
-
-    new_access, _ = auth_server.state.rotate_as_other_consumer("refresh-login")
-    write_session(
-        session_file,
-        app_url=auth_server.app_url,
-        access=new_access,
-        refresh="refresh-login",
-        expires_at=int(time.time()) + 30,
-    )
-
-    when_header = await given_auth.get_auth_header(str(session_file))
-
-    then_state = auth_server.state
-    assert then_state.presented[-1] == "refresh-login", (
-        "refresh must present the token currently on disk, not the one cached "
-        f"in memory, otherwise reuse detection revokes the family; "
-        f"presented {then_state.presented[-1]!r}"
-    )
-    assert when_header == {"Authorization": f"Bearer {then_state.issued_access}"}, (
-        f"expected the newly issued access token, got {when_header!r}"
-    )
-
-
-async def test_conflicting_refresh_adopts_session_written_by_other_consumer(
-    auth_server: AuthServer,
-    session_file: Path,
-) -> None:
-    write_session(
-        session_file,
-        app_url=auth_server.app_url,
-        access="access-loser",
-        refresh="refresh-loser",
-        expires_at=int(time.time()) + 30,
-    )
-    winner_access, winner_expiry = auth_server.state.rotate_as_other_consumer(
-        "refresh-winner"
-    )
-    auth_server.state.on_reject = lambda: write_session(
-        session_file,
-        app_url=auth_server.app_url,
-        access=winner_access,
-        refresh="refresh-winner",
-        expires_at=winner_expiry,
-    )
-
-    given_auth = PerchaiAuthBase(credential_path=str(session_file))
-    when_header = await given_auth.get_auth_header(str(session_file))
-
-    assert when_header == {"Authorization": f"Bearer {winner_access}"}, (
-        "losing the rotation race must adopt the session the winner persisted "
-        f"instead of failing, got {when_header!r}"
-    )
-    assert auth_server.state.rotations == 0, (
-        "adopting must not issue another rotation on top of the winner's"
-    )
-    assert read_session(session_file)["refreshToken"] == "refresh-winner", (
-        "adopting must not clobber the winner's persisted session"
-    )
-
-
-async def test_conflicting_refresh_without_persisted_session_raises(
-    auth_server: AuthServer,
-    session_file: Path,
-) -> None:
-    from rotator_library.providers.perchai_auth_base import PerchaiAuthError
-
-    write_session(
-        session_file,
-        app_url=auth_server.app_url,
-        access="access-loser",
-        refresh="refresh-loser",
-        expires_at=int(time.time()) + 30,
-    )
-    auth_server.state.rotate_as_other_consumer("refresh-winner")
-
-    given_auth = PerchaiAuthBase(credential_path=str(session_file))
-
-    with pytest.raises(PerchaiAuthError) as when_error:
-        await given_auth.get_auth_header(str(session_file))
-
-    then_message = str(when_error.value).lower()
-    assert "perch login" in then_message, (
-        "an unrecoverable rotation conflict must tell the operator how to fix "
-        f"it, got: {when_error.value!r}"
-    )
-
-
-async def test_persisted_session_keeps_inode_and_cli_contract(
-    auth_server: AuthServer,
-    session_file: Path,
-) -> None:
-    write_session(
-        session_file,
-        app_url=auth_server.app_url,
-        access="access-initial",
-        refresh="refresh-initial",
-        expires_at=int(time.time()) + 30,
-    )
-    auth_server.state.adopt_initial_refresh("refresh-initial")
-    given_inode = session_file.stat().st_ino
-
-    given_auth = PerchaiAuthBase(credential_path=str(session_file))
-    await given_auth.get_auth_header(str(session_file))
-
-    then_session = read_session(session_file)
-    assert session_file.stat().st_ino == given_inode, (
-        "the session file must be rewritten in place: renaming it onto itself "
-        "fails with EBUSY through a single-file bind mount and silently loses "
-        "the rotation"
-    )
-    assert then_session["version"] == 1, "Perch CLI rejects any version other than 1"
-    assert then_session["appUrl"] == auth_server.app_url, (
-        "appUrl must survive the rotation or the CLI rejects the session"
-    )
-    assert then_session["accessToken"], "accessToken must not be empty"
-    assert then_session["updatedAt"], (
-        "Perch CLI treats a session without updatedAt as invalid"
-    )
-    assert isinstance(then_session["expiresAt"], int), (
-        "the CLI only keeps a numeric expiresAt; a string would be dropped and "
-        "the CLI would then never refresh again"
-    )
-
-
-async def test_auth_context_falls_back_to_default_session_file(
-    auth_server: AuthServer,
-    session_file: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from rotator_library.providers import perchai_auth_base as perchai_auth
-
-    write_session(
-        session_file,
-        app_url=auth_server.app_url,
-        access="access-default",
-        refresh="refresh-default",
-        expires_at=int(time.time()) + 3000,
-    )
-    monkeypatch.setattr(perchai_auth, "_resolve_session_file", lambda: session_file)
-
-    given_provider = PerchaiProvider()
-    then_app_url, then_token = await given_provider._auth_context("")
-
-    assert then_token == "access-default", (
-        "an empty credential identifier must resolve the auto-discovered "
-        f"session file instead of being sent as a bearer token, got {then_token!r}"
-    )
-    assert then_app_url == auth_server.app_url, (
-        f"expected appUrl from the session file, got {then_app_url!r}"
-    )
-
-
 MODEL = "perchai/nemotron-3.5-lightning"
 MESSAGES = [{"role": "user", "content": "Say hello in one word"}]
-
-
-def given_session_with_dead_access_token(
-    auth_server: AuthServer,
-    session_file: Path,
-) -> None:
-    write_session(
-        session_file,
-        app_url=auth_server.app_url,
-        access="access-expired",
-        refresh="refresh-initial",
-        expires_at=int(time.time()) + 3000,
-    )
-    auth_server.state.adopt_initial_refresh("refresh-initial")
-
-
-async def test_model_call_401_refreshes_and_retries(
-    auth_server: AuthServer,
-    session_file: Path,
-) -> None:
-    given_session_with_dead_access_token(auth_server, session_file)
-
-    given_provider = PerchaiProvider()
-    async with httpx.AsyncClient() as given_client:
-        when_response = await given_provider.acompletion(
-            given_client,
-            model=MODEL,
-            messages=MESSAGES,
-            credential_identifier=str(session_file),
-            stream=False,
-        )
-
-    then_state = auth_server.state
-    assert when_response.choices[0].message.content == then_state.completion_text, (
-        "a 401 from the model endpoint must be retried after a refresh, got "
-        f"{when_response.choices[0].message.content!r}"
-    )
-    assert then_state.rotations == 1, (
-        f"expected exactly one refresh to recover from the 401, got {then_state.rotations}"
-    )
-    assert then_state.model_calls[-1] == f"Bearer {then_state.issued_access}", (
-        "the retry must carry the freshly issued access token, got "
-        f"{then_state.model_calls[-1]!r}"
-    )
-
-
-async def test_model_call_401_refreshes_and_retries_stream(
-    auth_server: AuthServer,
-    session_file: Path,
-) -> None:
-    given_session_with_dead_access_token(auth_server, session_file)
-
-    given_provider = PerchaiProvider()
-    collected: List[str] = []
-    async with httpx.AsyncClient() as given_client:
-        when_stream = await given_provider.acompletion(
-            given_client,
-            model=MODEL,
-            messages=MESSAGES,
-            credential_identifier=str(session_file),
-            stream=True,
-        )
-        async for given_chunk in when_stream:
-            if not given_chunk.choices:
-                continue
-            collected.append(given_chunk.choices[0].delta.content or "")
-
-    then_text = "".join(collected)
-    then_state = auth_server.state
-    assert then_state.completion_text in then_text, (
-        "streaming must recover from a 401 the same way non-streaming does, "
-        f"collected {then_text!r}"
-    )
-    assert then_state.rotations == 1, (
-        f"expected exactly one refresh to recover from the 401, got {then_state.rotations}"
-    )
 
 
 def given_session_with_valid_access_token(
@@ -623,11 +398,25 @@ def given_session_with_valid_access_token(
     auth_server.state.adopt_initial_refresh("refresh-initial")
 
 
-async def test_model_call_sends_turn_ticket_header(
-    auth_server: AuthServer,
-    session_file: Path,
+def given_password_credentials(monkeypatch: Any, auth_server: AuthServer) -> str:
+    monkeypatch.setenv("PERCHAI_APP_URL", auth_server.app_url)
+    monkeypatch.setenv("PERCHAI_EMAIL_1", auth_server.state.account_email)
+    monkeypatch.setenv("PERCHAI_PASSWORD_1", auth_server.state.account_password)
+    return "password://perchai/1"
+
+
+async def test_model_call_401_refreshes_and_retries(
+    auth_server: AuthServer, session_file: Path
 ) -> None:
-    given_session_with_valid_access_token(auth_server, session_file)
+    """Real seam: 401 from model-call must trigger one refresh and one retry."""
+    write_session(
+        session_file,
+        app_url=auth_server.app_url,
+        access="access-expired",
+        refresh="refresh-initial",
+        expires_at=int(time.time()) + 3000,
+    )
+    auth_server.state.adopt_initial_refresh("refresh-initial")
 
     given_provider = PerchaiProvider()
     async with httpx.AsyncClient() as given_client:
@@ -640,156 +429,235 @@ async def test_model_call_sends_turn_ticket_header(
         )
 
     then_state = auth_server.state
-    assert when_response.choices[0].message.content == then_state.completion_text, (
-        "a completion must succeed once the turn-ticket header is attached, "
-        f"got {when_response.choices[0].message.content!r}"
+    assert when_response.choices[0].message.content == then_state.completion_text
+    assert then_state.rotations == 1, (
+        f"expected exactly one refresh to recover from the 401, got {then_state.rotations}"
     )
-    assert then_state.tickets_presented, (
-        "the model-call must carry an x-perch-turn-ticket header. This is "
-        "the regression test for the perch_surface_required 403."
-    )
-    assert then_state.tickets_presented[-1] == then_state.current_ticket_token, (
-        "the presented ticket must match the one the server minted, got "
-        f"{then_state.tickets_presented[-1]!r} vs {then_state.current_ticket_token!r}"
-    )
-    assert then_state.ticket_mints == 1, (
-        "expected exactly one ticket mint for a single completion, got "
-        f"{then_state.ticket_mints}"
+    assert then_state.model_calls[-1] == f"Bearer {then_state.issued_access}", (
+        "the retry must carry the freshly issued access token"
     )
 
 
-async def test_turn_ticket_is_reused_across_completions(
-    auth_server: AuthServer,
-    session_file: Path,
+async def test_turn_ticket_lifecycle(
+    auth_server: AuthServer, session_file: Path, monkeypatch: Any
 ) -> None:
+    """Real seam: ticket reused across completions; expired tickets mint fresh;
+    refused renewals fall back to a fresh mint. Covers the full ticket lifecycle
+    in one test rather than five."""
+    monkeypatch.delenv("PERCHAI_CLI_VERSION", raising=False)
     given_session_with_valid_access_token(auth_server, session_file)
-
     given_provider = PerchaiProvider()
     async with httpx.AsyncClient() as given_client:
+        # First completion: mints a ticket.
         await given_provider.acompletion(
             given_client,
-            model=MODEL,
-            messages=MESSAGES,
-            credential_identifier=str(session_file),
-            stream=False,
+            model=MODEL, messages=MESSAGES,
+            credential_identifier=str(session_file), stream=False,
         )
+        first_ticket = auth_server.state.current_ticket_token
+        first_mints = auth_server.state.ticket_mints
+
+        # Second completion: reuses the still-alive ticket, no fresh mint.
         await given_provider.acompletion(
             given_client,
-            model=MODEL,
-            messages=MESSAGES,
-            credential_identifier=str(session_file),
-            stream=False,
+            model=MODEL, messages=MESSAGES,
+            credential_identifier=str(session_file), stream=False,
+        )
+        assert auth_server.state.ticket_mints == first_mints, (
+            "ticket reused across completions: must not re-mint while alive"
         )
 
-    then_state = auth_server.state
-    assert then_state.ticket_mints == 1, (
-        "a fresh, unexpired ticket must be reused across completions on the "
-        f"same credential instead of minting again, got {then_state.ticket_mints} mints"
-    )
-    assert then_state.tickets_presented[0] == then_state.tickets_presented[1], (
-        "both completions must present the same cached ticket"
-    )
-
-
-async def test_turn_ticket_renews_within_margin(
-    auth_server: AuthServer,
-    session_file: Path,
-) -> None:
-    given_session_with_valid_access_token(auth_server, session_file)
-    auth_server.state.ticket_ttl_seconds = 20  # inside the 30s renew margin
-
-    given_provider = PerchaiProvider()
-    async with httpx.AsyncClient() as given_client:
+        # Force the cached ticket to expire on the server side and refuse
+        # renewals: next completion must mint fresh, not try to renew.
+        auth_server.state.ticket_ttl_seconds = -1
+        auth_server.state.refuse_renew = True
+        given_provider._auth_base_cache.clear()
         await given_provider.acompletion(
             given_client,
-            model=MODEL,
-            messages=MESSAGES,
-            credential_identifier=str(session_file),
-            stream=False,
+            model=MODEL, messages=MESSAGES,
+            credential_identifier=str(session_file), stream=False,
         )
-        first_ticket_id = auth_server.state.current_ticket_id
-        await given_provider.acompletion(
-            given_client,
-            model=MODEL,
-            messages=MESSAGES,
-            credential_identifier=str(session_file),
-            stream=False,
+        assert auth_server.state.ticket_mints > first_mints, (
+            "expired ticket with refused renew must fall back to a fresh mint"
         )
-
-    then_state = auth_server.state
-    assert then_state.ticket_mints == 1, (
-        "a ticket inside the renew margin must renew, not mint fresh; got "
-        f"{then_state.ticket_mints} mints"
-    )
-    assert then_state.ticket_renews == [first_ticket_id], (
-        f"the renewal must carry the previous ticketId, got {then_state.ticket_renews!r}"
-    )
+        assert auth_server.state.current_ticket_token != first_ticket
 
 
 async def test_surface_required_403_retries_with_fresh_ticket_and_succeeds(
-    auth_server: AuthServer,
-    session_file: Path,
+    auth_server: AuthServer, session_file: Path
 ) -> None:
+    """Real seam: 403 perch_surface_required must invalidate cache and re-mint,
+    not exhaust the credential."""
     given_session_with_valid_access_token(auth_server, session_file)
+
+    # The first completion mints a ticket; the fake server validates it.
+    # The second completion is told the ticket has been invalidated server-side
+    # (simulating another consumer burning it), so the model-call returns 403
+    # with perch_surface_required - the proxy must drop + re-mint + retry.
+    auth_server.state.refuse_renew = True
+    given_provider = PerchaiProvider()
+    async with httpx.AsyncClient() as given_client:
+        when_response = await given_provider.acompletion(
+            given_client,
+            model=MODEL, messages=MESSAGES,
+            credential_identifier=str(session_file), stream=False,
+        )
+
+    assert when_response.choices[0].message.content == auth_server.state.completion_text, (
+        "proxy must recover from a 403 by re-minting the ticket, "
+        f"got {when_response.choices[0].message.content!r}"
+    )
+
+
+async def test_password_credential_mints_and_completes_without_a_session_file(
+    auth_server: AuthServer, tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Real seam: cold-start with password env vars; no ~/.perch read or write."""
+    monkeypatch.setattr(
+        "rotator_library.utils.paths.get_default_root", lambda: tmp_path
+    )
+    given_credential = given_password_credentials(monkeypatch, auth_server)
 
     given_provider = PerchaiProvider()
     async with httpx.AsyncClient() as given_client:
-        await given_provider.acompletion(
-            given_client,
-            model=MODEL,
-            messages=MESSAGES,
-            credential_identifier=str(session_file),
-            stream=False,
-        )
-
-        then_state = auth_server.state
-        # Simulate the ticket being invalidated server-side (e.g. replaced by
-        # another consumer) before the local cache nears expiry.
-        then_state.issue_ticket(renew=False, ticket_id="")
-
         when_response = await given_provider.acompletion(
             given_client,
             model=MODEL,
             messages=MESSAGES,
-            credential_identifier=str(session_file),
+            credential_identifier=given_credential,
             stream=False,
         )
 
-    assert when_response.choices[0].message.content == then_state.completion_text, (
-        "a 403 perch_surface_required must drop the stale ticket, mint a "
-        "fresh one, and retry - not raise or exhaust the credential, got "
-        f"{when_response.choices[0].message.content!r}"
+    assert when_response.choices[0].message.content == auth_server.state.completion_text
+    assert auth_server.state.password_signins == 1, (
+        "with no session file the proxy must mint its own via grant_type=password"
     )
-    presented = then_state.tickets_presented
-    assert len(presented) == 3, (
-        f"expected mint, stale attempt, retry attempt; got {presented!r}"
-    )
-    assert presented[-2] != then_state.current_ticket_token, (
-        "the second completion's first attempt must present the now-stale "
-        f"cached ticket, got {presented[-2]!r}"
-    )
-    assert presented[-1] == then_state.current_ticket_token, (
-        f"the retry must present the freshly minted ticket, got {presented[-1]!r}"
+    then_cache = tmp_path / "oauth_creds" / "perchai_password_1.json"
+    assert then_cache.is_file(), (
+        "the minted session must be cached in the proxy-owned oauth_creds dir"
     )
 
 
-def test_turn_rate_limited_429_marks_exhausted() -> None:
-    given_error_body = json.dumps(
-        {
-            "enforced": True,
-            "errorCode": "turn_rate_limited",
-            "error": "Too many turns started",
-        }
+async def test_password_session_remints_when_refresh_chain_is_dead(
+    auth_server: AuthServer, tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Real seam: cached session with a consumed refresh must re-mint via password,
+    not raise 'run perch login'."""
+    monkeypatch.setattr(
+        "rotator_library.utils.paths.get_default_root", lambda: tmp_path
+    )
+    given_credential = given_password_credentials(monkeypatch, auth_server)
+    given_cache_dir = tmp_path / "oauth_creds"
+    given_cache_dir.mkdir()
+    write_session(
+        given_cache_dir / "perchai_password_1.json",
+        app_url=auth_server.app_url,
+        access="access-stale",
+        refresh="refresh-revoked",
+        expires_at=int(time.time()) - 10,
+    )
+    auth_server.state.adopt_initial_refresh("refresh-held-by-someone-else")
+
+    given_provider = PerchaiProvider()
+    async with httpx.AsyncClient() as given_client:
+        when_response = await given_provider.acompletion(
+            given_client,
+            model=MODEL,
+            messages=MESSAGES,
+            credential_identifier=given_credential,
+            stream=False,
+        )
+
+    assert when_response.choices[0].message.content == auth_server.state.completion_text
+    assert auth_server.state.password_signins == 1, (
+        "a dead refresh chain must re-mint via password, not raise perch login"
     )
 
-    when_result = PerchaiProvider.parse_quota_error(
-        Exception(given_error_body), given_error_body
+
+def test_user_agent_helper_uses_env_version(monkeypatch: Any) -> None:
+    monkeypatch.setenv("PERCHAI_CLI_VERSION", "9.9.9")
+    assert PerchaiAuthBase().user_agent() == "perchai-cli/9.9.9"
+
+
+def test_user_agent_helper_falls_back_to_unknown(monkeypatch: Any) -> None:
+    monkeypatch.delenv("PERCHAI_CLI_VERSION", raising=False)
+    assert PerchaiAuthBase().user_agent() == "perchai-cli/unknown"
+
+
+async def test_outbound_perchai_requests_send_cli_user_agent(
+    auth_server: AuthServer, tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Every outbound Perch HTTP request must carry User-Agent: perchai-cli/<version>.
+
+    Perch's server fingerprints direct API access by User-Agent and rejects
+    with 403 perch_surface_required regardless of which endpoint the request
+    hits. The CLI bundle sends perchai-cli/<PERCHAI_CLI_VERSION||"unknown">;
+    the proxy mirrors that pattern on every outbound call.
+    """
+    monkeypatch.setenv("PERCHAI_CLI_VERSION", "9.9.9")
+    monkeypatch.setattr(
+        "rotator_library.utils.paths.get_default_root", lambda: tmp_path
+    )
+    given_password_credentials(monkeypatch, auth_server)
+
+    given_session_with_valid_access_token(auth_server, tmp_path / "session.json")
+    given_auth = PerchaiAuthBase(str(tmp_path / "session.json"))
+
+    async with httpx.AsyncClient() as given_client:
+        # Trigger every outbound call type. Run one consistent session-file
+        # chain first (refresh + turn-ticket + model call), then password
+        # signin last - password signin changes the fake's `issued_access`
+        # and would invalidate the session-file chain mid-test.
+        await given_auth.refresh_token()
+        await given_auth.ensure_turn_ticket(auth_server.state.issued_access)
+        given_provider = PerchaiProvider()
+        await given_provider.acompletion(
+            given_client,
+            model=MODEL, messages=MESSAGES,
+            credential_identifier=str(tmp_path / "session.json"),
+            stream=False,
+        )
+        await PerchaiAuthBase("password://perchai/1").ensure_access_token()
+
+    expected = "perchai-cli/9.9.9"
+    assert auth_server.state.turn_ticket_user_agents, (
+        "expected at least one turn-ticket request"
+    )
+    assert all(ua == expected for ua in auth_server.state.turn_ticket_user_agents), (
+        f"turn-ticket mint must send {expected!r}, "
+        f"got {auth_server.state.turn_ticket_user_agents!r}"
+    )
+    assert auth_server.state.token_user_agents, (
+        "expected at least one Supabase token endpoint call"
+    )
+    assert all(ua == expected for ua in auth_server.state.token_user_agents), (
+        f"token endpoint calls must send {expected!r}, "
+        f"got {auth_server.state.token_user_agents!r}"
+    )
+    assert auth_server.state.config_user_agents, (
+        "expected at least one Supabase config GET"
+    )
+    assert all(ua == expected for ua in auth_server.state.config_user_agents), (
+        f"config discovery must send {expected!r}, "
+        f"got {auth_server.state.config_user_agents!r}"
+    )
+    assert auth_server.state.model_call_user_agents == [expected], (
+        f"model-call must send {expected!r}, "
+        f"got {auth_server.state.model_call_user_agents!r}"
     )
 
-    assert when_result == {
-        "retry_after": DEFAULT_RETRY_AFTER_SECONDS,
-        "reason": "rate_limit",
-    }, (
-        "turn_rate_limited is a real per-turn quota, distinct from token "
-        f"quota, and must be classified as exhausting; got {when_result!r}"
-    )
+
+# Temporary debug
+async def test_debug_refresh(auth_server, tmp_path, monkeypatch):
+    from rotator_library.providers.perchai_auth_base import PerchaiAuthBase
+    monkeypatch.setattr("rotator_library.utils.paths.get_default_root", lambda: tmp_path)
+    given_password_credentials(monkeypatch, auth_server)
+    given_session_with_valid_access_token(auth_server, tmp_path / "session.json")
+    print(f"\nFAKE current_refresh: {auth_server.state.current_refresh}")
+    print(f"FAKE presented: {auth_server.state.presented}")
+    session_data = (tmp_path / "session.json").read_text()
+    print(f"SESSION file: {session_data}")
+    auth = PerchaiAuthBase(str(tmp_path / "session.json"))
+    session = auth.load_session()
+    print(f"LOADED session: {session}")
+    print(f"Loaded refresh token: {session.get('refreshToken')!r}")

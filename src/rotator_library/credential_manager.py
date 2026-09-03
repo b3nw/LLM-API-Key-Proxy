@@ -39,6 +39,7 @@ _NUMBERED_ACCESS_TOKEN_PATTERNS = {
 }
 _CODEX_API_KEY_PATTERN = re.compile(r"^CODEX_(\d+)_API_KEY$")
 _COPILOT_GITHUB_TOKEN_PATTERN = re.compile(r"^COPILOT_(\d+)_GITHUB_TOKEN$")
+_PERCHAI_EMAIL_PATTERN = re.compile(r"^PERCHAI_EMAIL_(\d+)$")
 
 
 class CredentialManager:
@@ -163,7 +164,33 @@ class CredentialManager:
             sorted_indices = sorted(indices, key=lambda x: int(x))
             result[provider] = [f"env://{provider}/{idx}" for idx in sorted_indices]
 
+        # Perchai email+password credentials mint their own independent session
+        # (grant_type=password), so they take precedence over any env token
+        # or session-file discovery for perchai.
+        perchai_password_indices = self._discover_perchai_password_indices()
+        if perchai_password_indices:
+            result["perchai"] = [
+                f"password://perchai/{idx}" for idx in perchai_password_indices
+            ]
+
         return result
+
+    def _discover_perchai_password_indices(self) -> List[str]:
+        indices: Set[str] = set()
+        for key in self.env_vars.keys():
+            match = _PERCHAI_EMAIL_PATTERN.match(key)
+            if not match:
+                continue
+            index = match.group(1)
+            if not self.env_vars.get(key):
+                continue
+            if self.env_vars.get(f"PERCHAI_PASSWORD_{index}"):
+                indices.add(index)
+        if indices:
+            lib_logger.info(
+                f"Found {len(indices)} email+password credential(s) for perchai"
+            )
+        return sorted(indices, key=lambda x: int(x))
 
     def discover_and_prepare(self) -> Dict[str, List[str]]:
         lib_logger.info("Starting automated OAuth credential discovery...")

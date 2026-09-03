@@ -283,6 +283,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                 static_ids.add(upstream_id)
 
         try:
+            auth_base = self._get_auth_base(api_key)
             app_url, access_token = await self._auth_context(api_key)
 
             response = await client.get(
@@ -290,6 +291,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                 headers={
                     "Authorization": f"Bearer {access_token}",
                     "Accept": "application/json",
+                    "User-Agent": auth_base.user_agent(),
                 },
                 timeout=TimeoutConfig.non_streaming(),
             )
@@ -364,6 +366,7 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                     "text/event-stream" if stream_mode else "application/json"
                 ),
                 TURN_TICKET_HEADER: using_ticket,
+                "User-Agent": auth_base.user_agent(),
             }
 
         if stream_mode:

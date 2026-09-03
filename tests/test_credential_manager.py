@@ -69,6 +69,23 @@ class TestCredentialDiscovery:
             assert os.environ.get("GEMINI_CLI_1_ACCESS_TOKEN") == "fake-access-1"
             assert os.environ.get("GEMINI_CLI_2_ACCESS_TOKEN") == "fake-access-2"
 
+    def test_perchai_email_password_becomes_password_credential(self, tmp_path):
+        given_env = {
+            "PERCHAI_EMAIL_1": "a@example.invalid",
+            "PERCHAI_PASSWORD_1": "pw-1",
+            "PERCHAI_EMAIL_2": "b@example.invalid",
+            "PERCHAI_PASSWORD_2": "pw-2",
+            "PERCHAI_EMAIL_3": "c@example.invalid",
+        }
+        given_manager = CredentialManager(env_vars=given_env, oauth_dir=tmp_path)
+
+        when_config = given_manager.discover_and_prepare()
+
+        assert when_config.get("perchai") == [
+            "password://perchai/1",
+            "password://perchai/2",
+        ], "an email with no matching password must be skipped, not half-configured"
+
 
 class TestCredentialDeduplication:
     """Test that duplicate credentials are detected and skipped."""

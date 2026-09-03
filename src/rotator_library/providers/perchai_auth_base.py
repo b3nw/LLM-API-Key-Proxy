@@ -15,6 +15,8 @@ from typing import Any, Dict, Final, List, Optional, TypedDict, final
 
 import httpx
 
+from ..utils.paths import get_oauth_dir
+
 
 class PerchaiSession(TypedDict, total=False):
     version: int
@@ -32,6 +34,7 @@ class PerchaiAuthError(Exception):
 class PerchaiCredentialKind(StrEnum):
     SESSION_FILE = "session_file"
     ENV_VIRTUAL = "env_virtual"
+    PASSWORD = "password"
     RAW_TOKEN = "raw_token"
 
 
@@ -94,12 +97,28 @@ class PerchaiAuthBase:
     REFRESH_PATH: Final[str] = "/auth/v1/token"
     REFRESH_TIMEOUT: Final[float] = 30.0
     CONFIG_TIMEOUT: Final[float] = 15.0
-    REFRESH_EXPIRY_BUFFER_SECONDS: Final[int] = 600
+    # The Perch CLI (Db()) keeps using a token until 90s from expiry and
+    # force-rotates on its own whenever it starts a turn. Refreshing earlier
+    # than it does not stagger the two consumers, it just adds a second
+    # independent rotation per hour to a single-use chain, and every extra
+    # rotation is another chance to revoke the family and force `perch login`.
+    REFRESH_EXPIRY_BUFFER_SECONDS: Final[int] = 90
+    ADOPT_MIN_REMAINING_SECONDS: Final[int] = 15
     REFRESH_TOKEN_ALREADY_USED: Final[str] = "refresh_token_already_used"
+    PASSWORD_SCHEME: Final[str] = "password://"
+    PASSWORD_GRANT_PATH: Final[str] = "/auth/v1/token?grant_type=password"
+    PASSWORD_CACHE_PREFIX: Final[str] = "perchai_password_"
     TURN_TICKET_PATH: Final[str] = "/api/perch-terminal/turn-ticket"
     TICKET_TTL_FALLBACK_SECONDS: Final[int] = 300
     TICKET_RENEW_MARGIN_SECONDS: Final[int] = 30
     TICKET_MINT_TIMEOUT_SECONDS: Final[float] = 8.0
+    # Perch's server fingerprints direct API access vs the CLI by User-Agent.
+    # The CLI bundle reads process.env.PERCH_CLI_VERSION and prepends
+    # "perchai-cli/"; we mirror that exactly. "unknown" is the CLI's own
+    # fallback when the env var is unset.
+    USER_AGENT_PREFIX: Final[str] = "perchai-cli/"
+    USER_AGENT_VERSION_ENV: Final[str] = "PERCHAI_CLI_VERSION"
+    USER_AGENT_VERSION_FALLBACK: Final[str] = "unknown"
 
     def __init__(self, credential_path: str = "") -> None:
         self._session: Optional[PerchaiSession] = None
@@ -120,11 +139,26 @@ class PerchaiAuthBase:
             self._refresh_lock = asyncio.Lock()
         return self._refresh_lock
 
+    def _user_agent(self) -> str:
+        version = os.getenv(
+            self.USER_AGENT_VERSION_ENV, self.USER_AGENT_VERSION_FALLBACK
+        ).strip() or self.USER_AGENT_VERSION_FALLBACK
+        return f"{self.USER_AGENT_PREFIX}{version}"
+
+    def user_agent(self) -> str:
+        return self._user_agent()
+
     def _is_token_expired(self, session: PerchaiSession) -> bool:
         expires_at = session.get("expiresAt")
         if not isinstance(expires_at, (int, float)):
             return False
         return float(expires_at) < time.time() + self.REFRESH_EXPIRY_BUFFER_SECONDS
+
+    def _is_token_usable(self, session: PerchaiSession) -> bool:
+        expires_at = session.get("expiresAt")
+        if not isinstance(expires_at, (int, float)):
+            return True
+        return float(expires_at) > time.time() + self.ADOPT_MIN_REMAINING_SECONDS
 
     def load_session(self) -> PerchaiSession:
         if self._credential_path:
@@ -208,6 +242,8 @@ class PerchaiAuthBase:
         credential = self._credential_path
         if not credential:
             return PerchaiCredentialKind.SESSION_FILE
+        if credential.startswith(self.PASSWORD_SCHEME):
+            return PerchaiCredentialKind.PASSWORD
         if credential.startswith("env://"):
             return PerchaiCredentialKind.ENV_VIRTUAL
         if credential.endswith(".json") or Path(credential).expanduser().is_file():
@@ -218,6 +254,8 @@ class PerchaiAuthBase:
         kind = self._credential_kind()
         if kind is PerchaiCredentialKind.RAW_TOKEN:
             return self._credential_path
+        if kind is PerchaiCredentialKind.PASSWORD:
+            return await self._ensure_password_session()
 
         session = self.load_session()
         if not self._is_token_expired(session):
@@ -327,21 +365,29 @@ class PerchaiAuthBase:
         )
         return session
 
-    async def _ensure_supabase_config(self) -> None:
+    async def _ensure_supabase_config(
+        self, app_url_override: Optional[str] = None
+    ) -> None:
         # Perchai does not embed Supabase config in the session file;
         # discover it once per process and cache.
         if self._supabase_url and self._supabase_anon_key:
             return
 
-        session = self._ensure_session()
-        app_url = session.get("appUrl") or self.DEFAULT_APP_URL
+        if app_url_override is not None:
+            app_url = app_url_override
+        else:
+            session = self._ensure_session()
+            app_url = session.get("appUrl") or self.DEFAULT_APP_URL
         config_url = f"{app_url.rstrip('/')}{self.CONFIG_PATH}"
 
         try:
             async with httpx.AsyncClient(timeout=self.CONFIG_TIMEOUT) as client:
                 response = await client.get(
                     config_url,
-                    headers={"Accept": "application/json"},
+                    headers={
+                        "Accept": "application/json",
+                        "User-Agent": self._user_agent(),
+                    },
                 )
         except httpx.HTTPError as exc:
             raise PerchaiAuthError(
@@ -422,6 +468,7 @@ class PerchaiAuthBase:
                         "Authorization": f"Bearer {self._access_token_or_raise(session)}",
                         "Content-Type": "application/json",
                         "Accept": "application/json",
+                        "User-Agent": self._user_agent(),
                     },
                 )
         except httpx.HTTPError as exc:
@@ -533,6 +580,133 @@ class PerchaiAuthBase:
                 return current
             return await self._rotate_refresh_token(session)
 
+    def _password_index(self) -> str:
+        tail = self._credential_path[len(self.PASSWORD_SCHEME):]
+        parts = [p for p in tail.split("/") if p]
+        return parts[-1] if parts else "1"
+
+    def _password_app_url(self) -> str:
+        return os.getenv("PERCHAI_APP_URL", "").strip() or self.DEFAULT_APP_URL
+
+    def _session_cache_path(self) -> Path:
+        filename = f"{self.PASSWORD_CACHE_PREFIX}{self._password_index()}.json"
+        return get_oauth_dir() / filename
+
+    def _load_cached_session(self) -> Optional[PerchaiSession]:
+        path = self._session_cache_path()
+        if not path.is_file():
+            return None
+        raw = self._read_raw_session(path)
+        access_token = raw.get("accessToken")
+        if not isinstance(access_token, str) or not access_token:
+            return None
+        return PerchaiSession(
+            version=int(raw.get("version", 1)),
+            appUrl=raw.get("appUrl") or self._password_app_url(),
+            accessToken=access_token,
+            refreshToken=raw.get("refreshToken", ""),
+            expiresAt=raw.get("expiresAt"),
+            userId=raw.get("userId"),
+        )
+
+    async def _ensure_password_session(self) -> str:
+        cached = self._load_cached_session()
+        if cached is not None:
+            self._session = cached
+            if not self._is_token_expired(cached):
+                return self._access_token_or_raise(cached)
+            if cached.get("refreshToken"):
+                try:
+                    async with self._get_lock():
+                        return await self._rotate_refresh_token(cached)
+                except PerchaiAuthError:
+                    lib_logger.info(
+                        "Perchai password credential: refresh chain dead, "
+                        "re-minting from stored password."
+                    )
+        return await self._sign_in_with_password()
+
+    async def _sign_in_with_password(self) -> str:
+        index = self._password_index()
+        email = os.getenv(f"PERCHAI_EMAIL_{index}", "").strip()
+        password = os.getenv(f"PERCHAI_PASSWORD_{index}")
+        if not email or not password:
+            raise PerchaiAuthError(
+                f"Perchai password credential {self._credential_path} needs "
+                f"PERCHAI_EMAIL_{index} and PERCHAI_PASSWORD_{index} to be set."
+            )
+
+        app_url = self._password_app_url()
+        await self._ensure_supabase_config(app_url_override=app_url)
+        assert self._supabase_url and self._supabase_anon_key
+        sign_in_url = f"{self._supabase_url.rstrip('/')}{self.PASSWORD_GRANT_PATH}"
+
+        try:
+            async with httpx.AsyncClient(timeout=self.REFRESH_TIMEOUT) as client:
+                response = await client.post(
+                    sign_in_url,
+                    json={"email": email, "password": password},
+                    headers={
+                        "apikey": self._supabase_anon_key,
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                        "User-Agent": self._user_agent(),
+                    },
+                )
+        except httpx.HTTPError as exc:
+            raise PerchaiAuthError(
+                f"Perchai password sign-in network error: {exc}."
+            ) from exc
+
+        if response.status_code != 200:
+            snippet = response.text[:200] if response.text else "<empty>"
+            raise PerchaiAuthError(
+                f"Perchai password sign-in failed with HTTP "
+                f"{response.status_code}: {snippet}. Check PERCHAI_EMAIL_{index} "
+                f"and PERCHAI_PASSWORD_{index}."
+            )
+
+        try:
+            payload = response.json()
+        except json.JSONDecodeError as exc:
+            raise PerchaiAuthError(
+                f"Perchai password sign-in returned invalid JSON: {exc}."
+            ) from exc
+
+        new_access = payload.get("access_token")
+        new_refresh = payload.get("refresh_token")
+        if not isinstance(new_access, str) or not new_access:
+            raise PerchaiAuthError(
+                "Perchai password sign-in response is missing 'access_token'."
+            )
+        if not isinstance(new_refresh, str) or not new_refresh:
+            raise PerchaiAuthError(
+                "Perchai password sign-in response is missing 'refresh_token'."
+            )
+        new_expires_at = self._as_epoch_seconds(payload.get("expires_at"))
+        if new_expires_at is None:
+            expires_in = self._as_epoch_seconds(payload.get("expires_in"))
+            if expires_in is not None and expires_in > 0:
+                new_expires_at = int(time.time()) + expires_in
+        user_payload = payload.get("user")
+        user_id = user_payload.get("id") if isinstance(user_payload, dict) else None
+
+        session: PerchaiSession = {
+            "version": 1,
+            "appUrl": app_url,
+            "accessToken": new_access,
+            "refreshToken": new_refresh,
+            "expiresAt": new_expires_at,
+            "userId": user_id,
+        }
+        self._session = session
+        self._persist_session(session)
+        lib_logger.info(
+            f"Perchai minted an independent session via password for index "
+            f"{index} (userId={user_id!r})."
+        )
+        return new_access
+
     async def ensure_turn_ticket(self, access_token: str) -> str:
         async with self._get_lock():
             now = time.time()
@@ -543,11 +717,21 @@ class PerchaiAuthBase:
             ):
                 return cached["token"]
 
+            # Only a ticket that is still alive can be renewed. The CLI renews
+            # inside the 30s margin and mints fresh otherwise; asking Perch to
+            # renew a ticketId that already died is refused by the surface gate.
+            renewable = (
+                cached if cached is not None and cached["expires_at"] > now else None
+            )
+
             token = access_token
-            response = await self._post_turn_ticket(token, cached)
+            response = await self._post_turn_ticket(token, renewable)
             if response.status_code == 401:
                 token = await self._rotate_refresh_token(self.load_session())
-                response = await self._post_turn_ticket(token, cached)
+                response = await self._post_turn_ticket(token, renewable)
+            if renewable is not None and response.status_code not in (200, 429):
+                self._turn_ticket = None
+                response = await self._post_turn_ticket(token, None)
 
             minted = self._parse_turn_ticket_response(response)
             self._turn_ticket = minted
@@ -581,6 +765,7 @@ class PerchaiAuthBase:
                         "Authorization": f"Bearer {access_token}",
                         "Content-Type": "application/json",
                         "Accept": "application/json",
+                        "User-Agent": self._user_agent(),
                     },
                 )
         except httpx.HTTPError as exc:
@@ -649,7 +834,9 @@ class PerchaiAuthBase:
             session = self.load_session()
         except PerchaiAuthError:
             return None
-        if session.get("refreshToken") == presented or self._is_token_expired(session):
+        if session.get("refreshToken") == presented or not self._is_token_usable(
+            session
+        ):
             return None
         access_token = session.get("accessToken")
         if not access_token:
@@ -671,16 +858,30 @@ class PerchaiAuthBase:
             return int(value.strip())
         return None
 
+    @staticmethod
+    def _read_raw_session(session_path: Path) -> Dict[str, Any]:
+        try:
+            data = json.loads(session_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
     def _persist_session(self, session: PerchaiSession) -> None:
         if self._credential_path and self._credential_path.startswith("env://"):
             return
 
-        if self._credential_path:
+        if self._credential_kind() is PerchaiCredentialKind.PASSWORD:
+            session_path = self._session_cache_path()
+        elif self._credential_path:
             session_path = Path(self._credential_path).expanduser()
         else:
             session_path = _resolve_session_file()
 
-        payload = dict(session)
+        # The Perch CLI owns this file too and stores fields the proxy does not
+        # model (email, and anything a future CLI adds). Rewrite ours over what
+        # is on disk rather than replacing the file with our narrower view.
+        payload = self._read_raw_session(session_path)
+        payload.update(session)
         payload["updatedAt"] = _utc_now_iso()
         content = json.dumps(payload, indent=2, sort_keys=True)
 

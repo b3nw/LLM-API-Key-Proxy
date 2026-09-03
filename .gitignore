@@ -149,6 +149,7 @@ tests/*
 !tests/test_gemini_cli_models.py
 !tests/test_suppress_litellm_warnings.py
 !tests/test_proxy_request_routing.py
+!tests/test_codex_prompt_caching.py
 docs/ignored/
 .env
 .agent/

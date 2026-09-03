@@ -543,6 +543,10 @@ class RequestExecutor:
         # Apply provider-specific LiteLLM params
         self._apply_litellm_provider_params(provider, kwargs)
 
+        # Forward inferred session_id for provider-level prompt caching & session affinity
+        if getattr(context, "session_id", None) and "session_id" not in kwargs:
+            kwargs["session_id"] = context.session_id
+
         # Add transaction context for provider logging
         if context.transaction_logger:
             kwargs["transaction_context"] = context.transaction_logger.get_context()

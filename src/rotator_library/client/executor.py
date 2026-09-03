@@ -799,7 +799,7 @@ class RequestExecutor:
                                 if plugin and plugin.has_custom_logic():
                                     kwargs["credential_identifier"] = credential_secret
                                     call_fn = plugin.aembedding if is_embedding else plugin.acompletion
-                                    response = await call_fn(self._http_client, **kwargs)
+                                    response = await call_fn(request_client, **kwargs)
                                 else:
                                     # Standard LiteLLM call
                                     kwargs["api_key"] = credential_secret
@@ -1075,6 +1075,9 @@ class RequestExecutor:
                                 )
                             if context.transaction_logger:
                                 context.transaction_logger.proxy_name = proxy_name_s
+                            request_client_s = await self._resolve_http_client(
+                                provider, cred, cred_context.stable_id
+                            )
 
                             # Execute request with retries
                             for attempt in range(max_retries):
@@ -1093,7 +1096,7 @@ class RequestExecutor:
                                     if plugin and plugin.has_custom_logic():
                                         kwargs["credential_identifier"] = credential_secret
                                         stream = await plugin.acompletion(
-                                            self._http_client, **kwargs
+                                            request_client_s, **kwargs
                                         )
                                     else:
                                         kwargs["api_key"] = credential_secret

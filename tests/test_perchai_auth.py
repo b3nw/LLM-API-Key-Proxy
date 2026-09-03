@@ -646,18 +646,3 @@ async def test_outbound_perchai_requests_send_cli_user_agent(
         f"got {auth_server.state.model_call_user_agents!r}"
     )
 
-
-# Temporary debug
-async def test_debug_refresh(auth_server, tmp_path, monkeypatch):
-    from rotator_library.providers.perchai_auth_base import PerchaiAuthBase
-    monkeypatch.setattr("rotator_library.utils.paths.get_default_root", lambda: tmp_path)
-    given_password_credentials(monkeypatch, auth_server)
-    given_session_with_valid_access_token(auth_server, tmp_path / "session.json")
-    print(f"\nFAKE current_refresh: {auth_server.state.current_refresh}")
-    print(f"FAKE presented: {auth_server.state.presented}")
-    session_data = (tmp_path / "session.json").read_text()
-    print(f"SESSION file: {session_data}")
-    auth = PerchaiAuthBase(str(tmp_path / "session.json"))
-    session = auth.load_session()
-    print(f"LOADED session: {session}")
-    print(f"Loaded refresh token: {session.get('refreshToken')!r}")

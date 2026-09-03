@@ -474,6 +474,7 @@ async def test_option_id_routes_to_real_upstream(option_id: str) -> None:
                 "Content-Type": "application/json",
                 "Accept": "application/json",
                 TURN_TICKET_HEADER: given_ticket,
+                "User-Agent": given_auth.user_agent(),
             },
             json=given_body,
             timeout=30.0,
@@ -544,6 +545,7 @@ async def _live_thinking_metrics(
             "Content-Type": "application/json",
             "Accept": "text/event-stream",
             TURN_TICKET_HEADER: given_ticket,
+            "User-Agent": given_auth.user_agent(),
         },
         json=given_body,
         timeout=120.0,
@@ -607,4 +609,39 @@ async def test_live_thinking_effort_modulates_reasoning_volume() -> None:
         f"low={low_reasoning} chars/{low_elapsed:.1f}s, "
         f"high={high_reasoning} chars/{high_elapsed:.1f}s. "
         "Volumes are too similar - Perchai may ignore reasoning_effort."
+    )
+
+
+@pytest.mark.live
+@live_only
+@pytest.mark.asyncio
+async def test_live_provider_acompletion_returns_200_against_app_perchai() -> None:
+    """Real e2e: PerchaiProvider.acompletion must 200 against live app.perchai.app.
+
+    Regression guard for the perchai-cli/<version> User-Agent fix. Perch's
+    surface gate fingerprints direct API access by User-Agent and rejects
+    anything other than perchai-cli/* with 403 perch_surface_required. The
+    seam test in tests/test_perchai_auth.py proves the proxy SENDS that header
+    against a fake server; this test proves production ACCEPTS it end to end
+    through the deployed code path (token discovery -> turn-ticket mint ->
+    model-call POST). If User-Agent is reverted to python-httpx/<ver>, the
+    turn-ticket mint 403s and acompletion raises PerchaiAuthError before any
+    model call is attempted.
+
+    Uses gemma-4-e2b (Starter tier, smallest, fastest) with max_tokens=16.
+    """
+    given_provider = PerchaiProvider()
+    async with httpx.AsyncClient() as given_client:
+        when_response = await given_provider.acompletion(
+            given_client,
+            model="perchai/bedrock-mantle-google-gemma-4-e2b",
+            messages=[{"role": "user", "content": "Reply with one short sentence."}],
+            max_tokens=16,
+            stream=False,
+        )
+    then_content = when_response.choices[0].message.content
+    assert then_content and then_content.strip(), (
+        "acompletion returned an empty reply - upstream likely 403'd "
+        "perch_surface_required or returned ok=false: "
+        f"{when_response!r}"
     )

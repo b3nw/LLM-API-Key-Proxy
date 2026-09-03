@@ -9,6 +9,7 @@ import logging
 import os
 import time
 import uuid
+from enum import StrEnum
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple, TypedDict, Union, final, override
 
 import httpx
@@ -44,6 +45,25 @@ USAGE_PATH: str = "/api/perch-terminal/usage"
 
 
 DEFAULT_LANE: str = "chat"
+
+
+class ReasoningEffort(StrEnum):
+    MINIMAL = "minimal"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    XHIGH = "xhigh"
+    MAX = "max"
+
+
+REASONING_DISABLE_TOKENS: frozenset[str] = frozenset(
+    {"none", "disable", "disabled", "off"}
+)
+
+WALL_TRIGGERING_EFFORTS: frozenset[str] = frozenset(
+    {ReasoningEffort.HIGH, ReasoningEffort.XHIGH, ReasoningEffort.MAX}
+)
+
 
 SUPPORTED_PARAMS: set[str] = {
     "model",
@@ -130,6 +150,50 @@ def _is_thinking_disabled(payload: Dict[str, Any]) -> bool:
     return False
 
 
+def _requested_reasoning_effort(payload: Dict[str, Any]) -> Optional[str]:
+    effort = payload.get("reasoning_effort")
+    return effort if isinstance(effort, str) and effort else None
+
+
+def _reasoning_is_disabled(payload: Dict[str, Any]) -> bool:
+    if _is_thinking_disabled(payload):
+        return True
+    effort = _requested_reasoning_effort(payload)
+    return effort is not None and effort.lower() in REASONING_DISABLE_TOKENS
+
+
+def _reasoning_is_requested(payload: Dict[str, Any]) -> bool:
+    if _reasoning_is_disabled(payload):
+        return False
+    thinking = payload.get("thinking")
+    if isinstance(thinking, dict) and thinking.get("type") == "enabled":
+        return True
+    return _requested_reasoning_effort(payload) is not None
+
+
+def _effort_hits_the_wall(effort: Optional[str]) -> bool:
+    if effort is None:
+        return False
+    try:
+        return ReasoningEffort(effort.lower()) in WALL_TRIGGERING_EFFORTS
+    except ValueError:
+        return False
+
+
+def _wall_budget_level_for(effort: Optional[str]) -> Optional[str]:
+    if effort is None:
+        return None
+    try:
+        parsed = ReasoningEffort(effort.lower())
+    except ValueError:
+        return ReasoningEffort.HIGH.value
+    if parsed in (ReasoningEffort.MINIMAL, ReasoningEffort.LOW):
+        return ReasoningEffort.LOW.value
+    if parsed is ReasoningEffort.MEDIUM:
+        return ReasoningEffort.MEDIUM.value
+    return ReasoningEffort.HIGH.value
+
+
 @final
 class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
     provider_env_name: str = "perchai"
@@ -170,38 +234,65 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         return normalized
 
     def _get_thinking_budget(
-        self, model_name: str, reasoning_effort: Optional[str]
+        self, model_name: str, level: Optional[str]
     ) -> Optional[int]:
-        if not reasoning_effort:
-            return None
         normalized_model = self._normalize_model_name_for_env(model_name)
-        normalized_level = reasoning_effort.upper()
-        model_specific_key = (
-            f"PERCHAI_{normalized_model}_THINKING_BUDGET_{normalized_level}"
-        )
-        model_specific_value = os.environ.get(model_specific_key)
-        if model_specific_value is not None:
-            try:
-                return int(model_specific_value)
-            except (ValueError, TypeError):
-                lib_logger.debug(
-                    f"Invalid thinking budget in {model_specific_key}="
-                    f"{model_specific_value!r}, ignoring"
-                )
-        level_default_key = f"PERCHAI_THINKING_BUDGET_{normalized_level}_DEFAULT"
-        level_default_value = os.environ.get(level_default_key)
-        if level_default_value is not None:
-            try:
-                return int(level_default_value)
-            except (ValueError, TypeError):
-                lib_logger.debug(
-                    f"Invalid thinking budget in {level_default_key}="
-                    f"{level_default_value!r}, ignoring"
-                )
-        model_lower = model_name.lower()
-        if "deepseek" in model_lower:
+        if level:
+            normalized_level = level.upper()
+            model_specific_key = (
+                f"PERCHAI_{normalized_model}_THINKING_BUDGET_{normalized_level}"
+            )
+            model_specific_value = os.environ.get(model_specific_key)
+            if model_specific_value is not None:
+                return self._parse_budget(model_specific_key, model_specific_value)
+            level_default_key = (
+                f"PERCHAI_THINKING_BUDGET_{normalized_level}_DEFAULT"
+            )
+            level_default_value = os.environ.get(level_default_key)
+            if level_default_value is not None:
+                return self._parse_budget(level_default_key, level_default_value)
+        if "deepseek" in model_name.lower():
             return 3000
         return None
+
+    def _parse_budget(self, key: str, value: str) -> Optional[int]:
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            lib_logger.debug(f"Invalid thinking budget in {key}={value!r}, ignoring")
+            return None
+
+    def _apply_reasoning_wall_protection(
+        self, payload: Dict[str, Any], model_name: str
+    ) -> None:
+        """
+        Some Perchai-hosted models (notably DeepSeek-v4-flash) hard-stop
+        chain-of-thought mid-sentence once reasoning crosses a server-side
+        token budget.
+        The only reliable protection is a thinking_budget passed
+        through chat_template_kwargs, which the Perchai server honors. This
+        runs in _build_payload so it fires for whatever shape the client
+        used to request reasoning.
+
+        Models with no configured budget have no known wall, so they are left
+        byte-for-byte untouched.
+        """
+        if not _reasoning_is_requested(payload):
+            return
+        requested_effort = _requested_reasoning_effort(payload)
+        budget = self._get_thinking_budget(
+            model_name, _wall_budget_level_for(requested_effort)
+        )
+        if budget is None:
+            return
+        if _effort_hits_the_wall(requested_effort):
+            payload["reasoning_effort"] = ReasoningEffort.LOW.value
+        template_kwargs = payload.get("chat_template_kwargs")
+        if not isinstance(template_kwargs, dict):
+            template_kwargs = {}
+        template_kwargs.setdefault("enable_thinking", True)
+        template_kwargs.setdefault("thinking_budget", budget)
+        payload["chat_template_kwargs"] = template_kwargs
 
     def transform_request(
         self, kwargs: Dict[str, Any], model: str, credential: str
@@ -219,37 +310,6 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
                     del msg["reasoning_content"]
                     if not modifications.count("stripped reasoning_content from assistant messages"):
                         modifications.append("stripped reasoning_content from assistant messages")
-
-        # Cap reasoning_effort to "low" to avoid upstream truncation.
-        # DeepSeek maps medium->high upstream, so medium is not a real
-        # reduction. "low" is the only effort that shortens reasoning.
-        reasoning_effort = extra_body.get("reasoning_effort")
-        if reasoning_effort == "high":
-            extra_body["reasoning_effort"] = "low"
-            if not modifications.count("capped reasoning_effort from high to low"):
-                modifications.append("capped reasoning_effort from high to low")
-
-        # Inject a thinking_budget via chat_template_kwargs (vLLM/SGLang
-        # passthrough the Perchai server honors). Configurable per-model
-        # and per-reasoning-level via environment variables.
-        if (
-            isinstance(thinking, dict)
-            and thinking.get("type") == "enabled"
-            and reasoning_effort in ("medium", "high")
-        ):
-            budget = self._get_thinking_budget(model, reasoning_effort)
-            if budget is not None:
-                ctk = extra_body.get("chat_template_kwargs")
-                if not isinstance(ctk, dict):
-                    ctk = {}
-                ctk.setdefault("enable_thinking", True)
-                ctk.setdefault("thinking_budget", budget)
-                extra_body["chat_template_kwargs"] = ctk
-                modification_msg = (
-                    f"injected thinking_budget={budget} via chat_template_kwargs"
-                )
-                if not modifications.count(modification_msg):
-                    modifications.append(modification_msg)
 
         kwargs["extra_body"] = extra_body
 
@@ -988,9 +1048,8 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
 
         return None
 
-    @staticmethod
     def _build_payload(
-        model_name: str, kwargs: Dict[str, Any]
+        self, model_name: str, kwargs: Dict[str, Any]
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             key: value
@@ -1012,8 +1071,10 @@ class PerchaiProvider(PerchaiQuotaTracker, ProviderInterface):
         if isinstance(extra_body, dict):
             payload.update(extra_body)
 
-        if _is_thinking_disabled(payload):
+        if _reasoning_is_disabled(payload):
             payload.pop("reasoning_effort", None)
+        else:
+            self._apply_reasoning_wall_protection(payload, model_name)
 
         return payload
 

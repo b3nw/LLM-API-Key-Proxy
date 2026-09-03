@@ -144,54 +144,152 @@ async def test_sync_transform_request_hook_runs_through_transforms(
     )
 
 
+# ---------------------------------------------------------------------------
+# Reasoning-wall adapter (invisible DeepSeek plumbing, inside the provider)
+#
+# Seam: what actually reaches the upstream request. Built the same way
+# acompletion builds it: _build_payload -> _build_envelope -> ["request"].
+# These protect the guarantee that a configured thinking_budget reaches
+# upstream no matter how the client expressed reasoning (top-level
+# reasoning_effort, an extra_body thinking dict, or a model-option alias).
+# ---------------------------------------------------------------------------
+
+DEEPSEEK_MODEL = "perchai/wandb-deepseek-ai-deepseek-v4-flash-0731"
+DEEPSEEK_BUDGET_ENV_PREFIX = (
+    "PERCHAI_WANDB_DEEPSEEK_AI_DEEPSEEK_V4_FLASH_0731_THINKING_BUDGET_"
+)
+
+
+def _upstream_request_for(
+    provider: "PerchaiProvider", kwargs: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Mirror acompletion's request build: payload -> envelope -> request."""
+    model = kwargs["model"]
+    model_name = model.split("/", 1)[1] if "/" in model else model
+    payload = provider._build_payload(model_name=model_name, kwargs=kwargs)
+    envelope = provider._build_envelope(model=model, payload=payload)
+    return envelope["request"]
+
+
+def test_toplevel_high_effort_injects_wall_budget_and_downgrades(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenCode sends reasoning_effort top-level with no thinking dict.
+
+    The wall budget must still reach upstream, and high is downgraded to low
+    internally (DeepSeek-flash gains little from long thinking, and mid-work
+    truncation is the painful symptom).
+    """
+    monkeypatch.setenv(DEEPSEEK_BUDGET_ENV_PREFIX + "HIGH", "2500")
+    given_kwargs: Dict[str, Any] = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [{"role": "user", "content": "think hard"}],
+        "reasoning_effort": "high",
+    }
+    when_request = _upstream_request_for(PerchaiProvider(), given_kwargs)
+    when_ctk = when_request.get("chat_template_kwargs") or {}
+    assert when_ctk.get("thinking_budget") == 2500, (
+        "top-level high effort must inject the configured wall budget, "
+        f"got chat_template_kwargs: {when_ctk!r}"
+    )
+    assert when_request.get("reasoning_effort") == "low", (
+        "high effort must be downgraded to low internally, "
+        f"got {when_request.get('reasoning_effort')!r}"
+    )
+
+
 @pytest.mark.parametrize(
-    "given_effort,expected_effort",
+    "given_effort,expected_budget_env,expected_budget,expected_effort_after",
     [
-        pytest.param("high", "low", id="high_capped_to_low"),
-        pytest.param("medium", "medium", id="medium_unchanged"),
-        pytest.param("low", "low", id="low_unchanged"),
+        pytest.param("max", "HIGH", 2500, "low", id="max_capped_and_downgraded"),
+        pytest.param("xhigh", "HIGH", 2500, "low", id="xhigh_capped_and_downgraded"),
+        pytest.param("medium", "MEDIUM", 1000, "medium", id="medium_own_bucket"),
+        pytest.param("low", "LOW", 1500, "low", id="low_own_bucket"),
     ],
 )
-def test_reasoning_effort_capped_to_low(
-    given_effort: str, expected_effort: str
+def test_other_efforts_inject_wall_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    given_effort: str,
+    expected_budget_env: str,
+    expected_budget: int,
+    expected_effort_after: str,
 ) -> None:
-    given_provider = PerchaiProvider()
+    """Every effort level that triggers reasoning must get its wall budget.
+
+    Previously only medium/high were handled, so max/xhigh/low silently ran
+    into the upstream truncation wall. Only the high bucket is downgraded to
+    low; medium and low keep the effort the client asked for.
+    """
+    monkeypatch.setenv(DEEPSEEK_BUDGET_ENV_PREFIX + expected_budget_env, str(expected_budget))
     given_kwargs: Dict[str, Any] = {
-        "model": "perchai/wandb-deepseek-ai-deepseek-v4-flash-0731",
-        "messages": [{"role": "user", "content": "think hard"}],
-        "extra_body": {
-            "thinking": {"type": "enabled"},
-            "reasoning_effort": given_effort,
-        },
+        "model": DEEPSEEK_MODEL,
+        "messages": [{"role": "user", "content": "think"}],
+        "reasoning_effort": given_effort,
     }
-    given_provider.transform_request(
-        given_kwargs, given_kwargs["model"], "test-cred"
+    when_request = _upstream_request_for(PerchaiProvider(), given_kwargs)
+    when_ctk = when_request.get("chat_template_kwargs") or {}
+    assert when_ctk.get("thinking_budget") == expected_budget, (
+        f"effort {given_effort!r} must inject {expected_budget_env} budget "
+        f"{expected_budget}, got {when_ctk!r}"
     )
-    then_effort = given_kwargs["extra_body"].get("reasoning_effort")
-    assert then_effort == expected_effort, (
-        f"reasoning_effort capping broken: expected {expected_effort!r}, "
-        f"got {then_effort!r}"
+    assert when_request.get("reasoning_effort") == expected_effort_after, (
+        f"effort {given_effort!r} must reach upstream as {expected_effort_after!r}, "
+        f"got {when_request.get('reasoning_effort')!r}"
     )
 
 
-def test_high_effort_injects_thinking_budget() -> None:
-    given_provider = PerchaiProvider()
+def test_absent_effort_with_thinking_enabled_injects_model_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """thinking enabled but no reasoning_effort: the model default budget
+    (deepseek fallback = 3000) must still cap reasoning under the wall."""
     given_kwargs: Dict[str, Any] = {
-        "model": "perchai/wandb-deepseek-ai-deepseek-v4-flash-0731",
-        "messages": [{"role": "user", "content": "think hard"}],
-        "extra_body": {
-            "thinking": {"type": "enabled"},
-            "reasoning_effort": "high",
-        },
+        "model": DEEPSEEK_MODEL,
+        "messages": [{"role": "user", "content": "think"}],
+        "extra_body": {"thinking": {"type": "enabled"}},
     }
-    given_provider.transform_request(
-        given_kwargs, given_kwargs["model"], "test-cred"
+    when_request = _upstream_request_for(PerchaiProvider(), given_kwargs)
+    when_ctk = when_request.get("chat_template_kwargs") or {}
+    assert when_ctk.get("thinking_budget") == 3000, (
+        "deepseek model default budget must apply when effort is absent, "
+        f"got {when_ctk!r}"
     )
-    then_chat_template = given_kwargs["extra_body"].get("chat_template_kwargs", {})
-    then_budget = then_chat_template.get("thinking_budget")
-    assert then_budget is not None, (
-        "high effort must inject thinking_budget for deepseek, "
-        f"got chat_template_kwargs: {then_chat_template!r}"
+
+
+def test_reasoning_disabled_does_not_inject_wall_budget() -> None:
+    """When reasoning is off there is no wall to protect against: no budget,
+    and reasoning_effort must not be forwarded."""
+    given_kwargs: Dict[str, Any] = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [{"role": "user", "content": "answer directly"}],
+        "reasoning_effort": "disable",
+    }
+    when_request = _upstream_request_for(PerchaiProvider(), given_kwargs)
+    assert "chat_template_kwargs" not in when_request, (
+        f"disabled reasoning must not inject chat_template_kwargs, "
+        f"got {when_request.get('chat_template_kwargs')!r}"
+    )
+    assert "reasoning_effort" not in when_request, (
+        "disabled reasoning must drop reasoning_effort from the request"
+    )
+
+
+def test_non_wall_model_is_left_untouched() -> None:
+    """Models without a configured wall (gemma) must be byte-for-byte
+    unchanged: no budget injected, effort not downgraded."""
+    given_kwargs: Dict[str, Any] = {
+        "model": "perchai/bedrock-mantle-google-gemma-4-e2b",
+        "messages": [{"role": "user", "content": "think"}],
+        "reasoning_effort": "high",
+    }
+    when_request = _upstream_request_for(PerchaiProvider(), given_kwargs)
+    assert "chat_template_kwargs" not in when_request, (
+        "non-wall model must not get chat_template_kwargs, "
+        f"got {when_request.get('chat_template_kwargs')!r}"
+    )
+    assert when_request.get("reasoning_effort") == "high", (
+        "non-wall model effort must not be downgraded, "
+        f"got {when_request.get('reasoning_effort')!r}"
     )
 
 
@@ -644,4 +742,50 @@ async def test_live_provider_acompletion_returns_200_against_app_perchai() -> No
         "acompletion returned an empty reply - upstream likely 403'd "
         "perch_surface_required or returned ok=false: "
         f"{when_response!r}"
+    )
+
+
+@pytest.mark.live
+@live_only
+@pytest.mark.asyncio
+async def test_live_toplevel_effort_reaches_deepseek_under_wall_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end guard for the invisible reasoning-wall adapter.
+
+    Exercises the exact OpenCode shape that used to bypass the cap: a
+    top-level reasoning_effort with no thinking dict, streamed to
+    DeepSeek-v4-flash through the production acompletion path (independent
+    session, turn-ticket, perchai-cli User-Agent). A small budget keeps the
+    call cheap while proving the thinking_budget reaches upstream and
+    reasoning streams out and completes instead of truncating mid-sentence.
+    """
+    monkeypatch.setenv(
+        "PERCHAI_WANDB_DEEPSEEK_AI_DEEPSEEK_V4_FLASH_0731_THINKING_BUDGET_HIGH",
+        "400",
+    )
+    given_provider = PerchaiProvider()
+    reasoning_chars = 0
+    answer_chars = 0
+    async with httpx.AsyncClient() as given_client:
+        when_stream = await given_provider.acompletion(
+            given_client,
+            model="perchai/wandb-deepseek-ai-deepseek-v4-flash-0731",
+            messages=[{"role": "user", "content": "What is 17*23? Work it out."}],
+            reasoning_effort="high",
+            max_tokens=512,
+            stream=True,
+        )
+        async for chunk in when_stream:
+            delta = chunk.choices[0].delta
+            reasoning_chars += len(getattr(delta, "reasoning_content", None) or "")
+            answer_chars += len(getattr(delta, "content", None) or "")
+    assert reasoning_chars > 0, (
+        "top-level high effort must stream reasoning end-to-end; the wall "
+        f"budget path is not reaching upstream (reasoning={reasoning_chars}, "
+        f"answer={answer_chars})"
+    )
+    assert answer_chars > 0, (
+        f"model must still answer under the capped reasoning budget, "
+        f"got reasoning={reasoning_chars}, answer={answer_chars}"
     )

@@ -827,3 +827,73 @@ Files changed:
 - tests/test_perchai_auth.py (-15): no net change - the 15 removed lines
   are stale debug/temp test scaffolding from earlier this session that
   was already removed in a prior commit; this commit keeps the file clean.
+
+## 2026-09-03: Reasoning-wall adapter - make thinking_budget reach upstream for every client shape
+
+**Branch**: `feat/provider-app.perchai`
+
+**Problem**: DeepSeek-v4-flash reasoning still truncated mid-sentence even
+though a `thinking_budget` cap existed. Investigation showed the cap was
+applied only inside `transform_request` under a narrow conjunction: an
+`extra_body` `thinking` dict AND `reasoning_effort in ("medium","high")`.
+Four gaps meant most real traffic never got the cap:
+1. Gated on medium/high only - `absent`/`low`/`minimal`/`xhigh`/`max` skipped.
+2. `transform_request` reads `reasoning_effort` only from `extra_body`;
+   OpenCode sends it top-level.
+3. Alias model-options (`PERCHAI_MODELS`) merge into `extra_body` at
+   transforms step 3, AFTER the `transform_request` hook at step 2.
+4. The Anthropic/Claude-Code translator sets `reasoning_effort` top-level and
+   never a `thinking` dict, so the hook condition never fires.
+
+**Root cause proof**: payload matrix over effort x thinking showed budget only
+on medium/high with a thinking dict. A live probe through the raw path
+confirmed the budget, when present, keeps reasoning clean (3187 chars + full
+answer); the failures were the budget not being sent at all.
+
+**Solution**: move the whole adapter to `_build_payload`, the single choke
+point that runs after every transform, so `reasoning_effort` is settled no
+matter which shape the client used. Express each branch as a named predicate
+with a why-docstring. Centralize effort tokens in a `ReasoningEffort` StrEnum.
+Scope the treatment to models that actually have a configured wall budget;
+non-wall models (gemma/qwen/glm) stay byte-for-byte untouched. Kept the
+internal `high -> low` downgrade (user-confirmed: flash gains little from long
+thinking; uninterrupted reasoning matters more). Budget is looked up by the
+*requested* effort so the operator's `..._THINKING_BUDGET_HIGH` still applies.
+No new user-facing configuration; all plumbing invisible inside the provider.
+
+**Files changed**:
+- `src/rotator_library/providers/perchai_provider.py`:
+  - Added `ReasoningEffort` StrEnum, `REASONING_DISABLE_TOKENS`,
+    `WALL_TRIGGERING_EFFORTS`.
+  - Added module predicates: `_requested_reasoning_effort`,
+    `_reasoning_is_disabled`, `_reasoning_is_requested`,
+    `_effort_hits_the_wall`, `_wall_budget_level_for`.
+  - `_get_thinking_budget` now takes a level (None -> model default) and a
+    `_parse_budget` helper.
+  - New `_apply_reasoning_wall_protection` method.
+  - `_build_payload` became an instance method and calls the adapter (or drops
+    `reasoning_effort` when reasoning is disabled).
+  - `transform_request` trimmed to only the `reasoning_content` stripping.
+- `tests/test_perchai_provider.py`:
+  - Added seam tests (`_upstream_request_for` helper mirroring acompletion):
+    toplevel-high, other-efforts (max/xhigh/medium/low), absent-effort default,
+    reasoning-disabled, non-wall-model-untouched.
+  - Added `test_live_toplevel_effort_reaches_deepseek_under_wall_budget`
+    (streaming, prod `acompletion` path, budget=400).
+  - Removed obsolete `test_reasoning_effort_capped_to_low` and
+    `test_high_effort_injects_thinking_budget` (superseded at the seam).
+
+**Verification**:
+```bash
+uv run python3 -m py_compile src/rotator_library/providers/perchai_provider.py tests/test_perchai_provider.py
+uv run ruff check src/rotator_library/providers/perchai_provider.py tests/test_perchai_provider.py --select F401,F811,F821,E9
+uv run pytest tests/ -k "not live" -q          # 543 passed; only pre-existing failures/errors
+uv run pytest "tests/test_perchai_provider.py::test_live_toplevel_effort_reaches_deepseek_under_wall_budget" -q   # live, PASSED
+```
+Non-live full suite: 543 passed. The 3 failures (deepseek_provider mock-await,
+umans, xai) and 15 errors (failure_logger, paths) are pre-existing and identical
+with these changes stashed.
+
+**Live note**: raw-httpx `_live_thinking_metrics` trips Perch's direct-access
+surface gate (403, account-suspension warning). Live guards must use the
+`acompletion` prod path (independent session + turn-ticket + perchai-cli UA).

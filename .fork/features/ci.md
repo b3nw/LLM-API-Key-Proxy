@@ -54,3 +54,18 @@ Verification:
 - Env var names cross-checked against `action.yml`, `docs/configs/.ai-review.yaml`,
   and `docs/ci/github.yaml` from the upstream repo.
 - v0.69.0 confirmed as latest release (July 8, 2026).
+
+## 2026-09-03 — Support fork PRs via pull_request_target in AI PR Review workflow
+
+Branch: `fix/ci-ai-review-pull-request-target`
+Files:
+- `.github/workflows/ai-review.yml`
+
+Notes:
+- Replaces `on: pull_request` with `on: pull_request_target` so external contributor
+  fork PRs receive repository secrets/variables and no longer crash with Pydantic
+  validation errors.
+- Pins checkout ref to `github.event.pull_request.head.sha` with `actions/checkout@v4`.
+- Adds fallback between Secrets and Variables for `LLM_PROXY_URL`, `LLM_PROXY_API_KEY`,
+  and `LLM_PROXY_MODEL`.
+- Uses sensible fallback model `codex/gpt-5.6-sol` if `LLM_PROXY_MODEL` is empty.

@@ -192,11 +192,20 @@ class RequestExecutor:
         return True
 
     async def _resolve_http_client(
-        self, provider: str, credential: str, stable_id: str
+        self,
+        provider: str,
+        credential: str,
+        stable_id: str,
+        resolved_spec: Optional[Any] = None,
     ) -> httpx.AsyncClient:
         """Resolve the httpx client for a request, using proxy pool if available."""
         if self._client_pool:
-            return await self._client_pool.get_client(provider, credential, stable_id)
+            return await self._client_pool.get_client(
+                provider,
+                credential,
+                stable_id,
+                resolved_spec=resolved_spec,
+            )
         return self._http_client
 
     def _resolve_proxy_spec(
@@ -776,11 +785,6 @@ class RequestExecutor:
                                 # Pre-request callback
                                 await self._run_pre_request_callback(context, kwargs)
 
-                                # Resolve proxy-aware HTTP client
-                                request_client = await self._resolve_http_client(
-                                    provider, cred, cred_context.stable_id
-                                )
-
                                 # Resolve proxy once for logging, metadata, and client injection
                                 proxy_spec, proxy_name = self._resolve_proxy_spec(
                                     provider, cred, cred_context.stable_id
@@ -792,6 +796,12 @@ class RequestExecutor:
                                     )
                                 if context.transaction_logger:
                                     context.transaction_logger.proxy_name = proxy_name
+
+                                # Resolve proxy-aware HTTP client (reusing the resolved spec)
+                                request_client = await self._resolve_http_client(
+                                    provider, cred, cred_context.stable_id,
+                                    resolved_spec=proxy_spec,
+                                )
 
                                 is_embedding = getattr(context, "request_type", "chat") == "embedding"
 
@@ -1076,7 +1086,8 @@ class RequestExecutor:
                             if context.transaction_logger:
                                 context.transaction_logger.proxy_name = proxy_name_s
                             request_client_s = await self._resolve_http_client(
-                                provider, cred, cred_context.stable_id
+                                provider, cred, cred_context.stable_id,
+                                resolved_spec=proxy_spec_s,
                             )
 
                             # Execute request with retries

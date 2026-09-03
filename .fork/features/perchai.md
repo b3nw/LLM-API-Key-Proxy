@@ -780,3 +780,50 @@ Matches the CLI bundle's own `||"unknown"` fallback byte-for-byte.
 The live test was non-destructive: the operator's session was not rotated
 (session file mtime unchanged before/after). The token in use was already
 fresh, so no refresh was triggered.
+
+## 2026-09-03: Real e2e test for the perchai-cli User-Agent fix + restored live probes
+
+Three live tests in `tests/test_perchai_provider.py`
+(`test_option_id_routes_to_real_upstream[*]`,
+`test_live_thinking_disabled_suppresses_reasoning`,
+`test_live_thinking_effort_modulates_reasoning_volume`)
+were silently 403'd by Perch's surface gate because they used raw
+`httpx.AsyncClient` without setting `User-Agent`. httpx defaults to
+`python-httpx/<ver>`, which Perch fingerprints and rejects with
+`perch_surface_required` regardless of which endpoint it hits.
+
+The deployed proxy already sends `perchai-cli/<version>` on every
+outbound call. The seam test in `tests/test_perchai_auth.py`
+(`test_outbound_perchai_requests_send_cli_user_agent`) proves the
+wire-level UA against a fake auth server. These three live probes
+now send the same header via `PerchaiAuthBase.user_agent()` so they
+exercise the actual production fingerprint.
+
+Added `test_live_provider_acompletion_returns_200_against_app_perchai`:
+the first e2e that goes through `PerchaiProvider.acompletion` against
+live `app.perchai.app`. Uses `perchai/bedrock-mantle-google-gemma-4-e2b`
+(Starter tier, smallest, fastest) with `max_tokens=16`. Asserts the
+response has non-empty content. If the UA fix is ever reverted, the
+turn-ticket mint 403s with `perch_surface_required` and `acompletion`
+raises `PerchaiAuthError` before any model call is attempted.
+
+Verification:
+- Live e2e: PASSED against `app.perchai.app` (HTTP 200, real model response).
+- Live probes: 3/4 now pass (gemma-4-e2b, deepseek-v4-flash, thinking-disabled).
+  The 4th (`test_live_thinking_effort_modulates_reasoning_volume`) still
+  fails on `low_reasoning > 0` - upstream's deepseek-v4-flash returns 0
+  reasoning chars at low effort. Pre-existing flakiness on upstream
+  reasoning volume, not UA-related.
+- Full suite (no live): same baseline as previous session -
+  539 passed, 3 pre-existing failures (deepseek_provider, umans_quota_tracker,
+  x_ai_quota_tracker), 15 pre-existing errors (failure_logger, paths).
+
+Branch: `feat/provider-app.perchai` @ `abc5652`
+Pushed: https://github.com/kevincojean/com.github.llmapikeyproxy-fork/tree/feat/provider-app.perchai
+
+Files changed:
+- tests/test_perchai_provider.py (+37): added the real e2e, added
+  `"User-Agent": given_auth.user_agent()` to the 3 broken raw-httpx probes.
+- tests/test_perchai_auth.py (-15): no net change - the 15 removed lines
+  are stale debug/temp test scaffolding from earlier this session that
+  was already removed in a prior commit; this commit keeps the file clean.

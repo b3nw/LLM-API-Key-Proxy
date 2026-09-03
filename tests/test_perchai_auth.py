@@ -646,3 +646,50 @@ async def test_outbound_perchai_requests_send_cli_user_agent(
         f"got {auth_server.state.model_call_user_agents!r}"
     )
 
+
+async def test_password_credential_refreshes_on_401_via_cached_session(
+    auth_server: AuthServer, tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Real seam: cached password session + server-side 401 must refresh via the cached refresh chain, not crash with 'credential file not found at password:/perchai/1'."""
+    monkeypatch.setattr(
+        "rotator_library.utils.paths.get_default_root", lambda: tmp_path
+    )
+    given_credential = given_password_credentials(monkeypatch, auth_server)
+
+    given_cache_dir = tmp_path / "oauth_creds"
+    given_cache_dir.mkdir()
+    write_session(
+        given_cache_dir / "perchai_password_1.json",
+        app_url=auth_server.app_url,
+        access="access-cached",
+        refresh="refresh-cached",
+        expires_at=int(time.time()) + 3000,
+    )
+    auth_server.state.adopt_initial_refresh("refresh-cached")
+
+    given_provider = PerchaiProvider()
+    async with httpx.AsyncClient() as given_client:
+        when_response = await given_provider.acompletion(
+            given_client,
+            model=MODEL,
+            messages=MESSAGES,
+            credential_identifier=given_credential,
+            stream=False,
+        )
+
+    assert when_response.choices[0].message.content == auth_server.state.completion_text, (
+        "a 401 from the server on the first model call must trigger refresh "
+        "and retry, not bubble 'credential file not found'"
+    )
+    assert auth_server.state.rotations == 1, (
+        "exactly one refresh must run to recover from the 401, "
+        f"got {auth_server.state.rotations}"
+    )
+    assert auth_server.state.model_calls[-1] == f"Bearer {auth_server.state.issued_access}", (
+        "the retry must carry the freshly issued access token, not the cached one"
+    )
+    assert auth_server.state.password_signins == 0, (
+        "refresh must succeed via the cached refresh chain - password "
+        "signin is only the dead-refresh fallback, not the 401 fallback"
+    )
+

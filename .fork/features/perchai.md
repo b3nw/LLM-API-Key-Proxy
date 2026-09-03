@@ -897,3 +897,77 @@ with these changes stashed.
 **Live note**: raw-httpx `_live_thinking_metrics` trips Perch's direct-access
 surface gate (403, account-suspension warning). Live guards must use the
 `acompletion` prod path (independent session + turn-ticket + perchai-cli UA).
+
+## 2026-09-03: Route password:// through the cached session in load_session()
+
+**Branch**: `feat/provider-app.perchai`
+
+**Reported**: after a reboot every password-credentialed Perchai request
+errors with `PerchaiAuthError: Perchai credential file not found at
+password:/perchai/1. Run `perch login` to re-authenticate.` Three requests
+in a row, two different models, both with `api_key_ending:
+...ssword:...chai/1` - the password env-var identifier.
+
+**Root cause**: `PerchaiAuthBase.load_session()` routed every non-empty
+`_credential_path` through `_load_session_from_path()`, which treats the
+value as a filesystem path. `Path("password://perchai/1").expanduser()`
+normalises the doubled slash to a single one, `is_file()` is False, and the
+loader raises the misleading "credential file not found" - even though
+`PERCHAI_EMAIL_1` / `PERCHAI_PASSWORD_1` are set and a fresh password
+signin would have produced a working token in a heartbeat.
+
+`ensure_access_token()` was not affected because it dispatches the
+PASSWORD kind to `_ensure_password_session()` before `load_session()` is
+reached. The bug only fires from the call sites that bypass that
+dispatch and call `load_session()` directly with the
+`password://perchai/<index>` URI still set on `self._credential_path`:
+
+- `refresh_on_401()` (model-call returns 401 -> provider triggers recovery)
+- `_ensure_turn_ticket()` 401 branch (`_rotate_refresh_token(self.load_session())`)
+- `_adopt_persisted_session()` (refresh-token-already-used fallback)
+
+The post-reboot trigger is the common case: the cached
+`oauth_creds/perchai_password_1.json` from the previous run holds an
+access token that is still valid by our clock but the server has since
+rotated/revoked (GoTrue reuse detection, or the CLI running concurrently
+in another consumer). First model call gets 401, `refresh_on_401` fires,
+`load_session` raises.
+
+**Fix**: `load_session()` now dispatches PASSWORD kind to
+`_load_cached_session()`, which reads the same
+`oauth_creds/perchai_password_<index>.json` file that
+`_ensure_password_session` uses. The cached refresh token then flows
+into `_rotate_refresh_token()` and the rotation proceeds normally.
+Non-PASSWORD kinds still fall through to `_load_session_from_path()`
+unchanged.
+
+**Files changed**:
+- `src/rotator_library/providers/perchai_auth_base.py` - `load_session()`
+  dispatches PASSWORD kind to `_load_cached_session()`.
+- `tests/test_perchai_auth.py` - one new seam test:
+  `test_password_credential_refreshes_on_401_via_cached_session`. Writes
+  a cached password session with a still-valid-by-clock access token
+  that the fake server doesn't recognise, makes a model-call, and
+  asserts the call recovers via one refresh (not via password signin).
+  Without the fix this raises the exact reported error from the
+  `refresh_on_401` -> `load_session` -> `_load_session_from_path` chain.
+
+**Verification**:
+```bash
+uv run python3 -m py_compile src/rotator_library/providers/perchai_auth_base.py tests/test_perchai_auth.py
+uv run ruff check src/rotator_library/providers/perchai_auth_base.py tests/test_perchai_auth.py --select F401,F811,F821,E9
+uv run pytest tests/test_perchai_auth.py tests/test_perchai_provider.py -q -m "not live"   # 26 passed (was 25, +1 new), no regressions
+uv run pytest tests/ -q -m "not live"   # same 3 pre-existing failures + 15 errors, 544 passed - the new test is the only delta
+```
+
+**Not run: the live suite.** Same rationale as previous entries: the
+live session is the operator's only one, and rotating it just to verify
+a path that the local fake server already exercises is not worth the
+risk.
+
+**Acceptance test after deploy**: with the cached
+`oauth_creds/perchai_password_1.json` already on disk, make a request
+that gets a 401 from the model-call (e.g. delete the live access token
+in Perch's web UI, or wait for it to age past the 90s CLI buffer), and
+confirm one refresh-then-retry succeeds instead of seeing the
+"credential file not found" error in the proxy logs.

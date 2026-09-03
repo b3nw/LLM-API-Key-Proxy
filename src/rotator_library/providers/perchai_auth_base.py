@@ -162,6 +162,16 @@ class PerchaiAuthBase:
 
     def load_session(self) -> PerchaiSession:
         if self._credential_path:
+            if self._credential_kind() is PerchaiCredentialKind.PASSWORD:
+                cached = self._load_cached_session()
+                if cached is None:
+                    raise PerchaiAuthError(
+                        f"Perchai password credential cache not found for "
+                        f"{self._credential_path}. Sign in via "
+                        f"PERCHAI_EMAIL_<N> and PERCHAI_PASSWORD_<N> to "
+                        f"bootstrap the session."
+                    )
+                return cached
             return self._load_session_from_path(self._credential_path)
 
         session_path = _resolve_session_file()

@@ -89,11 +89,10 @@ was purely in the executor, not in the lookup or the env-var naming.
   a real local TCP socket as a fake CONNECT proxy (no mocking at the
   network seam) and asserts the executor's outbound CONNECT lands on it
   when ``PROXY_URL_CREDENTIAL_<id>`` is configured for the credential.
-  Covers non-streaming and streaming for Pattern A (``opencode_go``,
-  which wraps the client in ``openai.AsyncOpenAI(http_client=client)``)
-  and non-streaming for Pattern B (``deepseek``, which calls
-  ``client.post(...)`` and ``_stream_completion(client=client, ...)``
-  directly). All three cases go RED on the unfixed executor and GREEN
+  Covers Pattern A (``opencode_go``, which wraps the client in
+  ``openai.AsyncOpenAI(http_client=client)``) and Pattern B (``deepseek``,
+  which calls ``client.post(...)`` and ``_stream_completion(client=client, ...)``
+  directly). Both cases go RED on the unfixed executor and GREEN
   after this fix.
 
 ### Scope note

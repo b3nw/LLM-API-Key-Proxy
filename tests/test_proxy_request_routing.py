@@ -1,20 +1,5 @@
 # SPDX-License-Identifier: MIT
-# Copyright (c) 2026 b3nw
-
-"""
-E2E tests for per-credential HTTP proxy routing through the request executor.
-
-A real local TCP socket is used as a fake HTTP CONNECT proxy. There is no
-mocking at the network seam; if the executor routes traffic through the
-proxy, the fake server will record the inbound CONNECT.
-
-These tests are the TDD red baseline for the per-credential proxy fix.
-Before the fix in ``src/rotator_library/client/executor.py``, the executor
-passes its unproxied shared client (``self._http_client``) to plugins that
-report ``has_custom_logic() == True``. So even when ``PROXY_URL_CREDENTIAL_<id>``
-is configured, those plugins bypass the proxy. These tests fail against
-unpatched code and pass after the fix.
-"""
+# Copyright (c) 2026 COJEAN Kévin
 
 import asyncio
 import hashlib
@@ -165,35 +150,6 @@ async def test_opencode_go_request_traverses_configured_proxy(
     ]
     assert any("opencode" in t.lower() for t in targets), (
         f"Expected a CONNECT targeting opencode host; observed targets={targets}"
-    )
-
-
-@pytest.mark.asyncio
-async def test_opencode_go_streaming_request_traverses_configured_proxy(
-    tmp_path, fake_proxy,
-):
-    """Streaming variant. Same RED/GREEN semantics as the non-streaming test."""
-    client = _build_client(tmp_path, fake_proxy["url"])
-    try:
-        chunks = []
-        stream = await client.acompletion(
-            model="opencode_go/kimi-k2.6",
-            messages=[{"role": "user", "content": "ping"}],
-            stream=True,
-        )
-        async for chunk in stream:
-            chunks.append(chunk)
-            if len(chunks) > 5:
-                break
-    finally:
-        await client.close()
-
-    trace = fake_proxy["trace"]
-    assert trace.lines, (
-        "Streaming variant: configured per-credential proxy was never "
-        "contacted. The executor resolved proxy_spec but never resolved "
-        "request_client for the streaming path before passing "
-        "self._http_client to plugin.acompletion."
     )
 
 

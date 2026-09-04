@@ -55,6 +55,7 @@ rules:
     ci:
       - "feat(ci): fork-aware release notes with incremental topic diff"
       - "fix(ci): add AI PR review workflow"
+      - "fix(ci): support fork PRs via pull_request_target in ai-review workflow"
     tooling:
       - "feat(tooling): add AGENTS.md and .agent/ config for linear stack workflow"
       - "fix(tooling): scope fork-stack gate to canonical branch and tolerate transient commits"

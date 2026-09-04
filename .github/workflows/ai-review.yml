@@ -20,7 +20,7 @@
 name: AI PR Review
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, reopened]
     branches:
       - dev
@@ -40,23 +40,24 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           # Fetch full history so git diff operates correctly
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Run AI Review
         uses: Nikita-Filonov/ai-review@v0.69.0
         env:
           # --- LLM Provider & Model Configuration ---
           LLM__PROVIDER: "OPENAI"
-          LLM__META__MODEL: ${{ vars.LLM_PROXY_MODEL }}
+          LLM__META__MODEL: ${{ vars.LLM_PROXY_MODEL || secrets.LLM_PROXY_MODEL || 'codex/gpt-5.6-sol' }}
           LLM__META__MAX_TOKENS: "15000"
           LLM__META__TEMPERATURE: "0.2"
 
           # --- LLM Proxy Masked Routing ---
-          LLM__HTTP_CLIENT__API_URL: ${{ secrets.LLM_PROXY_URL }}
-          LLM__HTTP_CLIENT__API_TOKEN: ${{ secrets.LLM_PROXY_API_KEY }}
+          LLM__HTTP_CLIENT__API_URL: ${{ secrets.LLM_PROXY_URL || vars.LLM_PROXY_URL }}
+          LLM__HTTP_CLIENT__API_TOKEN: ${{ secrets.LLM_PROXY_API_KEY || vars.LLM_PROXY_API_KEY }}
           # Proxy adds a hop; extend timeout beyond the 120s default
           LLM__HTTP_CLIENT__TIMEOUT: "180"
 

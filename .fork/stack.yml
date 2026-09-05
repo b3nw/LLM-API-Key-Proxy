@@ -52,6 +52,7 @@ rules:
     proxy:
       - "feat(proxy): outbound HTTP/SOCKS5 proxy support with per-provider/credential routing"
       - "fix(proxy): resolve per-credential proxy routing and improve observability"
+      - "fix(proxy): route provider plugins with custom logic through the configured proxy"
     ci:
       - "feat(ci): fork-aware release notes with incremental topic diff"
       - "fix(ci): add AI PR review workflow"

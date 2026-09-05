@@ -69,3 +69,15 @@ Notes:
 - Adds fallback between Secrets and Variables for `LLM_PROXY_URL`, `LLM_PROXY_API_KEY`,
   and `LLM_PROXY_MODEL`.
 - Uses sensible fallback model `codex/gpt-5.6-sol` if `LLM_PROXY_MODEL` is empty.
+
+## 2026-09-05 — Allow unsafe PR checkout in AI PR Review workflow
+
+Branch: `fix/ci-ai-review-checkout`
+Files:
+- `.github/workflows/ai-review.yml`
+
+Notes:
+- Sets `allow-unsafe-pr-checkout: true` on `actions/checkout@v4` in `ai-review.yml`.
+  GitHub's `actions/checkout` requires this explicit opt-in when checking out
+  fork PR refs under `pull_request_target`.
+

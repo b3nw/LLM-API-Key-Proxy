@@ -45,6 +45,7 @@ jobs:
           # Fetch full history so git diff operates correctly
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
+          allow-unsafe-pr-checkout: true
 
       - name: Run AI Review
         uses: Nikita-Filonov/ai-review@v0.69.0

@@ -725,7 +725,10 @@ def _convert_messages_to_responses_input(
                         elif ptype == "image_url":
                             image_url = part.get("image_url", {})
                             url = image_url.get("url", "") if isinstance(image_url, dict) else image_url
-                            parts.append({"type": "input_image", "image_url": url})
+                            image = {"type": "input_image", "image_url": url}
+                            if isinstance(image_url, dict) and image_url.get("detail") is not None:
+                                image["detail"] = image_url["detail"]
+                            parts.append(image)
                         elif ptype == "input_image":
                             parts.append({"type": "input_image", "image_url": part.get("image_url", "")})
                 if parts:
@@ -1099,11 +1102,12 @@ async def _parse_response_events(
                     total_tokens=u.get("total_tokens", 0),
                 )
                 input_details = u.get("input_tokens_details") or {}
-                cached = input_details.get("cached_tokens", 0) or 0
-                if cached:
-                    usage.prompt_tokens_details = {
-                        "cached_tokens": cached,
-                    }
+                cached = input_details.get("cached_tokens")
+                if cached is not None:
+                    usage.prompt_tokens_details = {"cached_tokens": cached}
+                reasoning = (u.get("output_tokens_details") or {}).get("reasoning_tokens")
+                if reasoning is not None:
+                    usage.completion_tokens_details = {"reasoning_tokens": reasoning}
 
             final_chunk = litellm.ModelResponse(
                 id=response_id,
@@ -1991,11 +1995,12 @@ class CodexProvider(OpenAIOAuthBase, CodexQuotaTracker, ProviderInterface):
                         )
                         # Map Responses API input_tokens_details to prompt_tokens_details
                         input_details = u.get("input_tokens_details") or {}
-                        cached = input_details.get("cached_tokens", 0) or 0
-                        if cached:
-                            usage.prompt_tokens_details = {
-                                "cached_tokens": cached,
-                            }
+                        cached = input_details.get("cached_tokens")
+                        if cached is not None:
+                            usage.prompt_tokens_details = {"cached_tokens": cached}
+                        reasoning = (u.get("output_tokens_details") or {}).get("reasoning_tokens")
+                        if reasoning is not None:
+                            usage.completion_tokens_details = {"reasoning_tokens": reasoning}
 
                 # Handle errors
                 elif kind == "response.failed":

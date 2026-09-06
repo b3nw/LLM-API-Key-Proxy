@@ -206,7 +206,8 @@ def test_responses_stream_converter():
     assert "response.output_item.added" in events5
     assert "response.function_call_arguments.delta" in events5
 
-    # Test finalization
+    # Test finalization after the upstream finish marker.
+    converter.convert_chunk('data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}')
     events_final = converter.convert_chunk("data: [DONE]")
     assert "response.function_call_arguments.done" in events_final
     assert "response.output_text.done" in events_final
@@ -278,6 +279,7 @@ def test_responses_stream_converter_emits_reasoning_lifecycle():
     assert "response.reasoning_summary_part.added" not in event_types3
 
     # Finalize — should emit summary_text.done, summary_part.done, output_item.done
+    converter.convert_chunk('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}')
     events_final = parse_sse_events(converter.convert_chunk("data: [DONE]"))
     final_types = [e[0] for e in events_final]
     assert "response.reasoning_summary_text.done" in final_types
@@ -307,6 +309,7 @@ def test_responses_stream_converter_allocates_unique_output_indices():
     converter.convert_chunk(f"data: {json.dumps(chunk4)}")
 
     # Finalize
+    converter.convert_chunk('data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}')
     events_final = parse_sse_events(converter.convert_chunk("data: [DONE]"))
 
     # Collect all output_index values from output_item.done events

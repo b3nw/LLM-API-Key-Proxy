@@ -109,13 +109,31 @@ def convert_responses_input_to_messages(
         elif item_type == "function_call_output":
             call_id = item.get("call_id", "")
             output = item.get("output", "")
-            if isinstance(output, dict) or isinstance(output, list):
+            # Chat tool messages are text-only. Lift image parts into an adjacent
+            # user message, preserving the tool result ID and never tokenizing
+            # image bytes as JSON text. Codex converts these back to input_image.
+            images = []
+            if isinstance(output, list) and any(
+                isinstance(part, dict) and part.get("type") in ("input_image", "image_url")
+                for part in output
+            ):
+                parts = _convert_input_content(output)
+                images = [part for part in parts if part["type"] == "image_url"]
+                output = "\n".join(part["text"] for part in parts if part["type"] == "text")
+            elif isinstance(output, list) and all(
+                isinstance(part, dict) and part.get("type") in ("input_text", "text")
+                for part in output
+            ):
+                output = _flatten_content(output)
+            elif isinstance(output, (dict, list)):
                 output = json.dumps(output)
             messages.append({
                 "role": "tool",
                 "tool_call_id": call_id,
                 "content": output,
             })
+            if images:
+                messages.append({"role": "user", "content": images})
 
         # Reasoning items are informational — skip them for the Chat Completions pipeline
 
@@ -262,6 +280,24 @@ def build_item_id(prefix: str = "msg") -> str:
     return f"{prefix}_{uuid.uuid4().hex[:24]}"
 
 
+def _convert_usage(usage: Any) -> Dict[str, Any]:
+    """Keep inclusive token totals and map optional cache/reasoning details."""
+    usage = usage or {}
+    result = {
+        "input_tokens": usage.get("prompt_tokens", 0),
+        "output_tokens": usage.get("completion_tokens", 0),
+        "total_tokens": usage.get("total_tokens", 0),
+    }
+    for source, target, field in (
+        ("prompt_tokens_details", "input_tokens_details", "cached_tokens"),
+        ("completion_tokens_details", "output_tokens_details", "reasoning_tokens"),
+    ):
+        details = usage.get(source) or {}
+        if details.get(field) is not None:
+            result[target] = {field: details[field]}
+    return result
+
+
 def convert_chat_response_to_responses(
     cc_response: Any,
     response_id: str,
@@ -311,14 +347,9 @@ def convert_chat_response_to_responses(
             status = "incomplete"
 
     # Build usage in Responses API format
-    usage_raw = resp_dict.get("usage", {})
-    usage = {
-        "input_tokens": usage_raw.get("prompt_tokens", 0),
-        "output_tokens": usage_raw.get("completion_tokens", 0),
-        "total_tokens": usage_raw.get("total_tokens", 0),
-    }
+    usage = _convert_usage(resp_dict.get("usage"))
 
-    return {
+    result = {
         "id": response_id,
         "object": "response",
         "created_at": resp_dict.get("created", int(time.time())),
@@ -328,6 +359,17 @@ def convert_chat_response_to_responses(
         "usage": usage,
         "metadata": request_data.get("metadata", {}),
     }
+    if resp_dict.get("error") is not None or not choices:
+        error = resp_dict.get("error") or {"message": "Upstream response contained no choices"}
+        if not isinstance(error, dict):
+            error = {"message": str(error)}
+        result["status"] = "failed"
+        result["error"] = {
+            "code": error.get("code") or error.get("type") or "server_error",
+            "message": error.get("message") or "Upstream request failed",
+        }
+        result["output"] = []
+    return result
 
 
 class ResponsesStreamConverter:
@@ -357,6 +399,7 @@ class ResponsesStreamConverter:
         self.finish_reason: Optional[str] = None
         self.output_index: Optional[int] = None
         self.next_output_index = 0
+        self.terminal = False
 
     def _sse(self, event_type: str, data: Dict[str, Any]) -> str:
         data["type"] = event_type
@@ -381,6 +424,9 @@ class ResponsesStreamConverter:
         """Convert a single SSE chunk string from Chat Completions format to Responses API events."""
         events = ""
 
+        if self.terminal:
+            return ""
+
         if not chunk_str.strip() or not chunk_str.startswith("data:"):
             return ""
 
@@ -399,6 +445,9 @@ class ResponsesStreamConverter:
                 self.model = chunk["model"]
             events += self._sse("response.created", {"response": self._build_response_shell()})
             events += self._sse("response.in_progress", {"response": self._build_response_shell()})
+
+        if chunk.get("error") is not None:
+            return events + self.fail(chunk["error"])
 
         choices = chunk.get("choices", [])
         if not choices:
@@ -517,8 +566,35 @@ class ResponsesStreamConverter:
 
         return events
 
+    def fail(self, error: Any) -> str:
+        """Emit exactly one terminal failure, including after partial output."""
+        if self.terminal:
+            return ""
+        self.terminal = True
+        if not isinstance(error, dict):
+            error = {"message": str(error)}
+        response = self._build_response_shell("failed")
+        response["error"] = {
+            "code": error.get("code") or error.get("type") or "server_error",
+            "message": error.get("message") or "Upstream request failed",
+        }
+        if self.usage is not None:
+            response["usage"] = _convert_usage(self.usage)
+        return self._sse("response.failed", {"response": response})
+
+    def finish(self) -> str:
+        """Reject an EOF without a terminal marker instead of empty success."""
+        if self.terminal:
+            return ""
+        return self.fail({"code": "incomplete_stream", "message": "Upstream stream ended without [DONE]"})
+
     def _finalize(self) -> str:
-        """Emit final events: output_item.done, content_part.done, response.completed."""
+        """Emit final events once, only after an explicit finish reason."""
+        if self.terminal:
+            return ""
+        if self.finish_reason is None:
+            return self.fail({"code": "incomplete_stream", "message": "Upstream stream ended without a finish reason"})
+        self.terminal = True
         events = ""
         output_items_by_index = []
 
@@ -605,11 +681,7 @@ class ResponsesStreamConverter:
         # Build usage
         usage = None
         if self.usage:
-            usage = {
-                "input_tokens": self.usage.get("prompt_tokens", 0),
-                "output_tokens": self.usage.get("completion_tokens", 0),
-                "total_tokens": self.usage.get("total_tokens", 0),
-            }
+            usage = _convert_usage(self.usage)
 
         final_response = self._build_response_shell(status)
         final_response["output"] = output_items
@@ -677,7 +749,13 @@ def _convert_input_content(content: Any) -> Any:
             url = part.get("image_url", "")
             if isinstance(url, dict):
                 url = url.get("url", "")
-            cc_parts.append({"type": "image_url", "image_url": {"url": url}})
+            image = {"url": url}
+            detail = part.get("detail")
+            if isinstance(part.get("image_url"), dict):
+                detail = part["image_url"].get("detail", detail)
+            if detail is not None:
+                image["detail"] = detail
+            cc_parts.append({"type": "image_url", "image_url": image})
     return cc_parts
 
 

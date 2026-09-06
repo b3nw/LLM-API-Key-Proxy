@@ -1234,16 +1234,14 @@ async def responses_api(
                         events = converter.convert_chunk(chunk_str)
                         if events:
                             yield events
+                    events = converter.finish()
+                    if events:
+                        yield events
                 except Exception as e:
                     logging.error(f"Error during responses stream: {e}")
-                    error_event = {
-                        "type": "error",
-                        "error": {
-                            "type": "server_error",
-                            "message": str(e),
-                        },
-                    }
-                    yield f"event: error\ndata: {json.dumps(error_event)}\n\n"
+                    events = converter.fail({"type": "server_error", "message": str(e)})
+                    if events:
+                        yield events
 
             return StreamingResponse(
                 responses_stream_wrapper(),

@@ -620,7 +620,7 @@ class TrackingEngine:
 
         # Check if cooldown qualifies as exhaustion
         cooldown_duration = cooldown_until - now
-        if cooldown_duration >= self._config.exhaustion_cooldown_threshold:
+        if reason != "model_not_supported" and cooldown_duration >= self._config.exhaustion_cooldown_threshold:
             if self._config.fair_cycle.enabled and model_or_group:
                 fair_cycle_key = self._resolve_fair_cycle_key(model_or_group)
                 self._mark_exhausted(state, fair_cycle_key, f"cooldown_{reason}")

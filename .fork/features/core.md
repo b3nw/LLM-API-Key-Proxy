@@ -229,3 +229,15 @@ Notes:
 - `RotatingClient.acompletion()` routing logic unchanged
 - `list_models()` and `get_model()` unchanged
 - Ref: b3nw/LLM-API-Key-Proxy#110
+
+## 06.September.2026 — Preserve Responses usage, multimodal input, and failure semantics
+
+Branch: `fix/core-responses-integrity-upstream`; base: `dev`.
+
+- Preserve cached/reasoning token details, including explicit zeros, through Responses and Codex conversions.
+- Keep image tool output out of serialized tool text; preserve call IDs, text, image URLs, and image detail.
+- Emit one terminal failure for upstream errors or truncated streams instead of empty completion.
+- Classify streamed exceptions with null data correctly; stop context-overflow rotation and scope Codex model-eligibility cooldowns to the affected credential/model without exhausting global quota.
+- Files: `src/proxy_app/{main,responses_compat}.py`, `src/rotator_library/client/executor.py`, `src/rotator_library/error_handler.py`, `src/rotator_library/providers/codex_provider.py`, `src/rotator_library/usage/{manager,tracking/engine}.py`, `tests/test_responses_compat.py`, `tests/test_responses_integrity.py`.
+- Verification: changed-file `uv run python3 -m py_compile` and `uv run ruff check --select F401,F811,F821,E9`; full `uv run --with pytest --with pytest-asyncio --with pytest-mock python3 -m pytest -q`. Exact results accompany the PR evidence.
+- Boundaries: no model aliases, deployment configuration, dependency changes, speculative affinity changes, or claim that intermittent upstream cache misses are eliminated.

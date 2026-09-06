@@ -1155,7 +1155,7 @@ class RequestExecutor:
 
                                 except StreamedAPIError as e:
                                     last_exception = e
-                                    original = getattr(e, "data", e)
+                                    original = getattr(e, "data", None) or e
                                     classified = classify_error(original, provider)
                                     log_failure(
                                         api_key=cred,

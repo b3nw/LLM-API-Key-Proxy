@@ -873,6 +873,11 @@ def classify_error(e: Exception, provider: Optional[str] = None) -> ClassifiedEr
     Returns:
         ClassifiedError with error_type, status_code, retry_after, etc.
     """
+    from .core.errors import StreamedAPIError
+
+    if isinstance(e, StreamedAPIError) and getattr(e, "data", None) is not None:
+        return classify_error(e.data, provider)
+
     if isinstance(e, dict):
         payload = e.get("error", e)
         if isinstance(payload, dict):
@@ -921,6 +926,32 @@ def classify_error(e: Exception, provider: Optional[str] = None) -> ClassifiedEr
                 )
 
     error_text = str(e)
+    if isinstance(e, httpx.HTTPStatusError):
+        error_text += " " + e.response.text
+    lowered = error_text.lower()
+    if any(marker in lowered for marker in (
+        "context_length_exceeded", "context_window_exceeded",
+        "exceeds the context window", "maximum context length",
+    )):
+        return ClassifiedError(
+            error_type="context_window_exceeded", original_exception=e, status_code=400
+        )
+    if provider == "codex" and "model" in lowered and (
+        "not supported when using codex with a chatgpt account" in lowered
+        or "not supported for this account" in lowered
+    ):
+        # Eligibility belongs to this credential/model pair, not all models or
+        # all credentials. A bounded model cooldown allows later recovery.
+        return ClassifiedError(
+            error_type="model_not_supported", original_exception=e,
+            status_code=400, retry_after=900,
+        )
+    if isinstance(e, (StreamedAPIError, dict)) and any(marker in lowered for marker in (
+        "server_is_overloaded", "servers are currently overloaded", "service_unavailable_error",
+    )):
+        return ClassifiedError(
+            error_type="server_error", original_exception=e, status_code=503
+        )
     error_type_name = type(e).__name__
     if (
         "MidStreamFallbackError" in error_type_name
@@ -1260,8 +1291,6 @@ def classify_error(e: Exception, provider: Optional[str] = None) -> ClassifiedEr
         )
 
     # StreamedAPIError: errors received inside SSE streams (e.g. Codex response.failed)
-    from .core.errors import StreamedAPIError
-
     if isinstance(e, StreamedAPIError):
         error_msg = str(e).lower()
         if any(

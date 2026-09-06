@@ -2587,6 +2587,11 @@ class UsageManager:
                     f"applying {cooldown_duration:.0f}s cooldown (backoff={backoff})"
                 )
 
+            elif error.error_type == "model_not_supported":
+                # Do not block the shared Codex quota group or unrelated models.
+                group_key = normalized_model
+                cooldown_duration = cooldown_duration or 900
+
             # Mark exhausted for quota errors with long cooldown
             elif error.error_type == "quota_exceeded":
                 if (

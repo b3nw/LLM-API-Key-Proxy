@@ -336,9 +336,14 @@ class ProxiedClientPool:
         provider: str,
         credential: str,
         stable_id: str,
+        resolved_spec: Optional[ProxySpec] = None,
     ) -> httpx.AsyncClient:
         """Get or create an httpx client for the resolved proxy."""
-        spec = self.config.resolve(provider, credential, stable_id)
+        spec = (
+            resolved_spec
+            if resolved_spec is not None
+            else self.config.resolve(provider, credential, stable_id)
+        )
         proxy_url = spec.url if spec else None
 
         if proxy_url in self._clients:
